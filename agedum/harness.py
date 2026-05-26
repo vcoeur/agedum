@@ -1,16 +1,26 @@
 """Compile the agent-neutral source into a harness's native on-disk layout.
 
-Currently implements the Claude harness: ``AGENTS.md`` → ``CLAUDE.md`` and
-``.agents/skills/<name>/`` → ``.claude/skills/<name>/`` (the base ``SKILL.md``
-merged with an optional ``SKILL.claude.md`` overlay; task files and scripts copied
-verbatim; other harnesses' overlays skipped).
+Currently implements the Claude harness. Each scope is placed at *its own* Claude
+location — they are never merged:
 
-The compiled tree lives in a throwaway directory; `Plan` says where each piece
-should be mounted in the project view (see `agedum.launcher`).
+* **project** ``AGENTS.md`` → ``./CLAUDE.md``;
+  ``.agents/skills/<n>/`` → ``./.claude/skills/<n>/``
+* **global**  ``~/.config/agents/AGENTS.md`` → ``~/.claude/CLAUDE.md``;
+  ``~/.agents/skills/<n>/`` → ``~/.claude/skills/<n>/``
+
+Claude reads both scopes natively (user-scope `~/.claude/` + project-scope `./`), so
+keeping them separate preserves the scope distinction. The compiled tree lives in a
+throwaway directory; `Plan` records absolute (src → target) binds the launcher
+mounts into the namespace.
+
+Per skill: the base ``SKILL.md`` (minimal `name`/`description`) is merged with an
+optional ``SKILL.claude.md`` overlay; task files and scripts are copied verbatim;
+other harnesses' ``SKILL.<h>.md`` overlays are skipped.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,54 +32,75 @@ from agedum.sources import Source
 
 @dataclass
 class Plan:
-    """How to present a compiled tree inside the project's mount view.
+    """Absolute (compiled-source → mount-target) binds the launcher injects.
 
-    `tmpfs` dirs are masked (ephemeral) so neither injected content nor the
-    bwrap-created mountpoints leak onto the host; `binds` place compiled files at
-    their project-relative targets.
+    Targets are absolute and may be inside the project (``./CLAUDE.md``) or under the
+    user's Claude config dir (``~/.claude/...``) — that is how global vs project scope
+    stay distinct.
     """
 
-    tmpfs: list[str] = field(default_factory=list)
-    binds: list[tuple[Path, str]] = field(default_factory=list)
+    binds: list[tuple[Path, Path]] = field(default_factory=list)
+
+
+def claude_config_dir() -> Path:
+    """Claude's user-scope config dir — ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(override) if override else Path.home() / ".claude"
 
 
 def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
-    """Render the global + project source into Claude's layout under `dest`.
+    """Render each scope into its own Claude location under `dest`; return the `Plan`.
 
-    Global scope is **folded into the project injection**: global instructions are
-    prepended to the in-project `CLAUDE.md`, and global skills are placed alongside
-    project skills under `.claude/skills/` (a project skill overrides a global one of
-    the same name). Nothing is written into the user's real `~/.claude`.
+    Project → ``./CLAUDE.md`` + ``./.claude/skills``; global → ``~/.claude/CLAUDE.md``
+    + ``~/.claude/skills``. The two are placed separately (never concatenated); Claude
+    merges them at runtime.
     """
     plan = Plan()
 
-    # Instructions: global AGENTS.md then project AGENTS.md -> one CLAUDE.md.
-    parts: list[str] = []
-    if global_ is not None and global_.agents_md is not None:
-        parts.append(global_.agents_md.read_text())
-    if project.agents_md is not None:
-        parts.append(project.agents_md.read_text())
-    if parts:
-        claude_md = dest / "CLAUDE.md"
-        claude_md.write_text("\n\n".join(p.strip("\n") for p in parts) + "\n")
-        plan.binds.append((claude_md, "CLAUDE.md"))
+    # Project scope -> in-tree Claude paths.
+    _compile_scope(
+        plan,
+        project,
+        dest / "project",
+        claude_md_target=project.root / "CLAUDE.md",
+        skills_target=project.root / ".claude" / "skills",
+    )
 
-    # Skills: global first, project second (project wins on name) -> .claude/skills/.
-    skill_dirs: dict[str, Path] = {}
-    for src in (global_, project):
-        if src is None or src.skills_dir is None:
-            continue
-        for d in sorted(p for p in src.skills_dir.iterdir() if p.is_dir()):
-            skill_dirs[d.name] = d
-    if skill_dirs:
-        skills_root = dest / ".claude" / "skills"
-        for name, skill_dir in sorted(skill_dirs.items()):
-            _compile_claude_skill(skill_dir, skills_root / name)
-        # Mask `.claude` with a tmpfs, then bind the compiled skills inside it.
-        plan.tmpfs.append(".claude")
-        plan.binds.append((skills_root, ".claude/skills"))
+    # Global scope -> the user-scope Claude config dir (separate from project).
+    if global_ is not None:
+        cc = claude_config_dir()
+        _compile_scope(
+            plan,
+            global_,
+            dest / "global",
+            claude_md_target=cc / "CLAUDE.md",
+            skills_target=cc / "skills",
+        )
 
     return plan
+
+
+def _compile_scope(
+    plan: Plan,
+    source: Source,
+    dest: Path,
+    *,
+    claude_md_target: Path,
+    skills_target: Path,
+) -> None:
+    if source.agents_md is not None:
+        out = dest / "CLAUDE.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(source.agents_md.read_text())
+        plan.binds.append((out, claude_md_target))
+
+    if source.skills_dir is not None:
+        skill_dirs = sorted(p for p in source.skills_dir.iterdir() if p.is_dir())
+        if skill_dirs:
+            skills_out = dest / "skills"
+            for skill_dir in skill_dirs:
+                _compile_claude_skill(skill_dir, skills_out / skill_dir.name)
+            plan.binds.append((skills_out, skills_target))
 
 
 def _compile_claude_skill(src: Path, out: Path) -> None:
