@@ -77,7 +77,7 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
 def run_virtualfs(project_root: Path, plan: Plan, command: list[str]) -> int:
     """Run `command` with `plan` injected; return its exit code. Sweeps stub mountpoints."""
     assert_safe(project_root, plan)
-    argv = build_bwrap_argv(plan, command)
+    argv = build_bwrap_argv(plan, [*command, *plan.extra_args])
     candidates = _cleanup_candidates(plan)
     pre_existing = {p: p.exists() for p in candidates}
     try:

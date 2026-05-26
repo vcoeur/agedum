@@ -4,6 +4,18 @@ from agedum import __version__
 from agedum.cli import main as cli
 
 
+def _capture_run(monkeypatch):
+    captured = {}
+
+    def fake_run(root, plan, command):
+        captured["command"] = command
+        captured["plan"] = plan
+        return 0
+
+    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
+    return captured
+
+
 def test_version(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["agedum", "--version"])
     cli.app()
@@ -13,25 +25,29 @@ def test_version(monkeypatch, capsys):
 def test_help_when_no_args(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["agedum"])
     cli.app()
-    assert "usage: agedum --claude" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "usage: agedum" in out
+    assert "--claude" in out and "--kimi" in out
 
 
-def test_passes_everything_after_dashdash_as_command(monkeypatch):
-    captured = {}
-
-    def fake_run(root, plan, command):
-        captured["command"] = command
-        captured["plan"] = plan
-        return 0
-
-    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
-    # isolate CLI parsing from real compile / global-scope lookups
-    monkeypatch.setattr(cli, "compile_claude", lambda project, global_, dest: None)
+def test_claude_passes_everything_after_dashdash(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
     monkeypatch.setattr("sys.argv", ["agedum", "--claude", "--", "claude", "--model", "x", "-p"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["claude", "--model", "x", "-p"]
+
+
+def test_kimi_mode_recognised(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--kimi", "--", "kimi", "-p", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["kimi", "-p", "hi"]
 
 
 def test_missing_dashdash_errors(monkeypatch):
