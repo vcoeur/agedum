@@ -25,5 +25,5 @@ site/
 .idea/
 .vscode/
 
-# Claude scratch (per global convention)
-.claude/*.local.*
+# Claude
+.claude
