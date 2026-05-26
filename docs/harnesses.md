@@ -54,18 +54,25 @@ agedum --claude -- claude --model sonnet -p "review this change"
 
 ## `--kimi` { #kimi }
 
-kimi does **not** discover instructions from a fixed file path — they are supplied via
-a flag — so agedum *augments* the command in addition to binding files. Skills, by
-contrast, kimi reads from directories, so those are injected as binds like Claude's.
+kimi reads the **project** `AGENTS.md` from the filesystem natively, but has **no
+user-scope `AGENTS.md`** — so agedum leaves the project instructions in place and
+injects only the global ones, via a flag. Skills, both scopes, are injected as binds
+like Claude's.
 
-**Instructions** — the global and project `AGENTS.md` (in that order) are merged into a
-single transient agent-file and appended to your command:
+**Project instructions** — kimi merges every `AGENTS.md` from the project root (the
+nearest `.git`) down to the working directory into its system prompt. The
+agent-neutral source's `AGENTS.md` already sits at the project root, which is exactly
+where kimi looks, so **agedum injects nothing** for it — and never tries to, since that
+root `AGENTS.md` is typically git-tracked.
+
+**Global instructions** — because kimi has no user-scope `AGENTS.md`, the global
+`AGENTS.md` is injected via a custom agent-file appended to your command:
 
 ```text
 … kimi -p "…"  --agent-file /tmp/agedum-kimi-XXXX/agent.yaml
 ```
 
-The generated `agent.yaml` extends kimi's default agent and injects the merged
+The generated `agent.yaml` extends kimi's default agent and injects the **global**
 instructions as `system_prompt_args.ROLE_ADDITIONAL`:
 
 ```yaml
@@ -75,9 +82,11 @@ agent:
   system_prompt_args:
     ROLE_ADDITIONAL: |
       <global AGENTS.md>
-
-      <project AGENTS.md>
 ```
+
+This coexists with native discovery: the default agent's system prompt fills
+`ROLE_ADDITIONAL` from the agent-file (global) and a separate slot from the merged
+project `AGENTS.md` (native) — so both scopes apply, each by the right mechanism.
 
 **Skills** — bound into the directories kimi reads automatically:
 
@@ -88,11 +97,10 @@ agent:
 
 - Skills use the `SKILL.kimi.md` overlay where present; assets are copied verbatim.
 - The project-local `./.kimi/skills/` bind matches the layout kimi already auto-reads,
-  so there is **no config rewrite** — `extra_args` carries only `--agent-file`, never a
-  `--config` override.
-- Unlike Claude, kimi's instructions *are* merged across scopes (one `--agent-file`
-  holding global then project), because kimi takes a single additional-role prompt.
-  Skills stay split across the two directories.
+  so there is **no config rewrite** — `extra_args` carries only `--agent-file` (and only
+  when a global `AGENTS.md` exists), never a `--config` override.
+- A project with no global scope needs no `--agent-file` at all: its `AGENTS.md` is read
+  natively. This mirrors the Claude harness — each scope kept distinct, never merged.
 
 ```bash
 agedum --kimi -- kimi -p "explain this code"

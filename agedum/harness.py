@@ -169,23 +169,27 @@ def kimi_config_dir() -> Path:
 
 
 def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
-    """Render the source for kimi-cli. kimi is flag/config-driven (not pure
-    path-discovery), so:
+    """Render the source for kimi-cli.
 
-    * **instructions** (global + project ``AGENTS.md``, merged) → a transient
-      ``--agent-file`` YAML appended to the command;
-    * **global skills** → ``~/.kimi/skills/`` (kimi auto-merges them) via a bind;
+    kimi reads the **project** ``AGENTS.md`` natively — it merges every ``AGENTS.md``
+    from the project root (nearest ``.git``) down to the work dir into the system
+    prompt's ``KIMI_AGENTS_MD`` slot — so the source file is already where kimi looks
+    and agedum injects nothing for it. kimi has **no user-scope ``AGENTS.md``**, so the
+    **global** ``AGENTS.md`` is injected via a custom ``--agent-file`` that extends the
+    default agent (``system_prompt_args.ROLE_ADDITIONAL``). The two coexist: the
+    agent-file fills ``ROLE_ADDITIONAL`` while native discovery fills ``KIMI_AGENTS_MD``.
+
+    Skills are binds:
+
+    * **global skills** → ``~/.kimi/skills/`` (kimi auto-merges them);
     * **project skills** → ``./.kimi/skills/`` (project-local; kimi auto-reads it).
     """
     plan = Plan()
 
-    parts: list[str] = []
+    # Global instructions -> a custom --agent-file (kimi has no user-scope AGENTS.md).
+    # Project instructions are read natively from ./AGENTS.md, so they are left in place.
     if global_ is not None and global_.agents_md is not None:
-        parts.append(global_.agents_md.read_text())
-    if project.agents_md is not None:
-        parts.append(project.agents_md.read_text())
-    if parts:
-        instructions = "\n\n".join(p.strip("\n") for p in parts) + "\n"
+        instructions = global_.agents_md.read_text().strip("\n") + "\n"
         agent_file = dest / "agent.yaml"
         agent_file.parent.mkdir(parents=True, exist_ok=True)
         agent_file.write_text(_kimi_agent_file_yaml(instructions))

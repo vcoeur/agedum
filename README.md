@@ -24,9 +24,10 @@ with an optional `SKILL.claude.md` overlay).
 > reads both. Only those two `~/.claude` paths are overlaid for the child — your
 > `~/.claude.json` auth and other settings are untouched.
 >
-> **kimi** (`--kimi`) is also supported. Instructions can only be injected via a
-> flag, so agedum *augments* the command: merged global+project `AGENTS.md` → a
-> transient `--agent-file` YAML. Skills are binds: global → `~/.kimi/skills/`,
+> **kimi** (`--kimi`) is also supported. kimi reads the project `AGENTS.md` natively,
+> so agedum leaves it in place; it has no user-scope `AGENTS.md`, so the global
+> `AGENTS.md` is injected via a transient `--agent-file` YAML (no `--agent-file` is
+> added when there's no global scope). Skills are binds: global → `~/.kimi/skills/`,
 > project → `./.kimi/skills/` (both auto-read by kimi). Other harnesses (opencode)
 > are follow-ups. Linux-only; requires `bwrap` on PATH.
 

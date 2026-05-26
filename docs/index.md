@@ -10,9 +10,10 @@ description: agedum keeps a single AGENTS.md + .agents/skills/ source and render
 > Latin *agedum* — "go on! / get going!"
 
 Agent CLIs each want their instructions and skills in their own place and format:
-Claude reads `CLAUDE.md` and `.claude/skills/`, kimi takes an `--agent-file` and a
-`~/.kimi/skills/` tree, and the next one will be different again. `agedum` lets you
-keep **one** agent-neutral source and renders it for whichever harness you launch.
+Claude reads `CLAUDE.md` and `.claude/skills/`, kimi reads a project `AGENTS.md` but
+needs an `--agent-file` for user-scope instructions plus a `~/.kimi/skills/` tree, and
+the next one will be different again. `agedum` lets you keep **one** agent-neutral
+source and renders it for whichever harness you launch.
 
 - **Instructions** live in a root [`AGENTS.md`](source-shape.md#agentsmd) — plain markdown.
 - **Skills** live in [`.agents/skills/<name>/`](source-shape.md#skills) as `SKILL.md`,
@@ -58,7 +59,7 @@ copy-pasting into each one's bespoke layout. `agedum` is the translation layer:
 flowchart LR
   src["AGENTS.md + .agents/skills/<br/>(project + global)"] --> agedum
   agedum -->|"--claude"| cl["CLAUDE.md + .claude/skills/"]
-  agedum -->|"--kimi"| ki["--agent-file + .kimi/skills/"]
+  agedum -->|"--kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   ns --> cmd["your command<br/>(claude / kimi / …)"]

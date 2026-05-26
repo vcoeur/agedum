@@ -120,11 +120,13 @@ def test_compile_kimi(tmp_path, monkeypatch):
     dest.mkdir()
     plan = compile_kimi(project, global_, dest)
 
-    # Instructions -> one merged --agent-file YAML (global + project).
+    # Instructions -> --agent-file holds ONLY the global AGENTS.md. The project
+    # AGENTS.md is read natively by kimi (./AGENTS.md), so it is NOT injected here.
     assert "--agent-file" in plan.extra_args
     yaml_text = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1]).read_text()
     assert "ROLE_ADDITIONAL:" in yaml_text
-    assert "GLOBAL-INSTR" in yaml_text and "PROJECT-INSTR" in yaml_text
+    assert "GLOBAL-INSTR" in yaml_text
+    assert "PROJECT-INSTR" not in yaml_text
 
     # Global skills -> bound into ~/.kimi/skills.
     assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
@@ -136,3 +138,19 @@ def test_compile_kimi(tmp_path, monkeypatch):
     assert "name: pskill" in pskill_md
     assert "kimi note" in pskill_md
     assert "--config" not in plan.extra_args  # no config rewrite
+
+
+def test_compile_kimi_project_only_injects_no_agent_file(tmp_path):
+    # A project with its own AGENTS.md but no global scope: kimi reads ./AGENTS.md
+    # natively, so there is nothing to inject — no --agent-file is produced.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_kimi(project, None, dest)
+
+    assert "--agent-file" not in plan.extra_args
+    assert plan.binds == []

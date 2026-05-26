@@ -49,9 +49,10 @@ flowchart LR
   gSk["~/.agents/skills/"] --> gClSk["~/.claude/skills/"]
 ```
 
-The harness-specific destinations differ for kimi (a generated `--agent-file` plus
-`~/.kimi/skills/` and `./.kimi/skills/`). See [Harnesses](harnesses.md) for the full
-per-harness mapping.
+The destinations differ for kimi: the project `AGENTS.md` is read natively at its
+source location (no injection), the global `AGENTS.md` is injected via a generated
+`--agent-file`, and skills bind to `~/.kimi/skills/` and `./.kimi/skills/`. See
+[Harnesses](harnesses.md) for the full per-harness mapping.
 
 ## Only the two scope paths are touched
 

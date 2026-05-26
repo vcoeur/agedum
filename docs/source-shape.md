@@ -34,7 +34,8 @@ agent — house style, conventions, what to do and not do. agedum copies it thro
 each harness's instruction location unchanged:
 
 - **Claude** → `CLAUDE.md` (its content is **not** rewritten — only relocated).
-- **kimi** → folded into a generated `--agent-file` as the agent's additional role
+- **kimi** → the project `AGENTS.md` is read natively at its source location; the global
+  `AGENTS.md` is folded into a generated `--agent-file` as the agent's additional role
   prompt.
 
 See [Harnesses](harnesses.md) for exactly where it lands per harness, and

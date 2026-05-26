@@ -9,10 +9,13 @@ private mount namespace at launch. Implemented: **Claude** and **kimi** harnesse
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
   `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
   (only those two `~/.claude` paths overlaid; `~/.claude.json` auth untouched).
-- **kimi** — instructions inject only via a flag, so agedum *augments* the command:
-  merged global+project `AGENTS.md` → a transient `--agent-file` YAML. Skills are
-  binds: global → `~/.kimi/skills/`, project → `./.kimi/skills/` (both auto-read).
-  Matches condash's prior kimi layout; uniform with the Claude harness.
+- **kimi** — project `AGENTS.md` is read natively (kimi merges `AGENTS.md` from the
+  project root down to the work dir into `KIMI_AGENTS_MD`), so agedum leaves it in
+  place. kimi has no user-scope `AGENTS.md`, so the global `AGENTS.md` is injected via a
+  transient `--agent-file` YAML (`extend: default`, `system_prompt_args.ROLE_ADDITIONAL`)
+  — appended only when a global scope exists; the two coexist. Skills are binds: global
+  → `~/.kimi/skills/`, project → `./.kimi/skills/` (both auto-read). Matches condash's
+  prior kimi layout; uniform with the Claude harness.
 
 Follow-ups: opencode, `--<harness>-variant` composition.
 
