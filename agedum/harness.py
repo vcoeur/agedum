@@ -20,10 +20,8 @@ other harnesses' ``SKILL.<h>.md`` overlays are skipped.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -177,7 +175,7 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     * **instructions** (global + project ``AGENTS.md``, merged) → a transient
       ``--agent-file`` YAML appended to the command;
     * **global skills** → ``~/.kimi/skills/`` (kimi auto-merges them) via a bind;
-    * **project skills** → a temp dir registered through ``--config`` (`extra_skill_dirs`).
+    * **project skills** → ``./.kimi/skills/`` (project-local; kimi auto-reads it).
     """
     plan = Plan()
 
@@ -199,11 +197,12 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
         if out is not None:
             plan.binds.append((out, kimi_config_dir() / "skills"))
 
-    # Project skills -> a temp dir registered via --config extra_skill_dirs.
+    # Project skills -> ./.kimi/skills (project-local; kimi auto-reads it, matching
+    # condash's prior layout — uniform with the Claude harness, no config rewrite).
     if project.skills_dir is not None:
         out = _compile_skill_tree(project.skills_dir, dest / "project-skills")
         if out is not None:
-            plan.extra_args += ["--config", _kimi_config_json([out])]
+            plan.binds.append((out, project.root / ".kimi" / "skills"))
 
     return plan
 
@@ -231,18 +230,3 @@ def _kimi_agent_file_yaml(instructions: str) -> str:
         "    ROLE_ADDITIONAL: |\n"
         f"      {indented}\n"
     )
-
-
-def _kimi_config_json(extra_skill_dirs: list[Path]) -> str:
-    """A kimi ``--config`` JSON that registers `extra_skill_dirs`, preserving the
-    user's existing ``~/.kimi/config.toml`` (models / providers / auth) if present."""
-    config: dict = {}
-    cfg_file = kimi_config_dir() / "config.toml"
-    if cfg_file.is_file():
-        try:
-            config = tomllib.loads(cfg_file.read_text())
-        except (tomllib.TOMLDecodeError, OSError):
-            config = {}
-    existing = config.get("extra_skill_dirs") or []
-    config["extra_skill_dirs"] = [*existing, *(str(d) for d in extra_skill_dirs)]
-    return json.dumps(config)

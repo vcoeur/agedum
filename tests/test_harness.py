@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from agedum.harness import claude_config_dir, compile_claude, compile_kimi, kimi_config_dir
@@ -131,11 +130,9 @@ def test_compile_kimi(tmp_path, monkeypatch):
     assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
     assert (_src_for(plan, home / ".kimi" / "skills") / "gskill" / "SKILL.md").exists()
 
-    # Project skills -> --config extra_skill_dirs; user config preserved, kimi overlay applied.
-    assert "--config" in plan.extra_args
-    cfg = json.loads(plan.extra_args[plan.extra_args.index("--config") + 1])
-    assert cfg["default_model"] == "x"
-    assert len(cfg["extra_skill_dirs"]) == 1
-    pskill_md = (Path(cfg["extra_skill_dirs"][0]) / "pskill" / "SKILL.md").read_text()
+    # Project skills -> ./.kimi/skills (project-local bind), kimi overlay applied.
+    assert (proj / ".kimi" / "skills") in [t for _, t in plan.binds]
+    pskill_md = (_src_for(plan, proj / ".kimi" / "skills") / "pskill" / "SKILL.md").read_text()
     assert "name: pskill" in pskill_md
     assert "kimi note" in pskill_md
+    assert "--config" not in plan.extra_args  # no config rewrite

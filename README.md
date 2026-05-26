@@ -24,11 +24,11 @@ with an optional `SKILL.claude.md` overlay).
 > reads both. Only those two `~/.claude` paths are overlaid for the child — your
 > `~/.claude.json` auth and other settings are untouched.
 >
-> **kimi** (`--kimi`) is also supported. kimi is flag/config-driven, so agedum
-> *augments* the command: merged instructions → a `--agent-file` YAML; global skills
-> → `~/.kimi/skills/` (bind); project skills → `--config extra_skill_dirs` (your
-> `~/.kimi/config.toml` is preserved). Other harnesses (opencode) are follow-ups.
-> Linux-only; requires `bwrap` on PATH.
+> **kimi** (`--kimi`) is also supported. Instructions can only be injected via a
+> flag, so agedum *augments* the command: merged global+project `AGENTS.md` → a
+> transient `--agent-file` YAML. Skills are binds: global → `~/.kimi/skills/`,
+> project → `./.kimi/skills/` (both auto-read by kimi). Other harnesses (opencode)
+> are follow-ups. Linux-only; requires `bwrap` on PATH.
 
 ## Usage
 
