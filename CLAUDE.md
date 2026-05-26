@@ -1,14 +1,19 @@
 # agedum — operating instructions
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
-(`AGENTS.md` + `.agents/skills/`), translating per harness at launch. **Currently a
-scaffold** — the resolve/translate/exec pipeline is not implemented yet.
+(`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
+private mount namespace at launch. Implemented: the **Claude** harness at **project +
+global scope** (global `~/.config/agents/AGENTS.md` + `~/.agents/skills/` folded into
+the project injection; nothing touches the real `~/.claude`). Follow-ups: other
+harnesses, variant composition.
 
 ## Stack
 
 - Python ≥ 3.12, managed with **uv** (`uv sync`, `uv run`). Don't use raw pip/venv.
-- CLI built with **Typer** (+ Rich for output). Entry point: `agedum.cli.main:app`
-  (`[project.scripts]`).
+- **Manual `argv` parsing** (not Typer) so everything after `--` is opaque
+  passthrough; Rich for stderr output. Entry point: `agedum.cli.main:app`
+  (`[project.scripts]`). Deps: `pyyaml` (skill frontmatter merge), `rich`.
+- Runtime dep: **`bwrap`** (bubblewrap) on PATH for the virtual-FS launch. Linux-only.
 - Flat package layout: the `agedum/` package sits at the repo root (no `src/`).
 - Version is **dynamic via hatch-vcs** — derived from the git tag `vX.Y.Z` at build
   time, never committed. A source tree with no tag resolves to a dev version;
@@ -33,8 +38,22 @@ Run `make format` after every change. Commit `uv.lock`; `.venv/` stays gitignore
 - `.github/workflows/release.yml` — on a `v*` tag push, `uv build` then publish to
   **PyPI** via OIDC trusted publishing (no token in the repo). Tag only after merge.
 
-## The intended CLI contract
+## CLI contract
 
-agedum is invoked as the agent binary: `agedum` (interactive launch) or
-`agedum --run "<PROMPT>"` (one-shot task). Keep that surface stable — it is the
-contract the calling launcher/dashboard drives.
+`agedum <context-flags> -- <command...>`. Flags before `--` choose the virtual-file
+context (`--claude`); everything after `--` is the child argv, run verbatim inside
+the namespace. Context and command are decoupled (one context can front any
+command); the flag space is open for future `--<harness>` modes and variants.
+
+Module layout: `sources.py` (locate `AGENTS.md` + `.agents/skills/`), `harness.py`
+(`compile_claude` → native layout + a mount `Plan`), `launcher.py` (`build_bwrap_argv`,
+`assert_safe`, `run_virtualfs`), `cli/main.py` (parse + dispatch).
+
+## Virtual-FS safety rules (validated empirically — don't regress)
+
+- The namespace shares the **real `.git`**, so an in-namespace `git add`/`commit`
+  writes to the real repo. `assert_safe` **refuses to inject over a git-tracked
+  path**; injected targets must be untracked + gitignored.
+- bwrap creates mountpoints on the real FS, leaving empty stubs after exit;
+  `run_virtualfs` sweeps the ones it created. tmpfs-mask injected *dirs* so their
+  contents can never leak (only an empty stub dir remains, which is swept).
