@@ -25,7 +25,8 @@ def test_passes_everything_after_dashdash_as_command(monkeypatch):
         return 0
 
     monkeypatch.setattr(cli, "run_virtualfs", fake_run)
-    # compile_claude needs a source; point at a dir with nothing so the plan is empty.
+    # isolate CLI parsing from real compile / global-scope lookups
+    monkeypatch.setattr(cli, "compile_claude", lambda project, global_, dest: None)
     monkeypatch.setattr("sys.argv", ["agedum", "--claude", "--", "claude", "--model", "x", "-p"])
     with pytest.raises(SystemExit) as exc:
         cli.app()

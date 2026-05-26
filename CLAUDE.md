@@ -2,8 +2,10 @@
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
-private mount namespace at launch. Implemented: the **Claude** harness at **project
-scope**. Follow-ups: global scope, other harnesses, variant composition.
+private mount namespace at launch. Implemented: the **Claude** harness at **project +
+global scope** (global `~/.config/agents/AGENTS.md` + `~/.agents/skills/` folded into
+the project injection; nothing touches the real `~/.claude`). Follow-ups: other
+harnesses, variant composition.
 
 ## Stack
 

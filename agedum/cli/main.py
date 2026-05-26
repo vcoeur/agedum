@@ -21,7 +21,7 @@ from rich.console import Console
 from agedum import __version__
 from agedum.harness import compile_claude
 from agedum.launcher import LauncherError, run_virtualfs
-from agedum.sources import load_source
+from agedum.sources import load_global_source, load_source
 
 _err = Console(stderr=True)
 
@@ -77,16 +77,17 @@ def app() -> None:
 
 
 def _run_claude(command: list[str]) -> int:
-    source = load_source()
-    if source.agents_md is None and source.skills_dir is None:
+    project = load_source()
+    global_ = load_global_source()
+    if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
         _err.print(
-            "[yellow]agedum:[/] no AGENTS.md or .agents/skills/ found under the project "
-            "root — running the command with no injected context."
+            "[yellow]agedum:[/] no AGENTS.md or .agents/skills/ (project or global) — "
+            "running the command with no injected context."
         )
     dest = Path(tempfile.mkdtemp(prefix="agedum-claude-"))
     try:
-        plan = compile_claude(source, dest)
-        return run_virtualfs(source.root, plan, command)
+        plan = compile_claude(project, global_, dest)
+        return run_virtualfs(project.root, plan, command)
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1

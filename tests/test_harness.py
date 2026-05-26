@@ -1,5 +1,5 @@
 from agedum.harness import compile_claude
-from agedum.sources import load_source
+from agedum.sources import Source, load_source
 
 
 def test_compile_claude_layout_and_overlay(tmp_path):
@@ -15,7 +15,7 @@ def test_compile_claude_layout_and_overlay(tmp_path):
     src = load_source(tmp_path)
     dest = tmp_path / "out"
     dest.mkdir()
-    plan = compile_claude(src, dest)
+    plan = compile_claude(src, None, dest)
 
     # Instructions: AGENTS.md -> CLAUDE.md
     assert (dest / "CLAUDE.md").read_text() == "# project instructions\n"
@@ -42,6 +42,36 @@ def test_compile_with_no_source_is_empty(tmp_path):
     src = load_source(tmp_path)
     dest = tmp_path / "out"
     dest.mkdir()
-    plan = compile_claude(src, dest)
+    plan = compile_claude(src, None, dest)
     assert plan.tmpfs == []
     assert plan.binds == []
+
+
+def test_compile_merges_global_and_project(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / ".agents" / "skills" / "pskill").mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTRUCTIONS\n")
+    (proj / ".agents" / "skills" / "pskill" / "SKILL.md").write_text(
+        "---\nname: pskill\ndescription: d\n---\n"
+    )
+
+    gconf = tmp_path / "global-config" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTRUCTIONS\n")
+    gskills = tmp_path / "global-home" / ".agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(project, global_, dest)
+
+    claude_md = (dest / "CLAUDE.md").read_text()
+    # global instructions come first, project after
+    assert claude_md.index("GLOBAL-INSTRUCTIONS") < claude_md.index("PROJECT-INSTRUCTIONS")
+    # both global and project skills land under .claude/skills/
+    assert (dest / ".claude" / "skills" / "gskill" / "SKILL.md").exists()
+    assert (dest / ".claude" / "skills" / "pskill" / "SKILL.md").exists()
+    assert plan.tmpfs == [".claude"]

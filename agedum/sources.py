@@ -6,6 +6,7 @@ The source is the decided layout: a root ``AGENTS.md`` for instructions and
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,21 @@ def load_source(root: Path | None = None) -> Source:
     skills = root / SKILLS_REL
     return Source(
         root=root,
+        agents_md=agents if agents.is_file() else None,
+        skills_dir=skills if skills.is_dir() else None,
+    )
+
+
+def load_global_source() -> Source:
+    """The global-scope source: `~/.config/agents/AGENTS.md` (XDG-aware) for
+    instructions and `~/.agents/skills/` for skills. `root` is the home dir and is
+    unused for mounting — global content is folded into the project injection."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    config_agents = (Path(xdg) if xdg else Path.home() / ".config") / "agents"
+    agents = config_agents / AGENTS_MD
+    skills = Path.home() / ".agents" / "skills"
+    return Source(
+        root=Path.home(),
         agents_md=agents if agents.is_file() else None,
         skills_dir=skills if skills.is_dir() else None,
     )

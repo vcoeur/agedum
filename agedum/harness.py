@@ -33,27 +33,41 @@ class Plan:
     binds: list[tuple[Path, str]] = field(default_factory=list)
 
 
-def compile_claude(source: Source, dest: Path) -> Plan:
-    """Render `source` into Claude's layout under `dest`; return the mount `Plan`."""
+def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the global + project source into Claude's layout under `dest`.
+
+    Global scope is **folded into the project injection**: global instructions are
+    prepended to the in-project `CLAUDE.md`, and global skills are placed alongside
+    project skills under `.claude/skills/` (a project skill overrides a global one of
+    the same name). Nothing is written into the user's real `~/.claude`.
+    """
     plan = Plan()
 
-    # Instructions: AGENTS.md -> CLAUDE.md (Claude reads CLAUDE.md). Plain copy.
-    if source.agents_md is not None:
+    # Instructions: global AGENTS.md then project AGENTS.md -> one CLAUDE.md.
+    parts: list[str] = []
+    if global_ is not None and global_.agents_md is not None:
+        parts.append(global_.agents_md.read_text())
+    if project.agents_md is not None:
+        parts.append(project.agents_md.read_text())
+    if parts:
         claude_md = dest / "CLAUDE.md"
-        claude_md.write_text(source.agents_md.read_text())
+        claude_md.write_text("\n\n".join(p.strip("\n") for p in parts) + "\n")
         plan.binds.append((claude_md, "CLAUDE.md"))
 
-    # Skills: .agents/skills/<name>/ -> .claude/skills/<name>/.
-    if source.skills_dir is not None:
+    # Skills: global first, project second (project wins on name) -> .claude/skills/.
+    skill_dirs: dict[str, Path] = {}
+    for src in (global_, project):
+        if src is None or src.skills_dir is None:
+            continue
+        for d in sorted(p for p in src.skills_dir.iterdir() if p.is_dir()):
+            skill_dirs[d.name] = d
+    if skill_dirs:
         skills_root = dest / ".claude" / "skills"
-        compiled_any = False
-        for skill_dir in sorted(p for p in source.skills_dir.iterdir() if p.is_dir()):
-            _compile_claude_skill(skill_dir, skills_root / skill_dir.name)
-            compiled_any = True
-        if compiled_any:
-            # Mask `.claude` with a tmpfs, then bind the compiled skills inside it.
-            plan.tmpfs.append(".claude")
-            plan.binds.append((skills_root, ".claude/skills"))
+        for name, skill_dir in sorted(skill_dirs.items()):
+            _compile_claude_skill(skill_dir, skills_root / name)
+        # Mask `.claude` with a tmpfs, then bind the compiled skills inside it.
+        plan.tmpfs.append(".claude")
+        plan.binds.append((skills_root, ".claude/skills"))
 
     return plan
 

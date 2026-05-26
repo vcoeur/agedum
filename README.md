@@ -17,9 +17,11 @@ never written into your real tree or `$HOME`. For Claude: `AGENTS.md` → `CLAUD
 and `.agents/skills/<name>/` → `.claude/skills/<name>/` (the base `SKILL.md` merged
 with an optional `SKILL.claude.md` overlay).
 
-> **Status:** Claude harness, **project scope**, implemented. Global scope
-> (`~/.config/agents/AGENTS.md`, `~/.agents/skills/`) and other harnesses are
-> follow-ups. Linux-only (mount namespaces); requires `bwrap` on PATH.
+> **Status:** Claude harness, **project + global scope**, implemented. Global
+> (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) is *folded into* the project
+> injection — global instructions prepended to `CLAUDE.md`, global skills placed
+> alongside project skills (project wins on name) — so nothing touches your real
+> `~/.claude`. Other harnesses are follow-ups. Linux-only; requires `bwrap` on PATH.
 
 ## Usage
 

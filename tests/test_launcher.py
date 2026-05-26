@@ -55,7 +55,7 @@ def test_virtualfs_injects_then_sweeps_stubs(tmp_path):
     src = load_source(proj)
     dest = tmp_path / "compiled"
     dest.mkdir()
-    plan = compile_claude(src, dest)
+    plan = compile_claude(src, None, dest)
 
     marker = tmp_path / "marker.txt"
     cmd = ["bash", "-c", f"cd {proj} && cat CLAUDE.md > {marker} && ls .claude/skills >> {marker}"]
