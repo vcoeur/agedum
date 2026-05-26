@@ -1,4 +1,6 @@
-from agedum.harness import claude_config_dir, compile_claude
+from pathlib import Path
+
+from agedum.harness import claude_config_dir, compile_claude, compile_kimi, kimi_config_dir
 from agedum.sources import Source, load_source
 
 
@@ -89,3 +91,48 @@ def test_global_scope_lands_at_claude_config_dir_separately(tmp_path, monkeypatc
     assert _src_for(plan, cc / "CLAUDE.md").read_text() == "GLOBAL-INSTRUCTIONS\n"
     assert (_src_for(plan, cc / "skills") / "gskill" / "SKILL.md").exists()
     assert (_src_for(plan, proj / ".claude" / "skills") / "pskill" / "SKILL.md").exists()
+
+
+def test_compile_kimi(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.kimi.md").write_text("---\nkimi_only: 1\n---\nkimi note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    (home / ".kimi").mkdir(parents=True)
+    (home / ".kimi" / "config.toml").write_text('default_model = "x"\n')
+    monkeypatch.setenv("HOME", str(home))
+    assert kimi_config_dir() == home / ".kimi"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_kimi(project, global_, dest)
+
+    # Instructions -> one merged --agent-file YAML (global + project).
+    assert "--agent-file" in plan.extra_args
+    yaml_text = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1]).read_text()
+    assert "ROLE_ADDITIONAL:" in yaml_text
+    assert "GLOBAL-INSTR" in yaml_text and "PROJECT-INSTR" in yaml_text
+
+    # Global skills -> bound into ~/.kimi/skills.
+    assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
+    assert (_src_for(plan, home / ".kimi" / "skills") / "gskill" / "SKILL.md").exists()
+
+    # Project skills -> ./.kimi/skills (project-local bind), kimi overlay applied.
+    assert (proj / ".kimi" / "skills") in [t for _, t in plan.binds]
+    pskill_md = (_src_for(plan, proj / ".kimi" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "kimi note" in pskill_md
+    assert "--config" not in plan.extra_args  # no config rewrite

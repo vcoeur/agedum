@@ -2,11 +2,12 @@
 
 Shape: ``agedum <context-flags> -- <full command incl. binary>``.
 
-The context flags before ``--`` choose which virtual files to build (``--claude``
-for Claude format); everything after ``--`` is the child argv, run verbatim inside
-a mount namespace where those files are injected at the harness's expected paths.
-Decoupling context from command means one context can front any command, and the
-flag space stays open for future ``--<harness>`` modes / variants.
+The context flag before ``--`` chooses which virtual files to build (``--claude``
+or ``--kimi``); everything after ``--`` is the child argv, run inside a mount
+namespace where those files are injected at the harness's expected paths (some
+harnesses also need extra flags appended — e.g. kimi's ``--agent-file`` / ``--config``).
+Decoupling context from command keeps the flag space open for more ``--<harness>``
+modes / variants.
 """
 
 from __future__ import annotations
@@ -14,25 +15,34 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from rich.console import Console
 
 from agedum import __version__
-from agedum.harness import compile_claude
+from agedum.harness import Plan, compile_claude, compile_kimi
 from agedum.launcher import LauncherError, run_virtualfs
-from agedum.sources import load_global_source, load_source
+from agedum.sources import Source, load_global_source, load_source
 
 _err = Console(stderr=True)
 
-USAGE = "usage: agedum --claude -- <command> [args...]"
+# context flag -> compiler
+_COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
+    "claude": compile_claude,
+    "kimi": compile_kimi,
+}
+
+USAGE = "usage: agedum (--claude | --kimi) -- <command> [args...]"
 HELP = f"""{USAGE}
 
 Run a command inside a virtual-file context built from the project's
-agent-neutral source (AGENTS.md + .agents/skills/).
+agent-neutral source (AGENTS.md + .agents/skills/), plus the global source
+(~/.config/agents/AGENTS.md + ~/.agents/skills/).
 
 Context flags (before --):
   --claude        build Claude-format virtual files for the command
+  --kimi          build kimi-cli-format virtual files for the command
 
 Other:
   --version       print the version and exit
@@ -66,17 +76,18 @@ def app() -> None:
 
     mode: str | None = None
     for flag in flags:
-        if flag == "--claude":
-            mode = "claude"
+        name = flag.removeprefix("--")
+        if name in _COMPILERS:
+            mode = name
         else:
             _die(f"unknown option: {flag}")
     if mode is None:
-        _die("a context mode is required (currently: --claude)")
+        _die("a context mode is required: --claude or --kimi")
 
-    raise SystemExit(_run_claude(command))
+    raise SystemExit(_run(mode, command))
 
 
-def _run_claude(command: list[str]) -> int:
+def _run(mode: str, command: list[str]) -> int:
     project = load_source()
     global_ = load_global_source()
     if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
@@ -84,9 +95,9 @@ def _run_claude(command: list[str]) -> int:
             "[yellow]agedum:[/] no AGENTS.md or .agents/skills/ (project or global) — "
             "running the command with no injected context."
         )
-    dest = Path(tempfile.mkdtemp(prefix="agedum-claude-"))
+    dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-"))
     try:
-        plan = compile_claude(project, global_, dest)
+        plan = _COMPILERS[mode](project, global_, dest)
         return run_virtualfs(project.root, plan, command)
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")

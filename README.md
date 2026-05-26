@@ -22,15 +22,21 @@ with an optional `SKILL.claude.md` overlay).
 > global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) → `~/.claude/CLAUDE.md`
 > + `~/.claude/skills/` (honours `$CLAUDE_CONFIG_DIR`). They're never merged; Claude
 > reads both. Only those two `~/.claude` paths are overlaid for the child — your
-> `~/.claude.json` auth and other settings are untouched. Other harnesses are
-> follow-ups. Linux-only; requires `bwrap` on PATH.
+> `~/.claude.json` auth and other settings are untouched.
+>
+> **kimi** (`--kimi`) is also supported. Instructions can only be injected via a
+> flag, so agedum *augments* the command: merged global+project `AGENTS.md` → a
+> transient `--agent-file` YAML. Skills are binds: global → `~/.kimi/skills/`,
+> project → `./.kimi/skills/` (both auto-read by kimi). Other harnesses (opencode)
+> are follow-ups. Linux-only; requires `bwrap` on PATH.
 
 ## Usage
 
 ```bash
-# Run any command with Claude-format virtual files injected from the project source:
+# Run a command with virtual files injected from the project + global source:
 agedum --claude -- claude --model sonnet -p "review this"
 agedum --claude -- claude              # interactive
+agedum --kimi   -- kimi -p "explain this code"
 
 agedum --version
 ```

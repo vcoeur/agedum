@@ -40,6 +40,8 @@ class Plan:
     """
 
     binds: list[tuple[Path, Path]] = field(default_factory=list)
+    # Extra args appended to the launched command (e.g. kimi's --agent-file / --config).
+    extra_args: list[str] = field(default_factory=list)
 
 
 def claude_config_dir() -> Path:
@@ -99,14 +101,14 @@ def _compile_scope(
         if skill_dirs:
             skills_out = dest / "skills"
             for skill_dir in skill_dirs:
-                _compile_claude_skill(skill_dir, skills_out / skill_dir.name)
+                _compile_skill(skill_dir, skills_out / skill_dir.name, "SKILL.claude.md")
             plan.binds.append((skills_out, skills_target))
 
 
-def _compile_claude_skill(src: Path, out: Path) -> None:
+def _compile_skill(src: Path, out: Path, overlay_name: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
     base = (src / "SKILL.md").read_text() if (src / "SKILL.md").is_file() else ""
-    overlay_path = src / "SKILL.claude.md"
+    overlay_path = src / overlay_name
     merged = base
     if overlay_path.is_file():
         merged = _merge_skill(base, overlay_path.read_text())
@@ -154,3 +156,77 @@ def _emit_frontmatter(meta: dict, body: str) -> str:
         return body
     fm = yaml.safe_dump(meta, sort_keys=False, default_flow_style=False).strip()
     return f"---\n{fm}\n---\n\n{body}"
+
+
+# ---------------------------------------------------------------------------
+# kimi-cli harness
+# ---------------------------------------------------------------------------
+
+
+def kimi_config_dir() -> Path:
+    """kimi-cli's user-scope config dir (``~/.kimi``)."""
+    return Path.home() / ".kimi"
+
+
+def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for kimi-cli. kimi is flag/config-driven (not pure
+    path-discovery), so:
+
+    * **instructions** (global + project ``AGENTS.md``, merged) → a transient
+      ``--agent-file`` YAML appended to the command;
+    * **global skills** → ``~/.kimi/skills/`` (kimi auto-merges them) via a bind;
+    * **project skills** → ``./.kimi/skills/`` (project-local; kimi auto-reads it).
+    """
+    plan = Plan()
+
+    parts: list[str] = []
+    if global_ is not None and global_.agents_md is not None:
+        parts.append(global_.agents_md.read_text())
+    if project.agents_md is not None:
+        parts.append(project.agents_md.read_text())
+    if parts:
+        instructions = "\n\n".join(p.strip("\n") for p in parts) + "\n"
+        agent_file = dest / "agent.yaml"
+        agent_file.parent.mkdir(parents=True, exist_ok=True)
+        agent_file.write_text(_kimi_agent_file_yaml(instructions))
+        plan.extra_args += ["--agent-file", str(agent_file)]
+
+    # Global skills -> ~/.kimi/skills (read by default; merge_all_available_skills).
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills")
+        if out is not None:
+            plan.binds.append((out, kimi_config_dir() / "skills"))
+
+    # Project skills -> ./.kimi/skills (project-local; kimi auto-reads it, matching
+    # condash's prior layout — uniform with the Claude harness, no config rewrite).
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills")
+        if out is not None:
+            plan.binds.append((out, project.root / ".kimi" / "skills"))
+
+    return plan
+
+
+def _compile_skill_tree(skills_dir: Path, out_root: Path) -> Path | None:
+    """Compile each ``<skills_dir>/<name>/`` into ``out_root/<name>/`` for kimi;
+    return ``out_root`` (or None when there are no skills)."""
+    skill_dirs = sorted(p for p in skills_dir.iterdir() if p.is_dir())
+    if not skill_dirs:
+        return None
+    for skill_dir in skill_dirs:
+        _compile_skill(skill_dir, out_root / skill_dir.name, "SKILL.kimi.md")
+    return out_root
+
+
+def _kimi_agent_file_yaml(instructions: str) -> str:
+    """Wrap instructions into kimi's agent-file shape (extends the default agent,
+    injecting the text as ``system_prompt_args.ROLE_ADDITIONAL``)."""
+    indented = instructions.rstrip("\n").replace("\n", "\n      ")
+    return (
+        "version: 1\n"
+        "agent:\n"
+        "  extend: default\n"
+        "  system_prompt_args:\n"
+        "    ROLE_ADDITIONAL: |\n"
+        f"      {indented}\n"
+    )

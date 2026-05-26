@@ -2,12 +2,19 @@
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
-private mount namespace at launch. Implemented: the **Claude** harness at **project +
-global scope**, each placed at its *own* Claude location — project → `./CLAUDE.md` +
-`./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
-`~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
-(only those two `~/.claude` paths are overlaid; `~/.claude.json` auth is untouched).
-Follow-ups: other harnesses, variant composition.
+private mount namespace at launch. Implemented: **Claude** and **kimi** harnesses at
+**project + global scope**.
+
+- **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
+  `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
+  `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
+  (only those two `~/.claude` paths overlaid; `~/.claude.json` auth untouched).
+- **kimi** — instructions inject only via a flag, so agedum *augments* the command:
+  merged global+project `AGENTS.md` → a transient `--agent-file` YAML. Skills are
+  binds: global → `~/.kimi/skills/`, project → `./.kimi/skills/` (both auto-read).
+  Matches condash's prior kimi layout; uniform with the Claude harness.
+
+Follow-ups: opencode, `--<harness>-variant` composition.
 
 ## Stack
 
@@ -42,14 +49,15 @@ Run `make format` after every change. Commit `uv.lock`; `.venv/` stays gitignore
 
 ## CLI contract
 
-`agedum <context-flags> -- <command...>`. Flags before `--` choose the virtual-file
-context (`--claude`); everything after `--` is the child argv, run verbatim inside
-the namespace. Context and command are decoupled (one context can front any
-command); the flag space is open for future `--<harness>` modes and variants.
+`agedum <context-flags> -- <command...>`. Flag before `--` chooses the virtual-file
+context (`--claude` / `--kimi`); everything after `--` is the child argv (some
+harnesses also get extra flags appended — kimi's `--agent-file` / `--config`). Context
+and command are decoupled; the flag space is open for future `--<harness>` modes.
 
-Module layout: `sources.py` (locate `AGENTS.md` + `.agents/skills/`), `harness.py`
-(`compile_claude` → native layout + a mount `Plan`), `launcher.py` (`build_bwrap_argv`,
-`assert_safe`, `run_virtualfs`), `cli/main.py` (parse + dispatch).
+Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
+`compile_kimi` → a `Plan` of absolute binds **+ `extra_args`** for the command),
+`launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` — appends
+`plan.extra_args`), `cli/main.py` (parse + `_COMPILERS` dispatch).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 
@@ -57,5 +65,6 @@ Module layout: `sources.py` (locate `AGENTS.md` + `.agents/skills/`), `harness.p
   writes to the real repo. `assert_safe` **refuses to inject over a git-tracked
   path**; injected targets must be untracked + gitignored.
 - bwrap creates mountpoints on the real FS, leaving empty stubs after exit;
-  `run_virtualfs` sweeps the ones it created. tmpfs-mask injected *dirs* so their
-  contents can never leak (only an empty stub dir remains, which is swept).
+  `run_virtualfs` sweeps the ones it created (each target **and its parent**, deepest
+  first, only if it didn't pre-exist). Plain `--ro-bind`s mask any pre-existing dir;
+  injected content never leaks (leftovers are 0-byte / empty).

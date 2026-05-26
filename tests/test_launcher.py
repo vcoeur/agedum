@@ -85,3 +85,25 @@ def test_virtualfs_injects_then_sweeps_stubs(tmp_path):
         ["git", "-C", str(proj), "status", "--porcelain"], capture_output=True, text=True
     ).stdout
     assert status.strip() == ""
+
+
+def test_run_appends_plan_extra_args_after_command(monkeypatch, tmp_path):
+    import agedum.launcher as launcher_mod
+
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def fake_run(argv, *a, **k):
+        captured["argv"] = argv
+        return _Result()
+
+    monkeypatch.setattr(launcher_mod.subprocess, "run", fake_run)
+    plan = Plan(extra_args=["--agent-file", "/tmp/a.yaml", "--config", "{}"])
+    rc = run_virtualfs(tmp_path, plan, ["kimi", "-p", "hi"])
+
+    assert rc == 0
+    argv = captured["argv"]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail == ["kimi", "-p", "hi", "--agent-file", "/tmp/a.yaml", "--config", "{}"]
