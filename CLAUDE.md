@@ -3,9 +3,11 @@
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
 private mount namespace at launch. Implemented: the **Claude** harness at **project +
-global scope** (global `~/.config/agents/AGENTS.md` + `~/.agents/skills/` folded into
-the project injection; nothing touches the real `~/.claude`). Follow-ups: other
-harnesses, variant composition.
+global scope**, each placed at its *own* Claude location — project → `./CLAUDE.md` +
+`./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
+`~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
+(only those two `~/.claude` paths are overlaid; `~/.claude.json` auth is untouched).
+Follow-ups: other harnesses, variant composition.
 
 ## Stack
 

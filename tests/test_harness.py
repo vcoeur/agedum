@@ -1,8 +1,19 @@
-from agedum.harness import compile_claude
+from agedum.harness import claude_config_dir, compile_claude
 from agedum.sources import Source, load_source
 
 
-def test_compile_claude_layout_and_overlay(tmp_path):
+def _targets(plan):
+    return [t for _, t in plan.binds]
+
+
+def _src_for(plan, target):
+    for src, t in plan.binds:
+        if t == target:
+            return src
+    raise AssertionError(f"no bind for target {target}")
+
+
+def test_compile_claude_project_layout_and_overlay(tmp_path):
     (tmp_path / "AGENTS.md").write_text("# project instructions\n")
     skill = tmp_path / ".agents" / "skills" / "demo"
     skill.mkdir(parents=True)
@@ -17,24 +28,19 @@ def test_compile_claude_layout_and_overlay(tmp_path):
     dest.mkdir()
     plan = compile_claude(src, None, dest)
 
-    # Instructions: AGENTS.md -> CLAUDE.md
-    assert (dest / "CLAUDE.md").read_text() == "# project instructions\n"
+    # Project scope binds to in-tree, absolute Claude paths.
+    assert _src_for(plan, tmp_path / "CLAUDE.md").read_text() == "# project instructions\n"
+    skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
 
-    skill_md = (dest / ".claude" / "skills" / "demo" / "SKILL.md").read_text()
+    skill_md = (skills_src / "demo" / "SKILL.md").read_text()
     assert "name: demo" in skill_md
     assert "description: a demo" in skill_md
     assert "allowed-tools:" in skill_md  # claude overlay frontmatter merged in
     assert "Base body." in skill_md and "Claude note." in skill_md
 
-    # Task files + scripts copied; other-harness overlay skipped.
-    assert (dest / ".claude" / "skills" / "demo" / "task1.md").exists()
-    assert (dest / ".claude" / "skills" / "demo" / "helper.sh").exists()
-    assert not (dest / ".claude" / "skills" / "demo" / "SKILL.kimi.md").exists()
-
-    assert plan.tmpfs == [".claude"]
-    targets = [t for _, t in plan.binds]
-    assert "CLAUDE.md" in targets
-    assert ".claude/skills" in targets
+    assert (skills_src / "demo" / "task1.md").exists()
+    assert (skills_src / "demo" / "helper.sh").exists()
+    assert not (skills_src / "demo" / "SKILL.kimi.md").exists()
 
 
 def test_compile_with_no_source_is_empty(tmp_path):
@@ -43,11 +49,10 @@ def test_compile_with_no_source_is_empty(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     plan = compile_claude(src, None, dest)
-    assert plan.tmpfs == []
     assert plan.binds == []
 
 
-def test_compile_merges_global_and_project(tmp_path):
+def test_global_scope_lands_at_claude_config_dir_separately(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     (proj / ".agents" / "skills" / "pskill").mkdir(parents=True)
     (proj / "AGENTS.md").write_text("PROJECT-INSTRUCTIONS\n")
@@ -55,12 +60,16 @@ def test_compile_merges_global_and_project(tmp_path):
         "---\nname: pskill\ndescription: d\n---\n"
     )
 
-    gconf = tmp_path / "global-config" / "agents"
+    gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)
     (gconf / "AGENTS.md").write_text("GLOBAL-INSTRUCTIONS\n")
-    gskills = tmp_path / "global-home" / ".agents" / "skills"
+    gskills = tmp_path / "ghome" / ".agents" / "skills"
     (gskills / "gskill").mkdir(parents=True)
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    cc = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+    assert claude_config_dir() == cc
 
     project = load_source(proj)
     global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
@@ -68,10 +77,15 @@ def test_compile_merges_global_and_project(tmp_path):
     dest.mkdir()
     plan = compile_claude(project, global_, dest)
 
-    claude_md = (dest / "CLAUDE.md").read_text()
-    # global instructions come first, project after
-    assert claude_md.index("GLOBAL-INSTRUCTIONS") < claude_md.index("PROJECT-INSTRUCTIONS")
-    # both global and project skills land under .claude/skills/
-    assert (dest / ".claude" / "skills" / "gskill" / "SKILL.md").exists()
-    assert (dest / ".claude" / "skills" / "pskill" / "SKILL.md").exists()
-    assert plan.tmpfs == [".claude"]
+    targets = _targets(plan)
+    # project scope -> in-tree; global scope -> the user-scope Claude dir, SEPARATELY
+    assert proj / "CLAUDE.md" in targets
+    assert proj / ".claude" / "skills" in targets
+    assert cc / "CLAUDE.md" in targets
+    assert cc / "skills" in targets
+
+    # NOT concatenated — each scope's CLAUDE.md holds only its own content
+    assert _src_for(plan, proj / "CLAUDE.md").read_text() == "PROJECT-INSTRUCTIONS\n"
+    assert _src_for(plan, cc / "CLAUDE.md").read_text() == "GLOBAL-INSTRUCTIONS\n"
+    assert (_src_for(plan, cc / "skills") / "gskill" / "SKILL.md").exists()
+    assert (_src_for(plan, proj / ".claude" / "skills") / "pskill" / "SKILL.md").exists()

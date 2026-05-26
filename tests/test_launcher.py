@@ -14,15 +14,18 @@ def _git_init(path):
     subprocess.run(["git", "-C", str(path), "config", "user.name", "t"], check=True)
 
 
-def test_build_bwrap_argv_orders_tmpfs_before_binds(tmp_path):
+def test_build_bwrap_argv_binds_absolute_targets(tmp_path):
     plan = Plan(
-        tmpfs=[".claude"],
-        binds=[(tmp_path / "c.md", "CLAUDE.md"), (tmp_path / "sk", ".claude/skills")],
+        binds=[
+            (tmp_path / "c.md", tmp_path / "CLAUDE.md"),
+            (tmp_path / "sk", tmp_path / ".claude" / "skills"),
+        ]
     )
-    argv = build_bwrap_argv(tmp_path, plan, ["claude", "-p"])
+    argv = build_bwrap_argv(plan, ["claude", "-p"])
     assert argv[:4] == ["bwrap", "--dev-bind", "/", "/"]
     assert argv[-3:] == ["--", "claude", "-p"]
-    assert argv.index(str(tmp_path / ".claude")) < argv.index(str(tmp_path / ".claude/skills"))
+    assert str(tmp_path / "CLAUDE.md") in argv
+    assert str(tmp_path / ".claude" / "skills") in argv
 
 
 def test_assert_safe_refuses_tracked_target(tmp_path):
@@ -30,14 +33,21 @@ def test_assert_safe_refuses_tracked_target(tmp_path):
     (tmp_path / "CLAUDE.md").write_text("real tracked\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "CLAUDE.md"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "x"], check=True)
-    plan = Plan(binds=[(tmp_path / "compiled.md", "CLAUDE.md")])
+    plan = Plan(binds=[(tmp_path / "compiled.md", tmp_path / "CLAUDE.md")])
     with pytest.raises(LauncherError):
         assert_safe(tmp_path, plan)
 
 
+def test_assert_safe_ignores_targets_outside_the_project(tmp_path):
+    _git_init(tmp_path)
+    # a global-scope target (e.g. ~/.claude) is not part of this repo, so never tracked
+    outside = tmp_path.parent / "claude-home" / "CLAUDE.md"
+    assert_safe(tmp_path, Plan(binds=[(tmp_path / "compiled.md", outside)]))
+
+
 def test_assert_safe_allows_untracked(tmp_path):
     _git_init(tmp_path)
-    assert_safe(tmp_path, Plan(binds=[(tmp_path / "compiled.md", "CLAUDE.md")]))
+    assert_safe(tmp_path, Plan(binds=[(tmp_path / "compiled.md", tmp_path / "CLAUDE.md")]))
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
