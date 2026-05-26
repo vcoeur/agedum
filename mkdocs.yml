@@ -1,0 +1,87 @@
+site_name: agedum
+site_url: https://agedum.vcoeur.com/
+site_description: Drive any agent CLI from an agent-neutral source shape (AGENTS.md + .agents/skills/) — agedum compiles it per harness and injects it via a private mount namespace at launch.
+site_author: Alice Voland
+copyright: 'Developed by Alice Voland &middot; <a href="https://vcoeur.com">vcoeur.com</a> &middot; <a href="/legal/">Legal</a>'
+
+repo_url: https://github.com/vcoeur/agedum
+repo_name: vcoeur/agedum
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  font: false
+  favicon: assets/favicon.svg
+  logo: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.tabs.link
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/vcoeur/agedum
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/agedum/
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Source shape: source-shape.md
+  - Scopes: scopes.md
+  - Harnesses: harnesses.md
+  - CLI reference: cli.md
+  - Internals: internals.md
+  - Legal: legal.md

@@ -26,4 +26,10 @@ format: ## Ruff auto-fix + format
 	uv run ruff check --fix .
 	uv run ruff format .
 
-.PHONY: help install dev-install run test coverage lint format
+docs: ## Build the documentation site into site/ (strict)
+	uv run --with "mkdocs-material==9.5.49" mkdocs build --strict
+
+docs-serve: ## Live-reload preview of the docs at http://127.0.0.1:8000
+	uv run --with "mkdocs-material==9.5.49" mkdocs serve
+
+.PHONY: help install dev-install run test coverage lint format docs docs-serve
