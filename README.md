@@ -10,22 +10,31 @@ you run.
 - **Skills** live in `.agents/skills/<name>/` as `SKILL.md` (+ optional task files,
   scripts, and a per-harness `SKILL.<harness>.md` overlay).
 
-At launch, agedum reads that shape (project scope, plus a global scope under
-`~/.config/agents/AGENTS.md` and `~/.agents/skills/`) and places/translates it for
-the active harness — for Claude this is mostly placement (`.claude/skills/`,
-`CLAUDE.md`); other harnesses get format translation, with frontmatter they don't
-understand stripped and scripts they can't run dropped — then launches the CLI.
+At launch, agedum compiles that shape to the harness's native layout in a throwaway
+dir, then runs your command inside a **private mount namespace** (bubblewrap) where
+the compiled files appear at their expected paths — visible only to that process,
+never written into your real tree or `$HOME`. For Claude: `AGENTS.md` → `CLAUDE.md`
+and `.agents/skills/<name>/` → `.claude/skills/<name>/` (the base `SKILL.md` merged
+with an optional `SKILL.claude.md` overlay).
 
-> **Status: scaffold.** The CLI surface and packaging are in place; the
-> resolve/translate/exec pipeline is not implemented yet.
+> **Status:** Claude harness, **project scope**, implemented. Global scope
+> (`~/.config/agents/AGENTS.md`, `~/.agents/skills/`) and other harnesses are
+> follow-ups. Linux-only (mount namespaces); requires `bwrap` on PATH.
 
 ## Usage
 
 ```bash
-agedum               # launch interactively (terminal)
-agedum --run "..."   # run a one-shot task
+# Run any command with Claude-format virtual files injected from the project source:
+agedum --claude -- claude --model sonnet -p "review this"
+agedum --claude -- claude              # interactive
+
 agedum --version
 ```
+
+Everything after `--` is the command, run verbatim; the context flag before `--`
+(`--claude`) chooses the format. The two are decoupled, so one context can front any
+command. Injected paths must be gitignored — agedum refuses to overlay a git-tracked
+file (the namespace shares your real `.git`).
 
 ## Install
 
