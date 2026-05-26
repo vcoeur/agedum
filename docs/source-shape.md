@@ -18,6 +18,7 @@ my-project/
         │   ├── SKILL.md          # base skill: name + description + body
         │   ├── SKILL.claude.md   # optional Claude-only overlay
         │   ├── SKILL.kimi.md     # optional kimi-only overlay
+        │   ├── SKILL.opencode.md # optional opencode-only overlay
         │   ├── checklist.md      # task file, copied verbatim
         │   └── lint.sh           # script, copied verbatim
         └── release/
@@ -37,6 +38,8 @@ each harness's instruction location unchanged:
 - **kimi** → the project `AGENTS.md` is read natively at its source location; the global
   `AGENTS.md` is folded into a generated `--agent-file` as the agent's additional role
   prompt.
+- **opencode** → the project `AGENTS.md` is read natively at its source location; the
+  global `AGENTS.md` is relocated to `~/.config/opencode/AGENTS.md`.
 
 See [Harnesses](harnesses.md) for exactly where it lands per harness, and
 [Scopes](scopes.md) for the project vs global copies.
@@ -73,8 +76,9 @@ When a skill needs something only one harness understands — e.g. Claude's
 
 - `SKILL.claude.md` is applied when compiling for `--claude`.
 - `SKILL.kimi.md` is applied when compiling for `--kimi`.
+- `SKILL.opencode.md` is applied when compiling for `--opencode`.
 - An overlay for a *different* harness is ignored (a `SKILL.kimi.md` is skipped when
-  compiling for Claude, and vice-versa).
+  compiling for Claude or opencode, and so on).
 
 The overlay is **merged** onto the base, not substituted:
 

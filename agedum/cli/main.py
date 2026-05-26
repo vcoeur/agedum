@@ -21,7 +21,7 @@ from pathlib import Path
 from rich.console import Console
 
 from agedum import __version__
-from agedum.harness import Plan, compile_claude, compile_kimi
+from agedum.harness import Plan, compile_claude, compile_kimi, compile_opencode
 from agedum.launcher import LauncherError, run_virtualfs
 from agedum.sources import Source, load_global_source, load_source
 
@@ -31,9 +31,10 @@ _err = Console(stderr=True)
 _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "claude": compile_claude,
     "kimi": compile_kimi,
+    "opencode": compile_opencode,
 }
 
-USAGE = "usage: agedum (--claude | --kimi) -- <command> [args...]"
+USAGE = "usage: agedum (--claude | --kimi | --opencode) -- <command> [args...]"
 HELP = f"""{USAGE}
 
 Run a command inside a virtual-file context built from the project's
@@ -43,6 +44,7 @@ agent-neutral source (AGENTS.md + .agents/skills/), plus the global source
 Context flags (before --):
   --claude        build Claude-format virtual files for the command
   --kimi          build kimi-cli-format virtual files for the command
+  --opencode      build opencode-format virtual files for the command
 
 Other:
   --version       print the version and exit
@@ -82,7 +84,7 @@ def app() -> None:
         else:
             _die(f"unknown option: {flag}")
     if mode is None:
-        _die("a context mode is required: --claude or --kimi")
+        _die("a context mode is required: --claude, --kimi, or --opencode")
 
     raise SystemExit(_run(mode, command))
 

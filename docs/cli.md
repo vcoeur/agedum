@@ -6,7 +6,7 @@ description: The agedum invocation contract — context flags before the -- sepa
 # CLI reference
 
 ```text
-agedum (--claude | --kimi) -- <command> [args...]
+agedum (--claude | --kimi | --opencode) -- <command> [args...]
 ```
 
 The invocation has two halves split by a literal `--`:
@@ -25,6 +25,7 @@ Decoupling the context from the command keeps the flag space open for additional
 |---|---|
 | `--claude` | Render the source in Claude format ([details](harnesses.md#claude)). |
 | `--kimi` | Render the source in kimi-cli format ([details](harnesses.md#kimi)). |
+| `--opencode` | Render the source in opencode format ([details](harnesses.md#opencode)). |
 
 Exactly one context mode is required. If several context flags are given, the last one
 wins; an unknown option is an error.
@@ -50,6 +51,9 @@ agedum --claude -- claude --model sonnet -p "review this change"
 
 # kimi
 agedum --kimi -- kimi -p "explain this code"
+
+# opencode
+agedum --opencode -- opencode run "explain this code"
 ```
 
 ## Exit codes

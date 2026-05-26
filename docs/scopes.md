@@ -51,7 +51,10 @@ flowchart LR
 
 The destinations differ for kimi: the project `AGENTS.md` is read natively at its
 source location (no injection), the global `AGENTS.md` is injected via a generated
-`--agent-file`, and skills bind to `~/.kimi/skills/` and `./.kimi/skills/`. See
+`--agent-file`, and skills bind to `~/.kimi/skills/` and `./.kimi/skills/`. opencode is
+like Claude but with its own native project read: project `AGENTS.md` stays in place,
+global `AGENTS.md` binds to `~/.config/opencode/AGENTS.md`, and skills bind to
+`./.opencode/skills/` and `~/.config/opencode/skills/`. See
 [Harnesses](harnesses.md) for the full per-harness mapping.
 
 ## Only the two scope paths are touched

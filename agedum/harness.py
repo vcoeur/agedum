@@ -197,28 +197,28 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
 
     # Global skills -> ~/.kimi/skills (read by default; merge_all_available_skills).
     if global_ is not None and global_.skills_dir is not None:
-        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills")
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.kimi.md")
         if out is not None:
             plan.binds.append((out, kimi_config_dir() / "skills"))
 
     # Project skills -> ./.kimi/skills (project-local; kimi auto-reads it, matching
     # condash's prior layout — uniform with the Claude harness, no config rewrite).
     if project.skills_dir is not None:
-        out = _compile_skill_tree(project.skills_dir, dest / "project-skills")
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.kimi.md")
         if out is not None:
             plan.binds.append((out, project.root / ".kimi" / "skills"))
 
     return plan
 
 
-def _compile_skill_tree(skills_dir: Path, out_root: Path) -> Path | None:
-    """Compile each ``<skills_dir>/<name>/`` into ``out_root/<name>/`` for kimi;
-    return ``out_root`` (or None when there are no skills)."""
+def _compile_skill_tree(skills_dir: Path, out_root: Path, overlay_name: str) -> Path | None:
+    """Compile each ``<skills_dir>/<name>/`` into ``out_root/<name>/``, applying the
+    ``overlay_name`` overlay; return ``out_root`` (or None when there are no skills)."""
     skill_dirs = sorted(p for p in skills_dir.iterdir() if p.is_dir())
     if not skill_dirs:
         return None
     for skill_dir in skill_dirs:
-        _compile_skill(skill_dir, out_root / skill_dir.name, "SKILL.kimi.md")
+        _compile_skill(skill_dir, out_root / skill_dir.name, overlay_name)
     return out_root
 
 
@@ -234,3 +234,58 @@ def _kimi_agent_file_yaml(instructions: str) -> str:
         "    ROLE_ADDITIONAL: |\n"
         f"      {indented}\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# opencode harness
+# ---------------------------------------------------------------------------
+
+
+def opencode_config_dir() -> Path:
+    """opencode's user-scope config dir — ``$XDG_CONFIG_HOME/opencode`` or
+    ``~/.config/opencode``."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "opencode"
+
+
+def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for opencode. opencode is pure path-discovery (no flags
+    needed), so every scope is a bind:
+
+    * **project instructions** — opencode reads the root ``./AGENTS.md`` natively
+      (traversing up from the work dir), and that is exactly the agent-neutral source
+      file, so agedum injects nothing for it (and could not — it is git-tracked);
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` → ``<config>/AGENTS.md``,
+      which opencode reads as its user-scope rules file;
+    * **project skills** → ``./.opencode/skills/``; **global skills** →
+      ``<config>/skills/``. opencode searches these *before* ``.agents/skills/`` /
+      ``~/.agents/skills/``, so the overlaid copy (``SKILL.opencode.md`` merged in)
+      wins over the raw source it would otherwise discover there.
+
+    ``<config>`` is :func:`opencode_config_dir`. No ``extra_args`` — opencode discovers
+    everything from disk.
+    """
+    plan = Plan()
+    config = opencode_config_dir()
+
+    # Global instructions -> <config>/AGENTS.md (project ./AGENTS.md is read natively).
+    if global_ is not None and global_.agents_md is not None:
+        out = dest / "global" / "AGENTS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(global_.agents_md.read_text())
+        plan.binds.append((out, config / "AGENTS.md"))
+
+    # Project skills -> ./.opencode/skills.
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.opencode.md")
+        if out is not None:
+            plan.binds.append((out, project.root / ".opencode" / "skills"))
+
+    # Global skills -> <config>/skills.
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.opencode.md")
+        if out is not None:
+            plan.binds.append((out, config / "skills"))
+
+    return plan

@@ -28,16 +28,22 @@ with an optional `SKILL.claude.md` overlay).
 > so agedum leaves it in place; it has no user-scope `AGENTS.md`, so the global
 > `AGENTS.md` is injected via a transient `--agent-file` YAML (no `--agent-file` is
 > added when there's no global scope). Skills are binds: global → `~/.kimi/skills/`,
-> project → `./.kimi/skills/` (both auto-read by kimi). Other harnesses (opencode)
-> are follow-ups. Linux-only; requires `bwrap` on PATH.
+> project → `./.kimi/skills/` (both auto-read by kimi).
+>
+> **opencode** (`--opencode`) is supported too — pure path-discovery, like Claude. The
+> project `AGENTS.md` is read natively (`./AGENTS.md`); the global `AGENTS.md` binds to
+> `~/.config/opencode/AGENTS.md`; skills bind to `./.opencode/skills/` (project) and
+> `~/.config/opencode/skills/` (global), both searched before `.agents/skills/` so the
+> overlaid copy wins. No extra flags. Linux-only; requires `bwrap` on PATH.
 
 ## Usage
 
 ```bash
 # Run a command with virtual files injected from the project + global source:
-agedum --claude -- claude --model sonnet -p "review this"
-agedum --claude -- claude              # interactive
-agedum --kimi   -- kimi -p "explain this code"
+agedum --claude   -- claude --model sonnet -p "review this"
+agedum --claude   -- claude                      # interactive
+agedum --kimi     -- kimi -p "explain this code"
+agedum --opencode -- opencode run "explain this code"
 
 agedum --version
 ```

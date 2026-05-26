@@ -29,8 +29,9 @@ written into your real tree or `$HOME`.
 # Render the project + global source for Claude, then run Claude inside it:
 agedum --claude -- claude -p "review this change"
 
-# Same source, rendered for kimi instead:
-agedum --kimi -- kimi -p "review this change"
+# Same source, rendered for kimi or opencode instead:
+agedum --kimi     -- kimi -p "review this change"
+agedum --opencode -- opencode run "review this change"
 ```
 
 The flag before `--` chooses the *format*; everything after `--` is the command, run
@@ -60,9 +61,11 @@ flowchart LR
   src["AGENTS.md + .agents/skills/<br/>(project + global)"] --> agedum
   agedum -->|"--claude"| cl["CLAUDE.md + .claude/skills/"]
   agedum -->|"--kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
+  agedum -->|"--opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
-  ns --> cmd["your command<br/>(claude / kimi / …)"]
+  oc --> ns
+  ns --> cmd["your command<br/>(claude / kimi / opencode)"]
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
@@ -76,7 +79,7 @@ flowchart LR
 |---|---|---|
 | Claude | `--claude` | Implemented — project + global scope |
 | kimi   | `--kimi`   | Implemented — project + global scope |
-| opencode | — | Planned |
+| opencode | `--opencode` | Implemented — project + global scope |
 
 Linux-only; requires `bwrap` ([bubblewrap](https://github.com/containers/bubblewrap))
 on `PATH`.

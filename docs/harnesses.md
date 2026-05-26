@@ -13,14 +13,15 @@ namespace and runs the command. Context and command are decoupled: the flag pick
 format; everything after `--` is run verbatim.
 
 ```bash
-agedum --claude -- claude -p "…"     # render for Claude, run claude
-agedum --kimi   -- kimi -p "…"       # render for kimi, run kimi
+agedum --claude   -- claude -p "…"       # render for Claude, run claude
+agedum --kimi     -- kimi -p "…"         # render for kimi, run kimi
+agedum --opencode -- opencode run "…"    # render for opencode, run opencode
 ```
 
-Both compilers process the project and global [scopes](scopes.md) and apply the
-[skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for their
-harness (`SKILL.claude.md` for Claude, `SKILL.kimi.md` for kimi; other harnesses'
-overlays are skipped).
+Every compiler processes the project and global [scopes](scopes.md) and applies the
+[skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
+harness (`SKILL.claude.md` for Claude, `SKILL.kimi.md` for kimi, `SKILL.opencode.md` for
+opencode; other harnesses' overlays are skipped).
 
 ## `--claude` { #claude }
 
@@ -106,8 +107,42 @@ project `AGENTS.md` (native) — so both scopes apply, each by the right mechani
 agedum --kimi -- kimi -p "explain this code"
 ```
 
+## `--opencode` { #opencode }
+
+opencode is **pure path-discovery** — it reads instructions and skills from fixed
+locations and needs no flags — so every scope is a bind and nothing is appended to your
+command.
+
+| Source | Injected at |
+|---|---|
+| project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
+| project `.agents/skills/` | `<root>/.opencode/skills/` |
+| global `~/.config/agents/AGENTS.md` | `$XDG_CONFIG_HOME/opencode/AGENTS.md` (default `~/.config/opencode/AGENTS.md`) |
+| global `~/.agents/skills/` | `$XDG_CONFIG_HOME/opencode/skills/` (default `~/.config/opencode/skills/`) |
+
+- **Project instructions** — opencode reads the root `AGENTS.md` (traversing up from the
+  work dir) as its project rules file. That is exactly the agent-neutral source, already
+  in place, so **agedum injects nothing** for it — and never could, since the root
+  `AGENTS.md` is git-tracked.
+- **Global instructions** — opencode reads `~/.config/opencode/AGENTS.md` as its
+  user-scope rules file, so the global `AGENTS.md` is bound there.
+- **Skills** — compiled with the `SKILL.opencode.md` overlay and bound to
+  `./.opencode/skills/` (project) and `~/.config/opencode/skills/` (global). opencode
+  searches those directories **before** `.agents/skills/` / `~/.agents/skills/` (which it
+  would otherwise read directly), so the overlaid copy wins over the raw source.
+- `extra_args`: **none** — opencode discovers everything from disk, like Claude.
+
+This is the closest harness to Claude: pure binds, each scope at its own native
+location, never merged. The one difference is that the project instructions are read in
+place rather than relocated.
+
+```bash
+agedum --opencode -- opencode run "review this change"
+agedum --opencode -- opencode            # interactive TUI
+```
+
 ## Other harnesses
 
-`opencode` and `--<harness>-variant` composition are planned. Adding a harness is a new
+`--<harness>-variant` composition is a planned follow-up. Adding a harness is a new
 compiler function returning the same plan shape (binds + extra args); the launcher and
 CLI are harness-agnostic. See [Internals](internals.md) for the plan/launch contract.

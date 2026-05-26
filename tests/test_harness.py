@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from agedum.harness import claude_config_dir, compile_claude, compile_kimi, kimi_config_dir
+from agedum.harness import (
+    claude_config_dir,
+    compile_claude,
+    compile_kimi,
+    compile_opencode,
+    kimi_config_dir,
+    opencode_config_dir,
+)
 from agedum.sources import Source, load_source
 
 
@@ -154,3 +161,69 @@ def test_compile_kimi_project_only_injects_no_agent_file(tmp_path):
 
     assert "--agent-file" not in plan.extra_args
     assert plan.binds == []
+
+
+def test_compile_opencode(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.opencode.md").write_text("---\nlicense: MIT\n---\nopencode note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    config = opencode_config_dir()
+    assert config == xdg / "opencode"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_opencode(project, global_, dest)
+
+    targets = _targets(plan)
+    # opencode is pure path-discovery — no extra args.
+    assert plan.extra_args == []
+
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected.
+    assert proj / "AGENTS.md" not in targets
+
+    # Global instructions -> <config>/AGENTS.md.
+    assert config / "AGENTS.md" in targets
+    assert _src_for(plan, config / "AGENTS.md").read_text() == "GLOBAL-INSTR\n"
+
+    # Project skills -> ./.opencode/skills, with the opencode overlay merged.
+    assert proj / ".opencode" / "skills" in targets
+    pskill_md = (_src_for(plan, proj / ".opencode" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "license: MIT" in pskill_md
+    assert "opencode note" in pskill_md
+
+    # Global skills -> <config>/skills.
+    assert config / "skills" in targets
+    assert (_src_for(plan, config / "skills") / "gskill" / "SKILL.md").exists()
+
+
+def test_compile_opencode_project_only_injects_skills_not_instructions(tmp_path):
+    # No global scope: project AGENTS.md is native (no bind), only project skills bind.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_opencode(project, None, dest)
+
+    assert plan.extra_args == []
+    assert _targets(plan) == [proj / ".opencode" / "skills"]

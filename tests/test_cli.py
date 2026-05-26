@@ -27,7 +27,7 @@ def test_help_when_no_args(monkeypatch, capsys):
     cli.app()
     out = capsys.readouterr().out
     assert "usage: agedum" in out
-    assert "--claude" in out and "--kimi" in out
+    assert "--claude" in out and "--kimi" in out and "--opencode" in out
 
 
 def test_claude_passes_everything_after_dashdash(monkeypatch):
@@ -48,6 +48,16 @@ def test_kimi_mode_recognised(monkeypatch):
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["kimi", "-p", "hi"]
+
+
+def test_opencode_mode_recognised(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--opencode", "--", "opencode", "run", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["opencode", "run", "hi"]
 
 
 def test_missing_dashdash_errors(monkeypatch):

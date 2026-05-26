@@ -2,8 +2,8 @@
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
-private mount namespace at launch. Implemented: **Claude** and **kimi** harnesses at
-**project + global scope**.
+private mount namespace at launch. Implemented: **Claude**, **kimi**, and **opencode**
+harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
@@ -16,8 +16,15 @@ private mount namespace at launch. Implemented: **Claude** and **kimi** harnesse
   — appended only when a global scope exists; the two coexist. Skills are binds: global
   → `~/.kimi/skills/`, project → `./.kimi/skills/` (both auto-read). Matches condash's
   prior kimi layout; uniform with the Claude harness.
+- **opencode** — pure path-discovery (no flags). Project `AGENTS.md` is read natively at
+  `./AGENTS.md`, so agedum leaves it in place. Global `AGENTS.md` → `<config>/AGENTS.md`;
+  skills → `./.opencode/skills/` (project) + `<config>/skills/` (global), where
+  `<config>` is `$XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`). opencode
+  searches those skills dirs before `.agents/skills/` / `~/.agents/skills/`, so the
+  overlaid (`SKILL.opencode.md`) copy wins over the raw source. Matches condash's
+  opencode layout; uniform with the Claude harness, no `extra_args`.
 
-Follow-ups: opencode, `--<harness>-variant` composition.
+Follow-ups: `--<harness>-variant` composition.
 
 ## Stack
 
@@ -60,14 +67,15 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 ## CLI contract
 
 `agedum <context-flags> -- <command...>`. Flag before `--` chooses the virtual-file
-context (`--claude` / `--kimi`); everything after `--` is the child argv (some
-harnesses also get extra flags appended — kimi's `--agent-file`). Context
-and command are decoupled; the flag space is open for future `--<harness>` modes.
+context (`--claude` / `--kimi` / `--opencode`); everything after `--` is the child argv
+(some harnesses also get extra flags appended — kimi's `--agent-file`; Claude and
+opencode are pure binds). Context and command are decoupled; the flag space is open for
+future `--<harness>` modes.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
-`compile_kimi` → a `Plan` of absolute binds **+ `extra_args`** for the command),
-`launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` — appends
-`plan.extra_args`), `cli/main.py` (parse + `_COMPILERS` dispatch).
+`compile_kimi` / `compile_opencode` → a `Plan` of absolute binds **+ `extra_args`** for
+the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
+appends `plan.extra_args`), `cli/main.py` (parse + `_COMPILERS` dispatch).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 
