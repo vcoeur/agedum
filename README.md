@@ -46,6 +46,15 @@ Everything after `--` is the command, run verbatim; the context flag before `--`
 command. Injected paths must be gitignored — agedum refuses to overlay a git-tracked
 file (the namespace shares your real `.git`).
 
+## Documentation
+
+Full docs at **[agedum.vcoeur.com](https://agedum.vcoeur.com)**:
+
+- [Source shape](https://agedum.vcoeur.com/source-shape/) — the structure of `AGENTS.md` and `.agents/skills/`
+- [Scopes](https://agedum.vcoeur.com/scopes/) — project vs global (user) scope, and where each lands
+- [Harnesses](https://agedum.vcoeur.com/harnesses/) — exactly what agedum does for each `--<harness>` command
+- [CLI reference](https://agedum.vcoeur.com/cli/) and [Internals](https://agedum.vcoeur.com/internals/) — the mount-namespace launch and its safety rules
+
 ## Install
 
 ```bash
@@ -59,6 +68,7 @@ make dev-install   # uv sync --all-groups
 make test          # pytest
 make lint          # ruff check + format --check
 make run -- --version
+make docs          # build the docs site (strict); docs-serve for live preview
 ```
 
 Python ≥ 3.12, managed with [uv](https://docs.astral.sh/uv/). The version is

@@ -5,7 +5,7 @@ Shape: ``agedum <context-flags> -- <full command incl. binary>``.
 The context flag before ``--`` chooses which virtual files to build (``--claude``
 or ``--kimi``); everything after ``--`` is the child argv, run inside a mount
 namespace where those files are injected at the harness's expected paths (some
-harnesses also need extra flags appended — e.g. kimi's ``--agent-file`` / ``--config``).
+harnesses also need extra flags appended — e.g. kimi's ``--agent-file``).
 Decoupling context from command keeps the flag space open for more ``--<harness>``
 modes / variants.
 """

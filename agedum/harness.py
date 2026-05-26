@@ -40,7 +40,7 @@ class Plan:
     """
 
     binds: list[tuple[Path, Path]] = field(default_factory=list)
-    # Extra args appended to the launched command (e.g. kimi's --agent-file / --config).
+    # Extra args appended to the launched command (e.g. kimi's --agent-file).
     extra_args: list[str] = field(default_factory=list)
 
 

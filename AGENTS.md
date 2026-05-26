@@ -36,9 +36,14 @@ make test          # uv run pytest
 make lint          # ruff check + ruff format --check
 make format        # ruff --fix + format
 make run -- --version
+make docs           # build docs site (strict); docs-serve for live preview
 ```
 
 Run `make format` after every change. Commit `uv.lock`; `.venv/` stays gitignored.
+
+Docs are an MkDocs Material site under `docs/` (+ `mkdocs.yml`), published to
+`agedum.vcoeur.com` via GitHub Pages. Source shape, scopes, and per-harness behaviour
+are documented there — keep `docs/` in sync when the source layout or a compiler changes.
 
 ## CI / release
 
@@ -46,12 +51,14 @@ Run `make format` after every change. Commit `uv.lock`; `.venv/` stays gitignore
   and every PR.
 - `.github/workflows/release.yml` — on a `v*` tag push, `uv build` then publish to
   **PyPI** via OIDC trusted publishing (no token in the repo). Tag only after merge.
+- `.github/workflows/docs.yml` — on push to `main` touching `docs/**` or `mkdocs.yml`,
+  build the site with `mkdocs build --strict` and deploy to GitHub Pages.
 
 ## CLI contract
 
 `agedum <context-flags> -- <command...>`. Flag before `--` chooses the virtual-file
 context (`--claude` / `--kimi`); everything after `--` is the child argv (some
-harnesses also get extra flags appended — kimi's `--agent-file` / `--config`). Context
+harnesses also get extra flags appended — kimi's `--agent-file`). Context
 and command are decoupled; the flag space is open for future `--<harness>` modes.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
