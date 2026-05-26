@@ -1,0 +1,64 @@
+[project]
+name = "agedum"
+dynamic = ["version"]
+description = "Drive any agent CLI from an agent-neutral source shape (AGENTS.md + .agents/skills), translating per harness at launch."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Alice Voland" }]
+requires-python = ">=3.12"
+dependencies = [
+    "rich>=13.9",
+    "typer>=0.16",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Repository = "https://github.com/vcoeur/agedum"
+Issues = "https://github.com/vcoeur/agedum/issues"
+
+[project.scripts]
+agedum = "agedum.cli.main:app"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+# Version is derived from the git tag (vX.Y.Z) at build time — never committed.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agedum"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-cov>=6.0",
+    "ruff>=0.15.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["SIM105", "SIM117"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's Option(...) default-arg pattern is idiomatic; B008 flags it.
+"agedum/cli/main.py" = ["B008"]
