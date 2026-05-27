@@ -66,16 +66,27 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 
 ## CLI contract
 
-`agedum <context-flags> -- <command...>`. Flag before `--` chooses the virtual-file
-context (`--claude` / `--kimi` / `--opencode`); everything after `--` is the child argv
-(some harnesses also get extra flags appended — kimi's `--agent-file`; Claude and
-opencode are pure binds). Context and command are decoupled; the flag space is open for
-future `--<harness>` modes.
+Two modes, dispatched in `cli/main.py` on the first argument:
+
+- **wrapper** — `agedum --wrapper <harness> -- <command...>`. The flag before `--`
+  chooses the virtual-file context (`claude` / `kimi` / `opencode`); everything after
+  `--` is the child argv (some harnesses get extra flags appended — kimi's
+  `--agent-file`; Claude and opencode are pure binds). The bare `--claude` / `--kimi` /
+  `--opencode` flags are **deprecated aliases** (stderr notice, still run). Context and
+  command are decoupled.
+- **build-script** — `agedum --build-script [--check] conf.json [out.sh]`. Compile a
+  condash-style provider config JSON into a shell wrapper that sources
+  `${AGENTS_ENV_FILE:-$HOME/.config/agents/.env}`, validates + exports `requiredEnv`,
+  exports the provider/model/auth env, then `exec`s `agedum --wrapper`. The harness is
+  read **from the config** (the file is the build input). `--check` exits non-zero if a
+  committed `out.sh` is stale (CI drift guard). No `bwrap` needed — pure codegen.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
 `compile_kimi` / `compile_opencode` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
-appends `plan.extra_args`), `cli/main.py` (parse + `_COMPILERS` dispatch).
+appends `plan.extra_args`), `buildscript.py` (`build_script` / `build_script_from_file`
+→ wrapper-script text; per-harness env mapping mirrors condash's pre-4.0 launcher),
+`cli/main.py` (parse + `_COMPILERS` dispatch + `_run_build_script`).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 

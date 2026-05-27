@@ -5,7 +5,7 @@ description: Exactly what agedum does for each harness command — the Claude (-
 
 # Harnesses
 
-The flag before `--` selects a **compiler**. Each compiler renders the agent-neutral
+`--wrapper <harness>` selects a **compiler**. Each compiler renders the agent-neutral
 [source](source-shape.md) into one harness's native layout and produces a *plan* — a
 set of `(compiled-file → mount-target)` binds, plus any extra arguments to append to
 your command. The [launcher](internals.md) then injects the binds into a private mount
@@ -13,17 +13,22 @@ namespace and runs the command. Context and command are decoupled: the flag pick
 format; everything after `--` is run verbatim.
 
 ```bash
-agedum --claude   -- claude -p "…"       # render for Claude, run claude
-agedum --kimi     -- kimi -p "…"         # render for kimi, run kimi
-agedum --opencode -- opencode run "…"    # render for opencode, run opencode
+agedum --wrapper claude   -- claude -p "…"     # render for Claude, run claude
+agedum --wrapper kimi     -- kimi -p "…"       # render for kimi, run kimi
+agedum --wrapper opencode -- opencode run "…"  # render for opencode, run opencode
 ```
+
+The bare `--claude` / `--kimi` / `--opencode` flags are **deprecated aliases** for
+`--wrapper <harness>`. To launch a harness with a *provider/model/auth* environment too,
+generate a wrapper script with [build-script mode](build-script.md) — it sets that
+environment, then `exec`s `agedum --wrapper`.
 
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
 harness (`SKILL.claude.md` for Claude, `SKILL.kimi.md` for kimi, `SKILL.opencode.md` for
 opencode; other harnesses' overlays are skipped).
 
-## `--claude` { #claude }
+## `--wrapper claude` { #claude }
 
 Claude discovers its context purely from the filesystem, so agedum injects files at the
 paths Claude already reads. Nothing is appended to your command.
@@ -47,13 +52,13 @@ paths Claude already reads. Nothing is appended to your command.
 
 ```bash
 # Interactive Claude with project + global context injected:
-agedum --claude -- claude
+agedum --wrapper claude -- claude
 
 # Headless review with a specific model:
-agedum --claude -- claude --model sonnet -p "review this change"
+agedum --wrapper claude -- claude --model sonnet -p "review this change"
 ```
 
-## `--kimi` { #kimi }
+## `--wrapper kimi` { #kimi }
 
 kimi reads the **project** `AGENTS.md` from the filesystem natively, but has **no
 user-scope `AGENTS.md`** — so agedum leaves the project instructions in place and
@@ -104,10 +109,10 @@ project `AGENTS.md` (native) — so both scopes apply, each by the right mechani
   natively. This mirrors the Claude harness — each scope kept distinct, never merged.
 
 ```bash
-agedum --kimi -- kimi -p "explain this code"
+agedum --wrapper kimi -- kimi -p "explain this code"
 ```
 
-## `--opencode` { #opencode }
+## `--wrapper opencode` { #opencode }
 
 opencode is **pure path-discovery** — it reads instructions and skills from fixed
 locations and needs no flags — so every scope is a bind and nothing is appended to your
@@ -137,8 +142,8 @@ location, never merged. The one difference is that the project instructions are 
 place rather than relocated.
 
 ```bash
-agedum --opencode -- opencode run "review this change"
-agedum --opencode -- opencode            # interactive TUI
+agedum --wrapper opencode -- opencode run "review this change"
+agedum --wrapper opencode -- opencode            # interactive TUI
 ```
 
 ## Other harnesses

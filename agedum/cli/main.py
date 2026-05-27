@@ -1,13 +1,15 @@
-"""``agedum`` CLI entrypoint.
+"""``agedum`` CLI entrypoint — two modes.
 
-Shape: ``agedum <context-flags> -- <full command incl. binary>``.
+**wrapper** (run time): ``agedum --wrapper <harness> -- <command…>``. The harness
+before ``--`` chooses which virtual files to build (Claude / kimi / opencode);
+everything after ``--`` is the child argv, run inside a mount namespace where those
+files are injected at the harness's expected paths. The legacy ``--claude`` /
+``--kimi`` / ``--opencode`` flags are kept as deprecated aliases for ``--wrapper <h>``.
 
-The context flag before ``--`` chooses which virtual files to build (``--claude``
-or ``--kimi``); everything after ``--`` is the child argv, run inside a mount
-namespace where those files are injected at the harness's expected paths (some
-harnesses also need extra flags appended — e.g. kimi's ``--agent-file``).
-Decoupling context from command keeps the flag space open for more ``--<harness>``
-modes / variants.
+**build-script** (compile time): ``agedum --build-script [--check] conf.json [out.sh]``.
+Compile a condash-style provider config JSON into a standalone shell wrapper that sets
+the provider/model/auth environment then ``exec``s ``agedum --wrapper`` — see
+:mod:`agedum.buildscript`.
 """
 
 from __future__ import annotations
@@ -21,34 +23,45 @@ from pathlib import Path
 from rich.console import Console
 
 from agedum import __version__
+from agedum.buildscript import BuildScriptError, build_script_from_file
 from agedum.harness import Plan, compile_claude, compile_kimi, compile_opencode
 from agedum.launcher import LauncherError, run_virtualfs
 from agedum.sources import Source, load_global_source, load_source
 
 _err = Console(stderr=True)
 
-# context flag -> compiler
+# harness name -> compiler
 _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "claude": compile_claude,
     "kimi": compile_kimi,
     "opencode": compile_opencode,
 }
 
-USAGE = "usage: agedum (--claude | --kimi | --opencode) -- <command> [args...]"
+USAGE = (
+    "usage: agedum --wrapper <claude|kimi|opencode> -- <command> [args...]\n"
+    "       agedum --build-script [--check] <config.json> [output.sh]"
+)
 HELP = f"""{USAGE}
 
-Run a command inside a virtual-file context built from the project's
-agent-neutral source (AGENTS.md + .agents/skills/), plus the global source
-(~/.config/agents/AGENTS.md + ~/.agents/skills/).
+Wrapper mode — run a command inside a virtual-file context built from the project's
+agent-neutral source (AGENTS.md + .agents/skills/) plus the global source
+(~/.config/agents/AGENTS.md + ~/.agents/skills/):
 
-Context flags (before --):
-  --claude        build Claude-format virtual files for the command
-  --kimi          build kimi-cli-format virtual files for the command
-  --opencode      build opencode-format virtual files for the command
+  --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode)
+                        then run the command after -- inside the namespace
+  --claude / --kimi / --opencode
+                        deprecated aliases for `--wrapper <harness>`
+
+Build-script mode — compile a provider config JSON into a shell wrapper that sets the
+provider/model/auth environment and execs `agedum --wrapper <harness> -- <harness>`:
+
+  --build-script <config.json> [output.sh]   write the wrapper (stdout if no output)
+  --check                                     with an output.sh, exit non-zero if it
+                                              is stale vs a fresh generation
 
 Other:
-  --version       print the version and exit
-  -h, --help      show this help
+  --version, -V         print the version and exit
+  -h, --help            show this help
 """
 
 
@@ -69,6 +82,18 @@ def app() -> None:
         print(HELP)
         return
 
+    if argv[0] == "--build-script":
+        raise SystemExit(_run_build_script(argv[1:]))
+
+    raise SystemExit(_run_wrapper(argv))
+
+
+# ---------------------------------------------------------------------------
+# wrapper mode
+# ---------------------------------------------------------------------------
+
+
+def _run_wrapper(argv: list[str]) -> int:
     if "--" not in argv:
         _die("missing `--` separator before the command")
     split = argv.index("--")
@@ -77,16 +102,32 @@ def app() -> None:
         _die("no command given after `--`")
 
     mode: str | None = None
-    for flag in flags:
-        name = flag.removeprefix("--")
-        if name in _COMPILERS:
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        if flag == "--wrapper" or flag.startswith("--wrapper="):
+            if "=" in flag:
+                value = flag.split("=", 1)[1]
+            else:
+                index += 1
+                if index >= len(flags):
+                    _die("--wrapper requires a harness: claude, kimi, or opencode")
+                value = flags[index]
+            if value not in _COMPILERS:
+                _die(f"unknown harness for --wrapper: {value}")
+            mode = value
+        elif flag.removeprefix("--") in _COMPILERS:
+            name = flag.removeprefix("--")
+            _err.print(f"[yellow]agedum:[/] `{flag}` is deprecated; use `--wrapper {name}`")
             mode = name
         else:
             _die(f"unknown option: {flag}")
-    if mode is None:
-        _die("a context mode is required: --claude, --kimi, or --opencode")
+        index += 1
 
-    raise SystemExit(_run(mode, command))
+    if mode is None:
+        _die("a harness is required: --wrapper claude|kimi|opencode")
+
+    return _run(mode, command)
 
 
 def _run(mode: str, command: list[str]) -> int:
@@ -106,3 +147,51 @@ def _run(mode: str, command: list[str]) -> int:
         return 1
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# build-script mode
+# ---------------------------------------------------------------------------
+
+
+def _run_build_script(args: list[str]) -> int:
+    check = False
+    positionals: list[str] = []
+    for arg in args:
+        if arg == "--check":
+            check = True
+        elif arg.startswith("-") and arg != "-":
+            _die(f"unknown option for --build-script: {arg}")
+        else:
+            positionals.append(arg)
+
+    if not positionals:
+        _die("--build-script requires a config JSON path")
+    if len(positionals) > 2:
+        _die("--build-script takes at most a config path and an output path")
+    config_path = Path(positionals[0])
+    output_path = Path(positionals[1]) if len(positionals) > 1 else None
+
+    try:
+        script = build_script_from_file(config_path)
+    except BuildScriptError as exc:
+        _err.print(f"[red]agedum:[/] {exc}")
+        return 1
+
+    if check:
+        if output_path is None:
+            _die("--check requires an output.sh path to compare against")
+        if not output_path.is_file():
+            _err.print(f"[red]agedum:[/] {output_path} does not exist — generate it first")
+            return 1
+        if output_path.read_text() != script:
+            _err.print(f"[red]agedum:[/] {output_path} is stale — regenerate it from {config_path}")
+            return 1
+        return 0
+
+    if output_path is None:
+        sys.stdout.write(script)
+    else:
+        output_path.write_text(script)
+        output_path.chmod(0o755)
+    return 0

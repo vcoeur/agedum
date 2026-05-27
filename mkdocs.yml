@@ -83,5 +83,6 @@ nav:
   - Scopes: scopes.md
   - Harnesses: harnesses.md
   - CLI reference: cli.md
+  - Build-script: build-script.md
   - Internals: internals.md
   - Legal: legal.md
