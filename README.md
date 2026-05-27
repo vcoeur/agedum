@@ -10,12 +10,19 @@ you run.
 - **Skills** live in `.agents/skills/<name>/` as `SKILL.md` (+ optional task files,
   scripts, and a per-harness `SKILL.<harness>.md` overlay).
 
-At launch, agedum compiles that shape to the harness's native layout in a throwaway
-dir, then runs your command inside a **private mount namespace** (bubblewrap) where
-the compiled files appear at their expected paths — visible only to that process,
-never written into your real tree or `$HOME`. For Claude: `AGENTS.md` → `CLAUDE.md`
-and `.agents/skills/<name>/` → `.claude/skills/<name>/` (the base `SKILL.md` merged
-with an optional `SKILL.claude.md` overlay).
+agedum has two modes:
+
+- **`agedum --wrapper <harness> -- <command>`** — at launch, compile the source to the
+  harness's native layout in a throwaway dir, then run your command inside a **private
+  mount namespace** (bubblewrap) where the compiled files appear at their expected paths
+  — visible only to that process, never written into your real tree or `$HOME`. For
+  Claude: `AGENTS.md` → `CLAUDE.md` and `.agents/skills/<name>/` → `.claude/skills/<name>/`
+  (the base `SKILL.md` merged with an optional `SKILL.claude.md` overlay).
+- **`agedum --build-script conf.json [out.sh]`** — compile a provider config JSON into a
+  standalone shell wrapper that sources a `.env`, validates the required vars, exports
+  the provider/model/auth environment, and `exec`s `agedum --wrapper`. The two compose:
+  the generated wrapper sets the environment, then hands off to the wrapper mode for
+  skills/instructions injection.
 
 > **Status:** Claude harness, **project + global scope**, implemented. Each scope
 > lands at its *own* Claude location — project → `./CLAUDE.md` + `./.claude/skills/`,
@@ -24,34 +31,40 @@ with an optional `SKILL.claude.md` overlay).
 > reads both. Only those two `~/.claude` paths are overlaid for the child — your
 > `~/.claude.json` auth and other settings are untouched.
 >
-> **kimi** (`--kimi`) is also supported. kimi reads the project `AGENTS.md` natively,
-> so agedum leaves it in place; it has no user-scope `AGENTS.md`, so the global
+> **kimi** (`--wrapper kimi`) is also supported. kimi reads the project `AGENTS.md`
+> natively, so agedum leaves it in place; it has no user-scope `AGENTS.md`, so the global
 > `AGENTS.md` is injected via a transient `--agent-file` YAML (no `--agent-file` is
 > added when there's no global scope). Skills are binds: global → `~/.kimi/skills/`,
 > project → `./.kimi/skills/` (both auto-read by kimi).
 >
-> **opencode** (`--opencode`) is supported too — pure path-discovery, like Claude. The
-> project `AGENTS.md` is read natively (`./AGENTS.md`); the global `AGENTS.md` binds to
-> `~/.config/opencode/AGENTS.md`; skills bind to `./.opencode/skills/` (project) and
-> `~/.config/opencode/skills/` (global), both searched before `.agents/skills/` so the
-> overlaid copy wins. No extra flags. Linux-only; requires `bwrap` on PATH.
+> **opencode** (`--wrapper opencode`) is supported too — pure path-discovery, like
+> Claude. The project `AGENTS.md` is read natively (`./AGENTS.md`); the global
+> `AGENTS.md` binds to `~/.config/opencode/AGENTS.md`; skills bind to `./.opencode/skills/`
+> (project) and `~/.config/opencode/skills/` (global), both searched before
+> `.agents/skills/` so the overlaid copy wins. No extra flags. Wrapper mode is Linux-only
+> and requires `bwrap` on PATH.
 
 ## Usage
 
 ```bash
-# Run a command with virtual files injected from the project + global source:
-agedum --claude   -- claude --model sonnet -p "review this"
-agedum --claude   -- claude                      # interactive
-agedum --kimi     -- kimi -p "explain this code"
-agedum --opencode -- opencode run "explain this code"
+# Wrapper mode — virtual files injected from the project + global source:
+agedum --wrapper claude   -- claude --model sonnet -p "review this"
+agedum --wrapper claude   -- claude                      # interactive
+agedum --wrapper kimi     -- kimi -p "explain this code"
+agedum --wrapper opencode -- opencode run "explain this code"
+
+# Build-script mode — compile a provider config into a launcher script:
+agedum --build-script providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
+agedum --build-script --check providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
 
 agedum --version
 ```
 
-Everything after `--` is the command, run verbatim; the context flag before `--`
-(`--claude`) chooses the format. The two are decoupled, so one context can front any
-command. Injected paths must be gitignored — agedum refuses to overlay a git-tracked
-file (the namespace shares your real `.git`).
+In wrapper mode, everything after `--` is the command, run verbatim; `--wrapper <harness>`
+chooses the format. The two are decoupled, so one context can front any command. Injected
+paths must be gitignored — agedum refuses to overlay a git-tracked file (the namespace
+shares your real `.git`). The bare `--claude` / `--kimi` / `--opencode` flags remain as
+deprecated aliases for `--wrapper <harness>`.
 
 ## Documentation
 
@@ -59,7 +72,8 @@ Full docs at **[agedum.vcoeur.com](https://agedum.vcoeur.com)**:
 
 - [Source shape](https://agedum.vcoeur.com/source-shape/) — the structure of `AGENTS.md` and `.agents/skills/`
 - [Scopes](https://agedum.vcoeur.com/scopes/) — project vs global (user) scope, and where each lands
-- [Harnesses](https://agedum.vcoeur.com/harnesses/) — exactly what agedum does for each `--<harness>` command
+- [Harnesses](https://agedum.vcoeur.com/harnesses/) — exactly what agedum does for each `--wrapper <harness>`
+- [Build-script](https://agedum.vcoeur.com/build-script/) — compile a provider config JSON into a launcher script
 - [CLI reference](https://agedum.vcoeur.com/cli/) and [Internals](https://agedum.vcoeur.com/internals/) — the mount-namespace launch and its safety rules
 
 ## Install

@@ -27,15 +27,17 @@ written into your real tree or `$HOME`.
 
 ```bash
 # Render the project + global source for Claude, then run Claude inside it:
-agedum --claude -- claude -p "review this change"
+agedum --wrapper claude -- claude -p "review this change"
 
 # Same source, rendered for kimi or opencode instead:
-agedum --kimi     -- kimi -p "review this change"
-agedum --opencode -- opencode run "review this change"
+agedum --wrapper kimi     -- kimi -p "review this change"
+agedum --wrapper opencode -- opencode run "review this change"
 ```
 
-The flag before `--` chooses the *format*; everything after `--` is the command, run
-verbatim. The two are decoupled, so one source can front any agent CLI.
+`--wrapper <harness>` chooses the *format*; everything after `--` is the command, run
+verbatim. The two are decoupled, so one source can front any agent CLI. To launch a
+harness with a provider/model/auth environment as well, compile a provider config into
+a shell wrapper with [build-script mode](build-script.md).
 
 ## Why agedum
 
@@ -59,9 +61,9 @@ copy-pasting into each one's bespoke layout. `agedum` is the translation layer:
 ```mermaid
 flowchart LR
   src["AGENTS.md + .agents/skills/<br/>(project + global)"] --> agedum
-  agedum -->|"--claude"| cl["CLAUDE.md + .claude/skills/"]
-  agedum -->|"--kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
-  agedum -->|"--opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
+  agedum -->|"--wrapper claude"| cl["CLAUDE.md + .claude/skills/"]
+  agedum -->|"--wrapper kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
+  agedum -->|"--wrapper opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   oc --> ns
@@ -77,19 +79,24 @@ flowchart LR
 
 | Harness | Flag | Status |
 |---|---|---|
-| Claude | `--claude` | Implemented — project + global scope |
-| kimi   | `--kimi`   | Implemented — project + global scope |
-| opencode | `--opencode` | Implemented — project + global scope |
+| Claude | `--wrapper claude` | Implemented — project + global scope |
+| kimi   | `--wrapper kimi`   | Implemented — project + global scope |
+| opencode | `--wrapper opencode` | Implemented — project + global scope |
 
-Linux-only; requires `bwrap` ([bubblewrap](https://github.com/containers/bubblewrap))
-on `PATH`.
+The bare `--claude` / `--kimi` / `--opencode` flags still work as deprecated aliases.
+[Build-script mode](build-script.md) compiles a provider config into a launcher script.
+
+Wrapper mode is Linux-only and requires `bwrap`
+([bubblewrap](https://github.com/containers/bubblewrap)) on `PATH`; build-script mode
+(pure codegen) runs anywhere.
 
 ## Learn more
 
 - [Install](install.md) — install, prerequisites, dev mode
 - [Source shape](source-shape.md) — the structure of `AGENTS.md` and `.agents/skills/`
 - [Scopes](scopes.md) — project vs global (user) scope, and where each lands
-- [Harnesses](harnesses.md) — exactly what agedum does for each `--<harness>` command
+- [Harnesses](harnesses.md) — exactly what agedum does for each `--wrapper <harness>`
 - [CLI reference](cli.md) — flags and invocation contract
+- [Build-script](build-script.md) — compile a provider config JSON into a launcher script
 - [Internals](internals.md) — the mount-namespace launch and its safety rules
 - [Source on GitHub](https://github.com/vcoeur/agedum) · [`agedum` on PyPI](https://pypi.org/project/agedum/)
