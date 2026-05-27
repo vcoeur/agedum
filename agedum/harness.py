@@ -16,6 +16,11 @@ mounts into the namespace.
 Per skill: the base ``SKILL.md`` (minimal `name`/`description`) is merged with an
 optional ``SKILL.claude.md`` overlay; task files and scripts are copied verbatim;
 other harnesses' ``SKILL.<h>.md`` overlays are skipped.
+
+Instructions get the same overlay treatment, but **only at user (global) scope**: the
+base ``~/.config/agents/AGENTS.md`` is merged with an optional sibling
+``~/.config/agents/AGENTS.<harness>.md`` (see :func:`_instructions`). ``AGENTS.md``
+carries no front-matter, so the merge is a plain body concatenation.
 """
 
 from __future__ import annotations
@@ -50,6 +55,40 @@ def claude_config_dir() -> Path:
     return Path(override) if override else Path.home() / ".claude"
 
 
+def _instructions(source: Source, overlay_harness: str | None) -> str | None:
+    """Resolve a scope's instructions text, optionally merging a harness overlay.
+
+    Returns the scope's ``AGENTS.md`` text, or ``None`` when the scope has no base
+    ``AGENTS.md``. When ``overlay_harness`` is a harness name and a sibling
+    ``AGENTS.<harness>.md`` exists next to the base, the two are merged
+    (:func:`_merge_instructions`); when it is ``None`` the base text is returned
+    verbatim. Used with an overlay only at user (global) scope.
+    """
+    if source.agents_md is None:
+        return None
+    base = source.agents_md.read_text()
+    if overlay_harness is None:
+        return base
+    overlay = source.agents_md.parent / f"AGENTS.{overlay_harness}.md"
+    if overlay.is_file():
+        return _merge_instructions(base, overlay.read_text())
+    return base
+
+
+def _merge_instructions(base: str, overlay: str) -> str:
+    """Merge a base ``AGENTS.md`` with a harness-specific ``AGENTS.<harness>.md`` overlay.
+
+    Unlike ``SKILL.md``, ``AGENTS.md`` carries no front-matter (it is raw-injected into
+    the prompt), so there is nothing to union — the bodies are concatenated with a blank
+    line between them. A non-empty part survives an empty counterpart.
+    """
+    if not overlay.strip():
+        return base
+    if not base.strip():
+        return overlay
+    return f"{base.rstrip()}\n\n{overlay.lstrip()}\n"
+
+
 def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
     """Render each scope into its own Claude location under `dest`; return the `Plan`.
 
@@ -59,22 +98,25 @@ def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
-    # Project scope -> in-tree Claude paths.
+    # Project scope -> in-tree Claude paths. No instructions overlay (user scope only).
     _compile_scope(
         plan,
         project,
         dest / "project",
+        instructions=_instructions(project, None),
         claude_md_target=project.root / "CLAUDE.md",
         skills_target=project.root / ".claude" / "skills",
     )
 
-    # Global scope -> the user-scope Claude config dir (separate from project).
+    # Global scope -> the user-scope Claude config dir (separate from project), with the
+    # AGENTS.claude.md overlay merged into the global instructions.
     if global_ is not None:
         cc = claude_config_dir()
         _compile_scope(
             plan,
             global_,
             dest / "global",
+            instructions=_instructions(global_, "claude"),
             claude_md_target=cc / "CLAUDE.md",
             skills_target=cc / "skills",
         )
@@ -87,13 +129,14 @@ def _compile_scope(
     source: Source,
     dest: Path,
     *,
+    instructions: str | None,
     claude_md_target: Path,
     skills_target: Path,
 ) -> None:
-    if source.agents_md is not None:
+    if instructions is not None:
         out = dest / "CLAUDE.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(source.agents_md.read_text())
+        out.write_text(instructions)
         plan.binds.append((out, claude_md_target))
 
     if source.skills_dir is not None:
@@ -175,8 +218,9 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     from the project root (nearest ``.git``) down to the work dir into the system
     prompt's ``KIMI_AGENTS_MD`` slot — so the source file is already where kimi looks
     and agedum injects nothing for it. kimi has **no user-scope ``AGENTS.md``**, so the
-    **global** ``AGENTS.md`` is injected via a custom ``--agent-file`` that extends the
-    default agent (``system_prompt_args.ROLE_ADDITIONAL``). The two coexist: the
+    **global** ``AGENTS.md`` (base merged with an optional ``AGENTS.kimi.md`` overlay) is
+    injected via a custom ``--agent-file`` that extends the default agent
+    (``system_prompt_args.ROLE_ADDITIONAL``). The two coexist: the
     agent-file fills ``ROLE_ADDITIONAL`` while native discovery fills ``KIMI_AGENTS_MD``.
 
     Skills are binds:
@@ -186,10 +230,12 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
-    # Global instructions -> a custom --agent-file (kimi has no user-scope AGENTS.md).
-    # Project instructions are read natively from ./AGENTS.md, so they are left in place.
-    if global_ is not None and global_.agents_md is not None:
-        instructions = global_.agents_md.read_text().strip("\n") + "\n"
+    # Global instructions (base + AGENTS.kimi.md overlay) -> a custom --agent-file (kimi
+    # has no user-scope AGENTS.md). Project instructions are read natively from
+    # ./AGENTS.md, so they are left in place.
+    global_instructions = _instructions(global_, "kimi") if global_ is not None else None
+    if global_instructions is not None:
+        instructions = global_instructions.strip("\n") + "\n"
         agent_file = dest / "agent.yaml"
         agent_file.parent.mkdir(parents=True, exist_ok=True)
         agent_file.write_text(_kimi_agent_file_yaml(instructions))
@@ -256,8 +302,9 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     * **project instructions** — opencode reads the root ``./AGENTS.md`` natively
       (traversing up from the work dir), and that is exactly the agent-neutral source
       file, so agedum injects nothing for it (and could not — it is git-tracked);
-    * **global instructions** — ``~/.config/agents/AGENTS.md`` → ``<config>/AGENTS.md``,
-      which opencode reads as its user-scope rules file;
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an
+      optional ``AGENTS.opencode.md`` overlay) → ``<config>/AGENTS.md``, which opencode
+      reads as its user-scope rules file;
     * **project skills** → ``./.opencode/skills/``; **global skills** →
       ``<config>/skills/``. opencode searches these *before* ``.agents/skills/`` /
       ``~/.agents/skills/``, so the overlaid copy (``SKILL.opencode.md`` merged in)
@@ -269,11 +316,13 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     plan = Plan()
     config = opencode_config_dir()
 
-    # Global instructions -> <config>/AGENTS.md (project ./AGENTS.md is read natively).
-    if global_ is not None and global_.agents_md is not None:
+    # Global instructions (base + AGENTS.opencode.md overlay) -> <config>/AGENTS.md
+    # (project ./AGENTS.md is read natively).
+    global_instructions = _instructions(global_, "opencode") if global_ is not None else None
+    if global_instructions is not None:
         out = dest / "global" / "AGENTS.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(global_.agents_md.read_text())
+        out.write_text(global_instructions)
         plan.binds.append((out, config / "AGENTS.md"))
 
     # Project skills -> ./.opencode/skills.

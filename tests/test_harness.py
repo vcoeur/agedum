@@ -227,3 +227,81 @@ def test_compile_opencode_project_only_injects_skills_not_instructions(tmp_path)
 
     assert plan.extra_args == []
     assert _targets(plan) == [proj / ".opencode" / "skills"]
+
+
+def test_compile_claude_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    # Global AGENTS.md + AGENTS.claude.md sibling -> merged into ~/.claude/CLAUDE.md;
+    # an AGENTS.kimi.md sibling is ignored when compiling for Claude.
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.claude.md").write_text("CLAUDE-EXTRA\n")
+    (gconf / "AGENTS.kimi.md").write_text("KIMI-EXTRA\n")
+
+    cc = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, cc / "CLAUDE.md").read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "CLAUDE-EXTRA" in merged
+    assert "KIMI-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_compile_claude_project_agents_harness_overlay_not_merged(tmp_path):
+    # The overlay applies at user scope only: a project-scope AGENTS.claude.md is NOT
+    # merged into ./CLAUDE.md.
+    (tmp_path / "AGENTS.md").write_text("PROJECT-BASE\n")
+    (tmp_path / "AGENTS.claude.md").write_text("PROJECT-CLAUDE-EXTRA\n")
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(load_source(tmp_path), None, dest)
+
+    assert _src_for(plan, tmp_path / "CLAUDE.md").read_text() == "PROJECT-BASE\n"
+
+
+def test_compile_kimi_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.kimi.md").write_text("KIMI-EXTRA\n")
+    (gconf / "AGENTS.claude.md").write_text("CLAUDE-EXTRA\n")
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_kimi(load_source(tmp_path / "noproj"), global_, dest)
+
+    yaml_text = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1]).read_text()
+    assert "GLOBAL-BASE" in yaml_text
+    assert "KIMI-EXTRA" in yaml_text
+    assert "CLAUDE-EXTRA" not in yaml_text  # wrong-harness overlay ignored
+
+
+def test_compile_opencode_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.opencode.md").write_text("OPENCODE-EXTRA\n")
+    (gconf / "AGENTS.kimi.md").write_text("KIMI-EXTRA\n")
+
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    config = opencode_config_dir()
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_opencode(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, config / "AGENTS.md").read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "OPENCODE-EXTRA" in merged
+    assert "KIMI-EXTRA" not in merged  # wrong-harness overlay ignored

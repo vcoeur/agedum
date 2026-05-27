@@ -21,7 +21,9 @@ agedum --opencode -- opencode run "…"    # render for opencode, run opencode
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
 harness (`SKILL.claude.md` for Claude, `SKILL.kimi.md` for kimi, `SKILL.opencode.md` for
-opencode; other harnesses' overlays are skipped).
+opencode; other harnesses' overlays are skipped). The **global** `AGENTS.md` gets the
+same treatment — a sibling [`AGENTS.<harness>.md`](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope)
+overlay is merged onto it for the matching harness.
 
 ## `--claude` { #claude }
 
@@ -32,12 +34,15 @@ paths Claude already reads. Nothing is appended to your command.
 |---|---|
 | project `AGENTS.md` | `<root>/CLAUDE.md` |
 | project `.agents/skills/` | `<root>/.claude/skills/` |
-| global `~/.config/agents/AGENTS.md` | `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`) |
+| global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.claude.md` overlay) | `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`) |
 | global `~/.agents/skills/` | `$CLAUDE_CONFIG_DIR/skills/` (default `~/.claude/skills/`) |
 
 - Each scope lands at **its own** location — never concatenated. The project
   `CLAUDE.md` carries only project instructions; the user `CLAUDE.md` only the global
   ones. Claude reads both and applies its own precedence. See [Scopes](scopes.md).
+- The global `CLAUDE.md` is the base `~/.config/agents/AGENTS.md` with an optional
+  `AGENTS.claude.md` overlay appended (user scope only; the project `CLAUDE.md` takes no
+  overlay). See [per-harness overlay](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope).
 - For each skill, the base `SKILL.md` is merged with an optional `SKILL.claude.md`
   overlay (front-matter union with overlay winning, bodies concatenated), then task
   files and scripts are copied verbatim.
@@ -67,7 +72,9 @@ where kimi looks, so **agedum injects nothing** for it — and never tries to, s
 root `AGENTS.md` is typically git-tracked.
 
 **Global instructions** — because kimi has no user-scope `AGENTS.md`, the global
-`AGENTS.md` is injected via a custom agent-file appended to your command:
+`AGENTS.md` (base merged with an optional `AGENTS.kimi.md`
+[overlay](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope)) is injected
+via a custom agent-file appended to your command:
 
 ```text
 … kimi -p "…"  --agent-file /tmp/agedum-kimi-XXXX/agent.yaml
@@ -117,7 +124,7 @@ command.
 |---|---|
 | project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
 | project `.agents/skills/` | `<root>/.opencode/skills/` |
-| global `~/.config/agents/AGENTS.md` | `$XDG_CONFIG_HOME/opencode/AGENTS.md` (default `~/.config/opencode/AGENTS.md`) |
+| global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.opencode.md` overlay) | `$XDG_CONFIG_HOME/opencode/AGENTS.md` (default `~/.config/opencode/AGENTS.md`) |
 | global `~/.agents/skills/` | `$XDG_CONFIG_HOME/opencode/skills/` (default `~/.config/opencode/skills/`) |
 
 - **Project instructions** — opencode reads the root `AGENTS.md` (traversing up from the
@@ -125,7 +132,9 @@ command.
   in place, so **agedum injects nothing** for it — and never could, since the root
   `AGENTS.md` is git-tracked.
 - **Global instructions** — opencode reads `~/.config/opencode/AGENTS.md` as its
-  user-scope rules file, so the global `AGENTS.md` is bound there.
+  user-scope rules file, so the global `AGENTS.md` is bound there — base merged with an
+  optional `AGENTS.opencode.md`
+  [overlay](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope).
 - **Skills** — compiled with the `SKILL.opencode.md` overlay and bound to
   `./.opencode/skills/` (project) and `~/.config/opencode/skills/` (global). opencode
   searches those directories **before** `.agents/skills/` / `~/.agents/skills/` (which it
