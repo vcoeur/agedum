@@ -31,8 +31,9 @@ that is the whole point. You author once; agedum translates.
 ## AGENTS.md
 
 A plain markdown file at the source root holding the standing instructions for the
-agent — house style, conventions, what to do and not do. agedum copies it through to
-each harness's instruction location unchanged:
+agent — house style, conventions, what to do and not do. agedum carries it to each
+harness's instruction location without rewriting its content (the user-scope copy may
+be merged with a per-harness overlay — see below):
 
 - **Claude** → `CLAUDE.md` (its content is **not** rewritten — only relocated).
 - **kimi** → the project `AGENTS.md` is read natively at its source location; the global
@@ -46,6 +47,22 @@ See [Harnesses](harnesses.md) for exactly where it lands per harness, and
 
 There is no front-matter contract on `AGENTS.md` — it is opaque markdown. Keep config
 out of it; agedum carries instructions, not settings.
+
+### `AGENTS.<harness>.md` — per-harness overlay (user scope)
+
+The **user-scope** `AGENTS.md` may carry a harness-specific overlay beside it — the
+instructions analogue of [`SKILL.<harness>.md`](#skillharnessmd-per-harness-overlay).
+When agedum compiles the global source for harness `H`, it merges
+`~/.config/agents/AGENTS.md` (base) with `~/.config/agents/AGENTS.<harness>.md` when that
+sibling exists:
+
+- `AGENTS.claude.md` is applied for `--claude`, `AGENTS.kimi.md` for `--kimi`,
+  `AGENTS.opencode.md` for `--opencode`. An overlay for a *different* harness is ignored.
+- Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
+  concatenation: the base, a blank line, then the overlay body.
+- This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
+  kimi and opencode the project `AGENTS.md` is read natively and never injected, so a
+  project overlay would have nowhere to land.
 
 ## Skills
 

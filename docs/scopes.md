@@ -23,6 +23,11 @@ The global instructions path honours `$XDG_CONFIG_HOME` — if set, agedum reads
 `$XDG_CONFIG_HOME/agents/AGENTS.md` instead of `~/.config/agents/AGENTS.md`. The global
 skills path is always `~/.agents/skills/`.
 
+The **global** `AGENTS.md` may also carry a per-harness overlay beside it: a sibling
+`AGENTS.<harness>.md` (e.g. `AGENTS.claude.md`) is merged onto the base when compiling
+for that harness. See [per-harness overlay](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope).
+This applies at user scope only — there is no project-scope `AGENTS.<harness>.md`.
+
 ## Where each scope lands
 
 The key design choice: each scope is rendered to **its own native harness location**.

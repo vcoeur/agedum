@@ -23,6 +23,12 @@ harnesses at **project + global scope**.
   searches those skills dirs before `.agents/skills/` / `~/.agents/skills/`, so the
   overlaid (`SKILL.opencode.md`) copy wins over the raw source. Matches condash's
   opencode layout; uniform with the Claude harness, no `extra_args`.
+- **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
+  sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
+  `AGENTS.opencode.md`) for the active harness — the instructions analogue of
+  `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
+  concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
+  takes no overlay (for kimi/opencode it is read natively, never injected).
 
 Follow-ups: `--<harness>-variant` composition.
 
