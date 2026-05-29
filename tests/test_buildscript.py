@@ -46,6 +46,34 @@ def test_claude_full_mapping():
     assert script.rstrip().endswith('exec agedum --wrapper claude -- claude "$@"')
 
 
+def test_claude_fold_system_messages_flag():
+    script = build_script(
+        {
+            "harness": "claude",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com/anthropic",
+                "model": "deepseek-v4-pro",
+                "foldSystemMessages": True,
+            },
+        }
+    )
+    assert "export AGEDUM_FOLD_SYSTEM_MESSAGES=1" in script
+    # the upstream URL stays the real endpoint; the proxy is interposed at run time
+    assert "export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in script
+
+
+def test_claude_fold_system_messages_omitted_when_unset():
+    script = build_script(
+        {
+            "harness": "claude",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"baseUrl": "https://api.deepseek.com/anthropic", "model": "m"},
+        }
+    )
+    assert "AGEDUM_FOLD_SYSTEM_MESSAGES" not in script
+
+
 def test_claude_apikey_auth_style():
     script = build_script(
         {

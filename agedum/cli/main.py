@@ -14,10 +14,12 @@ the provider/model/auth environment then ``exec``s ``agedum --wrapper`` — see
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from rich.console import Console
@@ -141,12 +143,38 @@ def _run(mode: str, command: list[str]) -> int:
     dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-"))
     try:
         plan = _COMPILERS[mode](project, global_, dest)
-        return run_virtualfs(project.root, plan, command)
+        with _maybe_fold_proxy(mode):
+            return run_virtualfs(project.root, plan, command)
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+
+
+@contextmanager
+def _maybe_fold_proxy(mode: str) -> Iterator[None]:
+    """Interpose the system-role fold proxy when the provider opted in.
+
+    Enabled by ``AGEDUM_FOLD_SYSTEM_MESSAGES=1`` (emitted by the build-script's
+    ``foldSystemMessages`` flag) for the claude harness. The child's
+    ``ANTHROPIC_BASE_URL`` is repointed at a local proxy that folds ``system``-role
+    messages into the top-level ``system`` field before forwarding to the real upstream.
+    A no-op otherwise.
+    """
+    upstream = os.environ.get("ANTHROPIC_BASE_URL", "")
+    if mode != "claude" or os.environ.get("AGEDUM_FOLD_SYSTEM_MESSAGES") != "1" or not upstream:
+        yield
+        return
+
+    from agedum.proxy import FoldProxy
+
+    with FoldProxy(upstream) as proxy:
+        os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
+        try:
+            yield
+        finally:
+            os.environ["ANTHROPIC_BASE_URL"] = upstream
 
 
 # ---------------------------------------------------------------------------
