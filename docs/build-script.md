@@ -95,9 +95,27 @@ Otherwise:
 | `disableTelemetry` | `DISABLE_TELEMETRY=1` |
 | `disableErrorReporting` | `DISABLE_ERROR_REPORTING=1` |
 | `disableClaudeApiSkill` | `CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL=1` |
+| `foldSystemMessages` | `AGEDUM_FOLD_SYSTEM_MESSAGES=1` — see below |
 
 `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,MANTLE}` are always `unset` defensively. Empty
 strings, zero, and `false` are omitted.
+
+#### `foldSystemMessages` — strict Anthropic-compat upstreams
+
+Some Anthropic-compatible endpoints (notably DeepSeek's `/anthropic`) accept only
+`user` / `assistant` in the `messages` array and reject a `system` role with
+`400 unknown variant 'system'`. Claude Code, however, emits hook `additionalContext`
+(e.g. a SessionStart reminder) as a `system`-role message *inside* `messages`, alongside
+the genuine top-level `system` prompt — the real Anthropic API and lenient endpoints
+tolerate it; strict ones do not.
+
+Setting `foldSystemMessages: true` exports `AGEDUM_FOLD_SYSTEM_MESSAGES=1`. At run time
+the [wrapper](harnesses.md) reads that flag and, for the claude harness, interposes a
+local `127.0.0.1` proxy: it folds every `system`-role message into the top-level
+`system` field (always valid — the endpoint already accepts that field), forwards to the
+real `baseUrl`, streams the response back unchanged (SSE-safe), and is torn down when the
+harness exits. `ANTHROPIC_BASE_URL` in the generated wrapper still points at the real
+upstream; the proxy is interposed transparently by agedum.
 
 ### kimi
 

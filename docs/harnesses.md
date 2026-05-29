@@ -63,6 +63,18 @@ agedum --wrapper claude -- claude
 agedum --wrapper claude -- claude --model sonnet -p "review this change"
 ```
 
+### System-role fold proxy { #fold-proxy }
+
+When `AGEDUM_FOLD_SYSTEM_MESSAGES=1` is set (emitted by the build-script
+[`foldSystemMessages`](build-script.md#foldsystemmessages-strict-anthropic-compat-upstreams)
+flag), the claude wrapper interposes a local `127.0.0.1` reverse proxy in front of
+`ANTHROPIC_BASE_URL`. It folds every `system`-role entry in the request's `messages`
+array into the top-level `system` field, then forwards to the real upstream and streams
+the response back unchanged. This makes Claude Code usable against strict
+Anthropic-compat endpoints (e.g. DeepSeek's `/anthropic`) that reject a `system` role in
+`messages`. The proxy lives only for the duration of the wrapped command. A no-op for
+other harnesses and when the flag is unset.
+
 ## `--wrapper kimi` { #kimi }
 
 kimi reads the **project** `AGENTS.md` from the filesystem natively, but has **no

@@ -138,6 +138,12 @@ def _claude_body(block: dict, secret_env: str) -> tuple[list[str], list[str]]:
         if block.get(key) is True:
             exports.append(_export_lit(var, "1"))
 
+    # Strict Anthropic-compat endpoints (e.g. DeepSeek's /anthropic) reject a `system`
+    # role inside `messages[]`. This flag makes agedum's wrapper interpose a local proxy
+    # that folds those entries into the top-level `system` field — see agedum.proxy.
+    if block.get("foldSystemMessages") is True:
+        exports.append(_export_lit("AGEDUM_FOLD_SYSTEM_MESSAGES", "1"))
+
     # Defensive: never let a stray cloud-provider switch leak into the child.
     for var in (
         "CLAUDE_CODE_USE_BEDROCK",
