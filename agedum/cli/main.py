@@ -1,15 +1,18 @@
 """``agedum`` CLI entrypoint — two modes.
 
-**wrapper** (run time): ``agedum --wrapper <harness> -- <command…>``. The harness
-before ``--`` chooses which virtual files to build (Claude / kimi / opencode);
-everything after ``--`` is the child argv, run inside a mount namespace where those
-files are injected at the harness's expected paths. The legacy ``--claude`` /
-``--kimi`` / ``--opencode`` flags are kept as deprecated aliases for ``--wrapper <h>``.
+**provider** (the primary form): ``agedum <name|path> [harness args…]``. Reads a
+condash-style provider config (a name resolved under
+``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`` or a ``/``/``.json`` path),
+resolves its env from ``${AGENTS_ENV_FILE:-~/.config/agents/.env}`` (or ``--env``),
+sets the provider/model/auth environment, and launches the harness named in the config
+inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked)
+and the final argv without launching. See :mod:`agedum.provider`.
 
-**build-script** (compile time): ``agedum --build-script [--check] conf.json [out.sh]``.
-Compile a condash-style provider config JSON into a standalone shell wrapper that sets
-the provider/model/auth environment then ``exec``s ``agedum --wrapper`` — see
-:mod:`agedum.buildscript`.
+**wrapper**: ``agedum --wrapper <harness> -- <command…>``. The harness before ``--``
+chooses which virtual files to build (Claude / kimi / opencode); everything after
+``--`` is the child argv, run inside a mount namespace where those files are injected
+at the harness's expected paths. The legacy ``--claude`` / ``--kimi`` / ``--opencode``
+flags remain as deprecated aliases for ``--wrapper <h>``.
 """
 
 from __future__ import annotations
@@ -25,9 +28,16 @@ from pathlib import Path
 from rich.console import Console
 
 from agedum import __version__
-from agedum.buildscript import BuildScriptError, build_script_from_file
 from agedum.harness import Plan, compile_claude, compile_kimi, compile_opencode
 from agedum.launcher import LauncherError, run_virtualfs
+from agedum.provider import (
+    ProviderError,
+    build_launch,
+    default_env_file,
+    load_config,
+    parse_env_file,
+    resolve_config_path,
+)
 from agedum.sources import Source, load_global_source, load_source
 
 _err = Console(stderr=True)
@@ -40,26 +50,28 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 }
 
 USAGE = (
-    "usage: agedum --wrapper <claude|kimi|opencode> -- <command> [args...]\n"
-    "       agedum --build-script [--check] <config.json> [output.sh]"
+    "usage: agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]\n"
+    "       agedum --wrapper <claude|kimi|opencode> -- <command> [args...]"
 )
 HELP = f"""{USAGE}
 
-Wrapper mode — run a command inside a virtual-file context built from the project's
-agent-neutral source (AGENTS.md + .agents/skills/) plus the global source
-(~/.config/agents/AGENTS.md + ~/.agents/skills/):
+Provider mode — launch a harness from a provider config JSON, with the provider's
+env resolved from the env file and the agent-neutral source injected as virtual files:
+
+  <provider-name>       resolve <name>.json under $AGENTS_PROVIDERS_DIR
+                        (default ~/.config/agents/providers)
+  <config.json> / path  a config path (contains / or ends in .json; CWD-relative)
+  --env <file>          override the env file ($AGENTS_ENV_FILE, default
+                        ~/.config/agents/.env)
+  --dry-run             print the resolved env (secrets masked) + argv, don't launch
+  harness args          everything after the provider is passed to the harness
+
+Wrapper mode — run a command inside the virtual-file context, no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode)
                         then run the command after -- inside the namespace
   --claude / --kimi / --opencode
                         deprecated aliases for `--wrapper <harness>`
-
-Build-script mode — compile a provider config JSON into a shell wrapper that sets the
-provider/model/auth environment and execs `agedum --wrapper <harness> -- <harness>`:
-
-  --build-script <config.json> [output.sh]   write the wrapper (stdout if no output)
-  --check                                     with an output.sh, exit non-zero if it
-                                              is stale vs a fresh generation
 
 Other:
   --version, -V         print the version and exit
@@ -84,10 +96,89 @@ def app() -> None:
         print(HELP)
         return
 
-    if argv[0] == "--build-script":
-        raise SystemExit(_run_build_script(argv[1:]))
+    first = argv[0]
+    is_wrapper = (
+        first == "--wrapper"
+        or first.startswith("--wrapper=")
+        or (first.startswith("--") and first.removeprefix("--") in _COMPILERS)
+    )
+    if is_wrapper:
+        raise SystemExit(_run_wrapper(argv))
+    raise SystemExit(_run_config(argv))
 
-    raise SystemExit(_run_wrapper(argv))
+
+# ---------------------------------------------------------------------------
+# provider mode
+# ---------------------------------------------------------------------------
+
+
+def _run_config(argv: list[str]) -> int:
+    env_file: str | None = None
+    dry_run = False
+    provider: str | None = None
+    rest: list[str] = []
+
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg.startswith("--env="):
+            env_file = arg.split("=", 1)[1]
+        elif arg == "--env":
+            index += 1
+            if index >= len(argv):
+                _die("--env requires a file path")
+            env_file = argv[index]
+        elif arg == "--dry-run":
+            dry_run = True
+        elif arg == "--":
+            index += 1
+            if index >= len(argv):
+                _die("missing provider after `--`")
+            provider = argv[index]
+            rest = argv[index + 1 :]
+            break
+        elif arg.startswith("-") and arg != "-":
+            _die(f"unknown option: {arg}")
+        else:
+            provider = arg
+            rest = argv[index + 1 :]
+            break
+        index += 1
+
+    if provider is None:
+        _die("a provider name or config path is required")
+
+    try:
+        config = load_config(resolve_config_path(provider))
+        env_path = Path(env_file).expanduser() if env_file else default_env_file()
+        dotenv = parse_env_file(env_path) if env_path.is_file() else {}
+        launch = build_launch(config, {**os.environ, **dotenv})
+    except ProviderError as exc:
+        _err.print(f"[red]agedum:[/] {exc}")
+        return 1
+
+    command = [*launch.command, *rest]
+    if dry_run:
+        _print_dry_run(launch, env_path, command)
+        return 0
+
+    os.environ.update(launch.env)
+    for var in launch.unset:
+        os.environ.pop(var, None)
+    return _run(launch.harness, command)
+
+
+def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
+    """Print the resolved launch (secret values masked) without running anything."""
+    print(f"provider: {launch.label}")
+    print(f"harness:  {launch.harness}")
+    print(f"env file: {env_path}")
+    for key, value in launch.env.items():
+        shown = "***" if key in launch.secrets else value
+        print(f"  export {key}={shown}")
+    for var in launch.unset:
+        print(f"  unset {var}")
+    print(f"command:  {' '.join(command)}")
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +247,7 @@ def _run(mode: str, command: list[str]) -> int:
 def _maybe_fold_proxy(mode: str) -> Iterator[None]:
     """Interpose the system-role fold proxy when the provider opted in.
 
-    Enabled by ``AGEDUM_FOLD_SYSTEM_MESSAGES=1`` (emitted by the build-script's
+    Enabled by ``AGEDUM_FOLD_SYSTEM_MESSAGES=1`` (set by a provider config's
     ``foldSystemMessages`` flag) for the claude harness. The child's
     ``ANTHROPIC_BASE_URL`` is repointed at a local proxy that folds ``system``-role
     messages into the top-level ``system`` field before forwarding to the real upstream.
@@ -175,51 +266,3 @@ def _maybe_fold_proxy(mode: str) -> Iterator[None]:
             yield
         finally:
             os.environ["ANTHROPIC_BASE_URL"] = upstream
-
-
-# ---------------------------------------------------------------------------
-# build-script mode
-# ---------------------------------------------------------------------------
-
-
-def _run_build_script(args: list[str]) -> int:
-    check = False
-    positionals: list[str] = []
-    for arg in args:
-        if arg == "--check":
-            check = True
-        elif arg.startswith("-") and arg != "-":
-            _die(f"unknown option for --build-script: {arg}")
-        else:
-            positionals.append(arg)
-
-    if not positionals:
-        _die("--build-script requires a config JSON path")
-    if len(positionals) > 2:
-        _die("--build-script takes at most a config path and an output path")
-    config_path = Path(positionals[0])
-    output_path = Path(positionals[1]) if len(positionals) > 1 else None
-
-    try:
-        script = build_script_from_file(config_path)
-    except BuildScriptError as exc:
-        _err.print(f"[red]agedum:[/] {exc}")
-        return 1
-
-    if check:
-        if output_path is None:
-            _die("--check requires an output.sh path to compare against")
-        if not output_path.is_file():
-            _err.print(f"[red]agedum:[/] {output_path} does not exist — generate it first")
-            return 1
-        if output_path.read_text() != script:
-            _err.print(f"[red]agedum:[/] {output_path} is stale — regenerate it from {config_path}")
-            return 1
-        return 0
-
-    if output_path is None:
-        sys.stdout.write(script)
-    else:
-        output_path.write_text(script)
-        output_path.chmod(0o755)
-    return 0

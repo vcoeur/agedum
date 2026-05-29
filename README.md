@@ -12,17 +12,18 @@ you run.
 
 agedum has two modes:
 
-- **`agedum --wrapper <harness> -- <command>`** — at launch, compile the source to the
-  harness's native layout in a throwaway dir, then run your command inside a **private
-  mount namespace** (bubblewrap) where the compiled files appear at their expected paths
-  — visible only to that process, never written into your real tree or `$HOME`. For
-  Claude: `AGENTS.md` → `CLAUDE.md` and `.agents/skills/<name>/` → `.claude/skills/<name>/`
-  (the base `SKILL.md` merged with an optional `SKILL.claude.md` overlay).
-- **`agedum --build-script conf.json [out.sh]`** — compile a provider config JSON into a
-  standalone shell wrapper that sources a `.env`, validates the required vars, exports
-  the provider/model/auth environment, and `exec`s `agedum --wrapper`. The two compose:
-  the generated wrapper sets the environment, then hands off to the wrapper mode for
-  skills/instructions injection.
+- **`agedum <provider-name|config.json> [harness args]`** — the primary form. Read a
+  provider config JSON (a name resolved under `~/.config/agents/providers`, or a path),
+  resolve its secrets from a `.env`, set the provider/model/auth environment, and launch
+  the harness named in the config — inside the virtual-file context below. `--dry-run`
+  prints the resolved env (secrets masked) + argv without launching.
+- **`agedum --wrapper <harness> -- <command>`** — compile the source to the harness's
+  native layout in a throwaway dir, then run your command inside a **private mount
+  namespace** (bubblewrap) where the compiled files appear at their expected paths —
+  visible only to that process, never written into your real tree or `$HOME`. For Claude:
+  `AGENTS.md` → `CLAUDE.md` and `.agents/skills/<name>/` → `.claude/skills/<name>/` (the
+  base `SKILL.md` merged with an optional `SKILL.claude.md` overlay). Provider mode runs
+  this same launch after setting the environment.
 
 > **Status:** Claude harness, **project + global scope**, implemented. Each scope
 > lands at its *own* Claude location — project → `./CLAUDE.md` + `./.claude/skills/`,
@@ -47,15 +48,16 @@ agedum has two modes:
 ## Usage
 
 ```bash
-# Wrapper mode — virtual files injected from the project + global source:
+# Provider mode — launch a harness from a provider config, env resolved from .env:
+agedum claude-deepseek-auto                       # resolve the named provider, launch claude
+agedum claude-deepseek-auto -p "review this"      # extra args go to the harness
+agedum ./providers/my-claude.json                 # a config path instead of a name
+agedum claude-deepseek-auto --dry-run             # print resolved env + argv, don't launch
+
+# Wrapper mode — virtual files injected, no provider env:
 agedum --wrapper claude   -- claude --model sonnet -p "review this"
-agedum --wrapper claude   -- claude                      # interactive
 agedum --wrapper kimi     -- kimi -p "explain this code"
 agedum --wrapper opencode -- opencode run "explain this code"
-
-# Build-script mode — compile a provider config into a launcher script:
-agedum --build-script providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
-agedum --build-script --check providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
 
 agedum --version
 ```
@@ -73,7 +75,7 @@ Full docs at **[agedum.vcoeur.com](https://agedum.vcoeur.com)**:
 - [Source shape](https://agedum.vcoeur.com/source-shape/) — the structure of `AGENTS.md` and `.agents/skills/`
 - [Scopes](https://agedum.vcoeur.com/scopes/) — project vs global (user) scope, and where each lands
 - [Harnesses](https://agedum.vcoeur.com/harnesses/) — exactly what agedum does for each `--wrapper <harness>`
-- [Build-script](https://agedum.vcoeur.com/build-script/) — compile a provider config JSON into a launcher script
+- [Provider mode](https://agedum.vcoeur.com/provider/) — launch a harness from a provider config JSON
 - [CLI reference](https://agedum.vcoeur.com/cli/) and [Internals](https://agedum.vcoeur.com/internals/) — the mount-namespace launch and its safety rules
 
 ## Install

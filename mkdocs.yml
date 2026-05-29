@@ -82,7 +82,7 @@ nav:
   - Source shape: source-shape.md
   - Scopes: scopes.md
   - Harnesses: harnesses.md
+  - Provider mode: provider.md
   - CLI reference: cli.md
-  - Build-script: build-script.md
   - Internals: internals.md
   - Legal: legal.md
