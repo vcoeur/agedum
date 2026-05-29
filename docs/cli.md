@@ -1,6 +1,6 @@
 ---
 title: CLI reference · agedum
-description: The agedum invocation contract — the wrapper mode (context flags before the -- separator) and the build-script mode (compile a provider config JSON into a shell wrapper), plus the --version / --help options.
+description: The agedum invocation contract — the provider mode (launch a harness from a provider config JSON) and the wrapper mode (context flags before the -- separator), plus the --version / --help options.
 ---
 
 # CLI reference
@@ -8,8 +8,38 @@ description: The agedum invocation contract — the wrapper mode (context flags 
 agedum has two modes.
 
 ```text
-agedum --wrapper <claude|kimi|opencode> -- <command> [args...]   # run time
-agedum --build-script [--check] <config.json> [output.sh]        # compile time
+agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
+agedum --wrapper <claude|kimi|opencode> -- <command> [args...]
+```
+
+## Provider mode
+
+```text
+agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
+```
+
+Launch a harness from a condash-style **provider config JSON**. agedum resolves the
+provider's env from the env file, sets the provider/model/auth environment, and launches
+the harness named in the config — inside the virtual-file context. The single positional
+is a provider **name** (resolved under `$AGENTS_PROVIDERS_DIR`, default
+`~/.config/agents/providers`) or a **path** (it contains `/` or ends in `.json`). Full
+reference: [Provider mode](provider.md).
+
+| Form | Effect |
+|---|---|
+| `agedum claude-deepseek-auto` | Resolve the named provider and launch its harness. |
+| `agedum ./conf.json -p "hi"` | Launch from a config path; pass `-p "hi"` to the harness. |
+| `agedum <provider> --env <file>` | Read secrets from `<file>` instead of the default env file. |
+| `agedum <provider> --dry-run` | Print the resolved env (secrets masked) + argv; don't launch. |
+
+`--env` and `--dry-run` come before the provider; everything after the provider is passed
+to the harness verbatim.
+
+```bash
+agedum claude-deepseek-auto
+agedum claude-deepseek-auto -p "review this change"
+agedum opencode-deepseek run "explain this code"
+agedum claude-deepseek-auto --dry-run
 ```
 
 ## Wrapper mode
@@ -46,33 +76,6 @@ agedum --wrapper kimi -- kimi -p "explain this code"
 agedum --wrapper opencode -- opencode run "explain this code"
 ```
 
-## Build-script mode
-
-```text
-agedum --build-script [--check] <config.json> [output.sh]
-```
-
-Compile a condash-style **provider config JSON** into a standalone shell wrapper that
-sets the provider/model/auth environment, then `exec`s `agedum --wrapper`. The harness
-is read from the config's `harness` field. Full reference: [Build-script](build-script.md).
-
-| Form | Effect |
-|---|---|
-| `agedum --build-script conf.json` | Write the generated wrapper to **stdout**. |
-| `agedum --build-script conf.json out.sh` | Write the wrapper to `out.sh` (mode `0755`). |
-| `agedum --build-script --check conf.json out.sh` | Exit non-zero if `out.sh` differs from a fresh generation (drift guard for CI). |
-
-Unlike wrapper mode, build-script does **not** need `bwrap` — it only reads a JSON file
-and emits text.
-
-```bash
-# Generate a provider wrapper:
-agedum --build-script providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
-
-# Verify a committed wrapper is up to date (CI):
-agedum --build-script --check providers/claude-deepseek-auto.json bin/claude-deepseek-auto.sh
-```
-
 ## Other options
 
 | Flag | Effect |
@@ -91,9 +94,9 @@ use distinct codes:
 | Code | Meaning |
 |---|---|
 | *(child)* | Wrapper mode: the command ran; agedum propagates its exit code. |
-| `0` | Build-script mode: the wrapper was written (or `--check` found it current). |
-| `1` | A launch error (`bwrap` missing, a [git-tracked target](internals.md#safety)), a config error, or a `--check` mismatch. |
-| `2` | A usage error — missing `--`, no command, unknown flag/harness, or a missing config path. |
+| `0` | Provider mode `--dry-run`: the resolved env + argv were printed. |
+| `1` | A launch error (`bwrap` missing, a [git-tracked target](internals.md#safety)), or a provider-config error (unreadable/invalid JSON, unknown harness, a missing required env var). |
+| `2` | A usage error — missing `--`, no command, unknown flag/harness, or a missing provider. |
 
 ## Behaviour when no source is found
 

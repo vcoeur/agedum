@@ -74,25 +74,30 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 
 Two modes, dispatched in `cli/main.py` on the first argument:
 
+- **provider** (primary) — `agedum <name|path> [--env <file>] [--dry-run] [harness args...]`.
+  Read a condash-style provider config JSON (a bare name → `<providers_dir>/<name>.json`;
+  a `/`- or `.json`-bearing value → a path), resolve the env from
+  `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`), validate `requiredEnv`, set
+  the provider/model/auth env in `os.environ`, then run the same virtual-FS launch as
+  wrapper mode with `command = [<harness-binary>, *harness-args]`. The harness is read
+  **from the config**; there is no `--harness` flag. `--dry-run` prints the resolved env
+  (secrets masked) + argv without launching. Secrets are read into the agedum process
+  (not kept out as the retired `--build-script` codegen did).
 - **wrapper** — `agedum --wrapper <harness> -- <command...>`. The flag before `--`
   chooses the virtual-file context (`claude` / `kimi` / `opencode`); everything after
   `--` is the child argv (some harnesses get extra flags appended — kimi's
   `--agent-file`; Claude and opencode are pure binds). The bare `--claude` / `--kimi` /
   `--opencode` flags are **deprecated aliases** (stderr notice, still run). Context and
   command are decoupled.
-- **build-script** — `agedum --build-script [--check] conf.json [out.sh]`. Compile a
-  condash-style provider config JSON into a shell wrapper that sources
-  `${AGENTS_ENV_FILE:-$HOME/.config/agents/.env}`, validates + exports `requiredEnv`,
-  exports the provider/model/auth env, then `exec`s `agedum --wrapper`. The harness is
-  read **from the config** (the file is the build input). `--check` exits non-zero if a
-  committed `out.sh` is stale (CI drift guard). No `bwrap` needed — pure codegen.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
 `compile_kimi` / `compile_opencode` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
-appends `plan.extra_args`), `buildscript.py` (`build_script` / `build_script_from_file`
-→ wrapper-script text; per-harness env mapping mirrors condash's pre-4.0 launcher),
-`cli/main.py` (parse + `_COMPILERS` dispatch + `_run_build_script`).
+appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
+`parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
+per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the
+`foldSystemMessages` reverse proxy), `cli/main.py` (parse + `_COMPILERS` dispatch +
+`_run_config` / `_run_wrapper`).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 

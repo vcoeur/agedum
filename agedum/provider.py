@@ -1,0 +1,364 @@
+"""Resolve a provider config JSON into the launch environment and command.
+
+``agedum <name|path>`` reads a condash-style provider config and computes, at run
+time: the variables to export/unset and the base command for the harness. The
+per-harness mapping mirrors condash's pre-4.0 agent launcher (``buildClaudeSpawn`` /
+``buildKimiSpawn`` / ``buildOpencodeSpawn``).
+
+Unlike the retired ``--build-script`` codegen — which emitted a shell wrapper that
+sourced the ``.env`` itself, so agedum never saw a token — this path reads the env
+file (``${AGENTS_ENV_FILE:-~/.config/agents/.env}``) into the agedum process and sets
+the resolved values in the child environment.
+
+Resolution: ``agedum <value>`` where ``value`` is a **path** (it contains ``/`` or
+ends in ``.json``; absolute as-is, else relative to CWD) or a **provider name**
+(resolved to ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json``).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+HARNESSES = ("claude", "kimi", "opencode")
+
+# opencode's built-in agent names keep opencode's own mode; ``primary`` only
+# applies to custom agents.
+OPENCODE_BUILTINS = frozenset({"build", "plan", "general", "explore", "scout"})
+
+
+class ProviderError(RuntimeError):
+    """A provider config could not be resolved into a launch."""
+
+
+@dataclass(frozen=True)
+class Launch:
+    """A resolved provider launch: env to set/unset plus the base command.
+
+    ``secrets`` names the env vars whose values must be masked in ``--dry-run``.
+    """
+
+    harness: str
+    label: str
+    env: dict[str, str] = field(default_factory=dict)
+    unset: list[str] = field(default_factory=list)
+    command: list[str] = field(default_factory=list)
+    secrets: frozenset[str] = frozenset()
+
+
+def default_env_file() -> Path:
+    """The env file to read secrets from: ``$AGENTS_ENV_FILE`` or
+    ``~/.config/agents/.env``."""
+    override = os.environ.get("AGENTS_ENV_FILE")
+    return Path(override).expanduser() if override else Path.home() / ".config" / "agents" / ".env"
+
+
+def providers_dir() -> Path:
+    """The dir provider names resolve against: ``$AGENTS_PROVIDERS_DIR`` or
+    ``~/.config/agents/providers``."""
+    override = os.environ.get("AGENTS_PROVIDERS_DIR")
+    return (
+        Path(override).expanduser()
+        if override
+        else Path.home() / ".config" / "agents" / "providers"
+    )
+
+
+def resolve_config_path(value: str, base_dir: Path | None = None) -> Path:
+    """Resolve a CLI ``value`` to a config path.
+
+    A ``value`` containing ``/`` or ending in ``.json`` is a path (absolute as-is,
+    else relative to CWD); anything else is a provider name resolved to
+    ``<providers_dir>/<name>.json``.
+    """
+    if "/" in value or value.endswith(".json"):
+        return Path(value).expanduser()
+    return (base_dir or providers_dir()) / f"{value}.json"
+
+
+def load_config(path: Path) -> dict:
+    """Read and parse a provider config JSON; raise :class:`ProviderError` on failure."""
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        raise ProviderError(f"cannot read provider config {path}: {exc}") from exc
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ProviderError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ProviderError(
+            f"provider config {path} must be a JSON object, not {type(config).__name__}"
+        )
+    return config
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a simple ``KEY=VALUE`` ``.env`` (no variable expansion).
+
+    Honours an optional ``export `` prefix and surrounding single/double quotes; skips
+    blank lines and ``#`` comments. Mirrors the subset the old generated wrapper relied
+    on when it ran ``source "$env_file"``.
+    """
+    result: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        stripped = stripped.removeprefix("export ").lstrip()
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
+def provider_label(config: dict) -> str:
+    """The human label for a provider: ``slug`` else ``name`` else ``harness``."""
+    return str(config.get("slug") or config.get("name") or config.get("harness") or "provider")
+
+
+def required_env(config: dict) -> list[str]:
+    """The env vars the launch validates + exports: the declared ``requiredEnv`` list
+    with ``secretEnv`` appended if absent. Order is stable."""
+    secret = str(config.get("secretEnv") or "").strip()
+    result: list[str] = []
+    declared = config.get("requiredEnv")
+    if isinstance(declared, list):
+        for value in declared:
+            name = str(value).strip()
+            if name and name not in result:
+                result.append(name)
+    if secret and secret not in result:
+        result.append(secret)
+    return result
+
+
+def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
+    """Resolve a parsed provider ``config`` into a :class:`Launch` using ``base_env``
+    (typically ``os.environ`` overlaid with the parsed ``.env``).
+
+    Validates the harness and that every required var is present and non-empty in
+    ``base_env``; raises :class:`ProviderError` otherwise.
+    """
+    harness = config.get("harness")
+    if harness not in HARNESSES:
+        raise ProviderError(
+            f"unsupported or missing harness {harness!r}; expected one of {', '.join(HARNESSES)}"
+        )
+    label = provider_label(config)
+    block = config.get("config") or {}
+    if not isinstance(block, dict):
+        raise ProviderError("`config` must be a JSON object")
+    secret_env = str(config.get("secretEnv") or "").strip()
+    required = required_env(config)
+
+    for name in required:
+        if not base_env.get(name):
+            raise ProviderError(f"{name} is required by provider {label} but is not set")
+
+    # Required vars (incl. the secret) are exported into the child verbatim — kimi reads
+    # its token this way, and it harmlessly mirrors the old `export VAR=...` lines.
+    env: dict[str, str] = {name: base_env[name] for name in required}
+
+    builders = {"claude": _claude_env, "kimi": _kimi_env, "opencode": _opencode_env}
+    extra, unset, command = builders[harness](block, secret_env, base_env)
+    env.update(extra)
+
+    secrets = set(required)
+    secrets.update(var for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY") if var in env)
+    return Launch(
+        harness=harness,
+        label=label,
+        env=env,
+        unset=unset,
+        command=command,
+        secrets=frozenset(secrets),
+    )
+
+
+# ---------------------------------------------------------------------------
+# per-harness env/command builders -> (env_to_set, env_to_unset, base_command)
+# ---------------------------------------------------------------------------
+
+
+def _claude_env(
+    block: dict, secret_env: str, base_env: dict[str, str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    base_url = str(block.get("baseUrl") or "").strip()
+    if not base_url:
+        # Native Claude: no provider overrides (the all-empty config). Run bare.
+        return {}, [], ["claude"]
+    if not secret_env:
+        raise ProviderError("claude config has a baseUrl but no secretEnv to supply the API token")
+
+    env: dict[str, str] = {"ANTHROPIC_BASE_URL": base_url}
+    unset: list[str] = []
+    token = base_env.get(secret_env, "")
+    if str(block.get("authStyle") or "bearer").strip() == "apikey":
+        env["ANTHROPIC_API_KEY"] = token
+        unset.append("ANTHROPIC_AUTH_TOKEN")
+    else:
+        env["ANTHROPIC_AUTH_TOKEN"] = token
+        unset.append("ANTHROPIC_API_KEY")
+
+    for key, var in (
+        ("model", "ANTHROPIC_MODEL"),
+        ("smallFastModel", "ANTHROPIC_SMALL_FAST_MODEL"),
+        ("haikuAlias", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        ("sonnetAlias", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        ("opusAlias", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        ("subagentModel", "CLAUDE_CODE_SUBAGENT_MODEL"),
+    ):
+        value = str(block.get(key) or "").strip()
+        if value:
+            env[var] = value
+
+    max_tokens = block.get("maxContextTokens") or 0
+    if isinstance(max_tokens, (int, float)) and int(max_tokens) > 0:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(int(max_tokens))
+
+    effort = str(block.get("effortLevel") or "").strip()
+    if effort:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
+
+    for key, var in (
+        ("disableCaching", "DISABLE_PROMPT_CACHING"),
+        ("disable1M", "CLAUDE_CODE_DISABLE_1M_CONTEXT"),
+        ("disableAdaptiveThinking", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"),
+        ("disableTelemetry", "DISABLE_TELEMETRY"),
+        ("disableErrorReporting", "DISABLE_ERROR_REPORTING"),
+        ("disableClaudeApiSkill", "CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL"),
+    ):
+        if block.get(key) is True:
+            env[var] = "1"
+
+    # Strict Anthropic-compat endpoints (e.g. DeepSeek's /anthropic) reject a `system`
+    # role inside `messages[]`. This flag makes agedum's wrapper interpose a local proxy
+    # that folds those entries into the top-level `system` field — see agedum.proxy.
+    if block.get("foldSystemMessages") is True:
+        env["AGEDUM_FOLD_SYSTEM_MESSAGES"] = "1"
+
+    # Defensive: never let a stray cloud-provider switch leak into the child.
+    unset += [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+    ]
+    return env, unset, ["claude"]
+
+
+def _kimi_env(
+    block: dict, secret_env: str, base_env: dict[str, str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    # kimi's provider/model knobs are appended CLI flags, not env vars. The token
+    # (secret_env) reaches the child via the required-env export in build_launch.
+    command = ["kimi"]
+    model = str(block.get("model") or "").strip()
+    if model:
+        command += ["--model", model]
+    thinking = block.get("thinking")
+    if thinking is True:
+        command.append("--thinking")
+    elif thinking is False:
+        command.append("--no-thinking")
+    if block.get("plan") is True:
+        command.append("--plan")
+    config_inline = str(block.get("configInline") or "").strip()
+    if config_inline:
+        command += ["--config", config_inline]
+    return {}, [], command
+
+
+def _opencode_env(
+    block: dict, secret_env: str, base_env: dict[str, str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    env: dict[str, str] = {}
+    if block.get("disableExternalSkills") is True:
+        env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    document = _opencode_config_doc(block)
+    if document:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
+    return env, [], ["opencode"]
+
+
+def _opencode_config_doc(block: dict) -> dict:
+    """Build the ``OPENCODE_CONFIG_CONTENT`` JSON document from an opencode config."""
+    document: dict = {}
+    model = str(block.get("model") or "").strip()
+    if model:
+        document["model"] = model
+
+    # Flat `effortLevel` is a convenience alias for the default model's
+    # reasoningEffort; an explicit defaultOptions.reasoningEffort wins.
+    default_options = dict(block.get("defaultOptions") or {})
+    flat_effort = str(block.get("effortLevel") or "").strip()
+    if flat_effort and not str(default_options.get("reasoningEffort") or "").strip():
+        default_options["reasoningEffort"] = flat_effort
+
+    options = _clean_options(default_options)
+    if options and model and "/" in model:
+        provider_id, model_id = model.split("/", 1)
+        document["provider"] = {provider_id: {"models": {model_id: {"options": options}}}}
+
+    agents: dict = {}
+    rows = block.get("agentOptions")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("agent") or "").strip()
+            if not name:
+                continue
+            entry: dict = {}
+            row_model = str(row.get("model") or "").strip()
+            if row_model:
+                entry["model"] = row_model
+            row_options = _clean_options(row)
+            if row_options:
+                entry["options"] = row_options
+            if row.get("primary") is True and name not in OPENCODE_BUILTINS:
+                entry["mode"] = "primary"
+            if entry:
+                agents[name] = entry
+    if agents:
+        document["agent"] = agents
+
+    extra = block.get("extraConfigJson")
+    if isinstance(extra, str) and extra.strip():
+        try:
+            merged = json.loads(extra)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"extraConfigJson is not valid JSON: {exc}") from exc
+        if isinstance(merged, dict):
+            document = _deep_merge(document, merged)
+
+    return document
+
+
+def _clean_options(source: dict) -> dict:
+    """Pull the three non-empty opencode model options out of a dict, in fixed order."""
+    options: dict = {}
+    for key in ("reasoningEffort", "textVerbosity", "reasoningSummary"):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            options[key] = value.strip()
+    return options
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge `overlay` into `base` (overlay wins); returns a new dict."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result

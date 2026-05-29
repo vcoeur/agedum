@@ -29,7 +29,12 @@ def test_help_when_no_args(monkeypatch, capsys):
     cli.app()
     out = capsys.readouterr().out
     assert "usage: agedum" in out
-    assert "--wrapper" in out and "--build-script" in out
+    assert "--wrapper" in out
+    assert "provider" in out.lower()
+    assert "--build-script" not in out
+
+
+# --- wrapper mode ---
 
 
 def test_wrapper_passes_everything_after_dashdash(monkeypatch):
@@ -54,16 +59,6 @@ def test_wrapper_equals_form(monkeypatch):
     assert captured["command"] == ["kimi", "-p", "hi"]
 
 
-def test_opencode_wrapper(monkeypatch):
-    captured = _capture_run(monkeypatch)
-    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
-    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "opencode", "--", "opencode", "run"])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 0
-    assert captured["command"] == ["opencode", "run"]
-
-
 def test_legacy_alias_still_works_with_deprecation(monkeypatch, capsys):
     captured = _capture_run(monkeypatch)
     monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
@@ -82,96 +77,143 @@ def test_wrapper_without_harness_errors(monkeypatch):
     assert exc.value.code == 2
 
 
-def test_unknown_harness_errors(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "bogus", "--", "bogus"])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 2
-
-
-def test_missing_dashdash_errors(monkeypatch):
+def test_wrapper_missing_dashdash_errors(monkeypatch):
     monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "claude"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 2
 
 
-def test_no_mode_errors(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["agedum", "--", "claude"])
+# --- provider mode ---
+
+
+def _write_provider(tmp_path, name, config, monkeypatch):
+    providers = tmp_path / "providers"
+    providers.mkdir(exist_ok=True)
+    (providers / f"{name}.json").write_text(json.dumps(config))
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    # hermetic env file (empty) so the host's real ~/.config/agents/.env is never read
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+
+
+def test_provider_by_name_launches(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: cli.Plan())
+    _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "mykimi", "-p", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["kimi", "-p", "hi"]
+
+
+def test_provider_by_path_launches(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: cli.Plan())
+    conf = tmp_path / "custom.json"
+    conf.write_text(json.dumps({"harness": "kimi", "config": {"model": "k"}}))
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(tmp_path / "absent.env"))
+    monkeypatch.setattr("sys.argv", ["agedum", str(conf)])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["kimi", "--model", "k"]
+
+
+def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "ds.json").write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "slug": "claude-deepseek-auto",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://api.deepseek.com/anthropic", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-supersecret\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+
+    # run_virtualfs must NOT be called in dry-run
+    def boom(*a, **k):
+        raise AssertionError("dry-run must not launch")
+
+    monkeypatch.setattr(cli, "run_virtualfs", boom)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "ds"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in out
+    assert "sk-supersecret" not in out  # secret value masked
+    assert "***" in out
+    assert "unset ANTHROPIC_API_KEY" in out
+    assert "command:  claude" in out
+
+
+def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "ds.json").write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://x/anthropic", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / "alt.env"
+    env_file.write_text("DEEPSEEK_API_KEY=tok\n")
+    monkeypatch.setattr("sys.argv", ["agedum", "--env", str(env_file), "--dry-run", "ds"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert "ANTHROPIC_BASE_URL=https://x/anthropic" in capsys.readouterr().out
+
+
+def test_provider_missing_required_env_returns_1(monkeypatch, tmp_path):
+    _write_provider(
+        tmp_path,
+        "ds",
+        {
+            "harness": "claude",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"baseUrl": "https://x/anthropic", "model": "m"},
+        },
+        monkeypatch,
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr("sys.argv", ["agedum", "ds"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+
+
+def test_provider_unknown_name_returns_1(monkeypatch, tmp_path):
+    _write_provider(tmp_path, "exists", {"harness": "kimi", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "nope"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+
+
+def test_provider_required_when_no_args(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 2
 
 
-# --- build-script mode ---
-
-_CLAUDE_CONF = {
-    "harness": "claude",
-    "slug": "claude-deepseek-auto",
-    "secretEnv": "DEEPSEEK_API_KEY",
-    "config": {"baseUrl": "https://api.deepseek.com/anthropic", "model": "deepseek-v4-pro"},
-}
-
-
-def test_build_script_to_stdout(monkeypatch, tmp_path, capsys):
-    conf = tmp_path / "claude.json"
-    conf.write_text(json.dumps(_CLAUDE_CONF))
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", str(conf)])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert out.startswith("#!/usr/bin/env bash")
-    assert "exec agedum --wrapper claude -- claude" in out
-
-
-def test_build_script_to_file_is_executable(monkeypatch, tmp_path):
-    conf = tmp_path / "claude.json"
-    conf.write_text(json.dumps(_CLAUDE_CONF))
-    out = tmp_path / "claude.sh"
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", str(conf), str(out)])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 0
-    assert out.read_text().startswith("#!/usr/bin/env bash")
-    assert out.stat().st_mode & 0o111  # executable bit set
-
-
-def test_build_script_check_passes_when_fresh(monkeypatch, tmp_path):
-    conf = tmp_path / "claude.json"
-    conf.write_text(json.dumps(_CLAUDE_CONF))
-    out = tmp_path / "claude.sh"
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", str(conf), str(out)])
-    with pytest.raises(SystemExit):
-        cli.app()
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", "--check", str(conf), str(out)])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 0
-
-
-def test_build_script_check_fails_when_stale(monkeypatch, tmp_path):
-    conf = tmp_path / "claude.json"
-    conf.write_text(json.dumps(_CLAUDE_CONF))
-    out = tmp_path / "claude.sh"
-    out.write_text("#!/usr/bin/env bash\n# stale\n")
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", "--check", str(conf), str(out)])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 1
-
-
-def test_build_script_invalid_json_errors(monkeypatch, tmp_path):
-    conf = tmp_path / "bad.json"
-    conf.write_text("{ not json")
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script", str(conf)])
-    with pytest.raises(SystemExit) as exc:
-        cli.app()
-    assert exc.value.code == 1
-
-
-def test_build_script_requires_a_path(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["agedum", "--build-script"])
+def test_provider_unknown_option_errors(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["agedum", "--bogus", "x"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 2

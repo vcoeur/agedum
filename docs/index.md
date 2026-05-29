@@ -36,8 +36,8 @@ agedum --wrapper opencode -- opencode run "review this change"
 
 `--wrapper <harness>` chooses the *format*; everything after `--` is the command, run
 verbatim. The two are decoupled, so one source can front any agent CLI. To launch a
-harness with a provider/model/auth environment as well, compile a provider config into
-a shell wrapper with [build-script mode](build-script.md).
+harness with a provider/model/auth environment as well, use [provider mode](provider.md)
+— `agedum <provider-name>` reads a provider config + `.env` and runs the same launch.
 
 ## Why agedum
 
@@ -84,11 +84,12 @@ flowchart LR
 | opencode | `--wrapper opencode` | Implemented — project + global scope |
 
 The bare `--claude` / `--kimi` / `--opencode` flags still work as deprecated aliases.
-[Build-script mode](build-script.md) compiles a provider config into a launcher script.
+[Provider mode](provider.md) (`agedum <provider-name>`) launches a harness from a
+provider config JSON, resolving its env from a `.env`.
 
-Wrapper mode is Linux-only and requires `bwrap`
-([bubblewrap](https://github.com/containers/bubblewrap)) on `PATH`; build-script mode
-(pure codegen) runs anywhere.
+agedum is Linux-only and requires `bwrap`
+([bubblewrap](https://github.com/containers/bubblewrap)) on `PATH` for the virtual-FS
+launch.
 
 ## Learn more
 
@@ -97,6 +98,6 @@ Wrapper mode is Linux-only and requires `bwrap`
 - [Scopes](scopes.md) — project vs global (user) scope, and where each lands
 - [Harnesses](harnesses.md) — exactly what agedum does for each `--wrapper <harness>`
 - [CLI reference](cli.md) — flags and invocation contract
-- [Build-script](build-script.md) — compile a provider config JSON into a launcher script
+- [Provider mode](provider.md) — launch a harness from a provider config JSON
 - [Internals](internals.md) — the mount-namespace launch and its safety rules
 - [Source on GitHub](https://github.com/vcoeur/agedum) · [`agedum` on PyPI](https://pypi.org/project/agedum/)

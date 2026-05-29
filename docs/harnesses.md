@@ -20,8 +20,8 @@ agedum --wrapper opencode -- opencode run "…"  # render for opencode, run open
 
 The bare `--claude` / `--kimi` / `--opencode` flags are **deprecated aliases** for
 `--wrapper <harness>`. To launch a harness with a *provider/model/auth* environment too,
-generate a wrapper script with [build-script mode](build-script.md) — it sets that
-environment, then `exec`s `agedum --wrapper`.
+use [provider mode](provider.md) (`agedum <provider-name>`) — it resolves that
+environment from a provider config + `.env`, then runs the same virtual-FS launch.
 
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
@@ -65,8 +65,8 @@ agedum --wrapper claude -- claude --model sonnet -p "review this change"
 
 ### System-role fold proxy { #fold-proxy }
 
-When `AGEDUM_FOLD_SYSTEM_MESSAGES=1` is set (emitted by the build-script
-[`foldSystemMessages`](build-script.md#foldsystemmessages-strict-anthropic-compat-upstreams)
+When `AGEDUM_FOLD_SYSTEM_MESSAGES=1` is set (from a provider config's
+[`foldSystemMessages`](provider.md#foldsystemmessages-strict-anthropic-compat-upstreams)
 flag), the claude wrapper interposes a local `127.0.0.1` reverse proxy in front of
 `ANTHROPIC_BASE_URL`. It folds every `system`-role entry in the request's `messages`
 array into the top-level `system` field, then forwards to the real upstream and streams
