@@ -261,8 +261,28 @@ The token (`secretEnv`) reaches kimi via the `requiredEnv` export.
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
 | `providerDef` | an explicit provider block `provider.<id> = { npm, options: { baseURL, apiKey } }` with the key resolved from the environment — see below |
 | `opencodeConfig` | a literal opencode config object, deep-merged into the document last (wins on conflict) — see below |
+| `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see below |
 
 The document is set as a single `OPENCODE_CONFIG_CONTENT` env var (no file written).
+
+#### `emitTranscript` — in-band transcript capture (default on)
+
+opencode runs as a full-screen alternate-screen TUI, so a terminal capturer (condash,
+`script`, tmux, asciinema) only ever sees the current frame — the conversation that scrolls
+inside the TUI is repainted, never retained. agedum **ships and auto-injects** a small opencode
+plugin (`agedum/assets/opencode/transcript-osc.js`) that streams each finalized message into the
+terminal as a **neutral OSC escape** the terminal ignores for display:
+
+```
+ESC ] 7373 ; agent-transcript ; <frameId> ; <i> ; <n> ; <base64piece> BEL
+```
+
+A capturer recovers a clean transcript by reassembling the base64 pieces and decoding the JSON
+frames (`{v,t:"msg",sid,mid,role,text}` / `{v,t:"end"}`). The protocol **names no viewer**, so
+agedum stays viewer-agnostic — any capturer can consume it. The plugin path is appended to
+`OPENCODE_CONFIG_CONTENT.plugin` (unioned with any `opencodeConfig.plugin`); agedum's bwrap
+launch binds the whole filesystem, so the bundled path resolves inside the namespace. Set
+`"emitTranscript": false` to disable.
 
 #### `providerDef` — declare the provider + key inline
 

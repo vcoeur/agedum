@@ -390,7 +390,29 @@ def _opencode_config_doc(block: dict) -> dict:
             raise ProviderError("opencodeConfig must be a JSON object")
         document = _deep_merge(document, passthrough)
 
+    # Auto-inject the bundled transcript-capture plugin so any terminal capturer
+    # (condash, `script`, tmux, …) can recover a clean transcript from opencode's
+    # alternate-screen TUI. The plugin emits a neutral OSC the terminal ignores;
+    # naming no viewer, agedum stays viewer-agnostic. Added last + appended so it
+    # unions with any `opencodeConfig.plugin`. Opt out with `"emitTranscript": false`.
+    if block.get("emitTranscript") is not False:
+        plugins = list(document.get("plugin") or [])
+        plugin_path = _transcript_plugin_path()
+        if plugin_path not in plugins:
+            plugins.append(plugin_path)
+        document["plugin"] = plugins
+
     return document
+
+
+def _transcript_plugin_path() -> str:
+    """Absolute path of the bundled opencode transcript-capture plugin.
+
+    Shipped inside the agedum package (``agedum/assets/opencode/transcript-osc.js``)
+    and resolved on disk; agedum's bwrap launch binds the whole real filesystem, so
+    the path is visible to opencode inside the namespace.
+    """
+    return str(Path(__file__).resolve().parent / "assets" / "opencode" / "transcript-osc.js")
 
 
 def _clean_options(source: dict) -> dict:
