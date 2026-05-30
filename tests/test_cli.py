@@ -168,6 +168,85 @@ def test_provider_by_path_launches(monkeypatch, tmp_path):
     assert captured["command"] == ["kimi", "--model", "k"]
 
 
+def test_harness_args_after_provider_passthrough(monkeypatch, tmp_path):
+    # A token after the provider that is not an agedum flag goes to the harness.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: cli.Plan())
+    _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "mykimi", "-p", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["kimi", "-p", "hi"]
+
+
+def test_dry_run_after_provider_does_not_launch(monkeypatch, tmp_path, capsys):
+    # The documented `agedum <provider> --dry-run`: --dry-run is agedum's even after
+    # the provider, so it prints the plan instead of being passed to the harness.
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "ds.json").write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://x/anthropic", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=tok\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "ds", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
+
+
+def test_env_flag_after_provider(monkeypatch, tmp_path, capsys):
+    # --env is also recognised after the provider name.
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "ds.json").write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://x/anthropic", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / "alt.env"
+    env_file.write_text("DEEPSEEK_API_KEY=tok\n")
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "ds", "--env", str(env_file), "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
+
+
+def test_dashdash_forwards_literal_flag_to_harness(monkeypatch, tmp_path):
+    # `--` after the provider is the escape hatch: --dry-run past it reaches the harness
+    # verbatim rather than being claimed by agedum.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: cli.Plan())
+    _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "mykimi", "--", "-p", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["kimi", "-p", "--dry-run"]
+
+
 def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
     providers = tmp_path / "providers"
     providers.mkdir()

@@ -68,8 +68,10 @@ as virtual files:
   --env <file>          override the env file ($AGENTS_ENV_FILE, default
                         ~/.config/agents/.env)
   --dry-run             print the resolved env (secrets masked), the virtual files that
-                        would be injected, and the argv — don't launch
-  harness args          everything after the provider is passed to the harness
+                        would be injected, and the argv — don't launch (accepted before
+                        or after the provider)
+  harness args          any token after the provider that isn't an agedum flag is passed
+                        to the harness; use `--` to forward a literal --dry-run/--env
 
 Wrapper mode (low-level; provider mode builds on it) — run any command inside the
 virtual-file context, with no provider env:
@@ -119,10 +121,26 @@ def _run_config(argv: list[str]) -> int:
     provider: str | None = None
     rest: list[str] = []
 
+    # agedum's own flags (--env, --dry-run) are recognised wherever they appear before
+    # an explicit `--`, including after the provider name — so the documented
+    # `agedum <provider> --dry-run` works. The provider is the first bare token; any
+    # other token after it is harness passthrough. A `--` once the provider is known
+    # ends agedum parsing: everything past it goes to the harness verbatim, the escape
+    # hatch for forwarding a literal --dry-run/--env to the harness.
     index = 0
     while index < len(argv):
         arg = argv[index]
-        if arg.startswith("--env="):
+        if arg == "--":
+            if provider is None:
+                # Disambiguating separator: the next token is the provider name.
+                index += 1
+                if index >= len(argv):
+                    _die("missing provider after `--`")
+                provider = argv[index]
+            else:
+                rest.extend(argv[index + 1 :])
+                break
+        elif arg.startswith("--env="):
             env_file = arg.split("=", 1)[1]
         elif arg == "--env":
             index += 1
@@ -131,19 +149,12 @@ def _run_config(argv: list[str]) -> int:
             env_file = argv[index]
         elif arg == "--dry-run":
             dry_run = True
-        elif arg == "--":
-            index += 1
-            if index >= len(argv):
-                _die("missing provider after `--`")
-            provider = argv[index]
-            rest = argv[index + 1 :]
-            break
-        elif arg.startswith("-") and arg != "-":
+        elif provider is None and arg.startswith("-") and arg != "-":
             _die(f"unknown option: {arg}")
-        else:
+        elif provider is None:
             provider = arg
-            rest = argv[index + 1 :]
-            break
+        else:
+            rest.append(arg)
         index += 1
 
     if provider is None:
