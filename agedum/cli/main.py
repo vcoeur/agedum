@@ -19,6 +19,7 @@ builds on; users normally launch via ``agedum <name>``.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -174,8 +175,15 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print(f"harness:  {launch.harness}")
     print(f"env file: {env_path}")
     for key, value in launch.env.items():
-        shown = "***" if key in launch.secrets else value
-        print(f"  export {key}={shown}")
+        if key in launch.secrets:
+            print(f"  export {key}=***")
+        elif key == "OPENCODE_CONFIG_CONTENT":
+            # The resolved opencode config — pretty-print the JSON instead of a one-liner.
+            print(f"  export {key}=")
+            for line in _pretty_json(value).splitlines():
+                print(f"    {line}")
+        else:
+            print(f"  export {key}={value}")
     for var in launch.unset:
         print(f"  unset {var}")
     print(f"command:  {' '.join(command)}")
@@ -184,8 +192,16 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
         print(line)
 
 
+def _pretty_json(text: str) -> str:
+    """Re-render a compact JSON string indented; pass it through unchanged if unparseable."""
+    try:
+        return json.dumps(json.loads(text), indent=2, sort_keys=True)
+    except json.JSONDecodeError:
+        return text
+
+
 def _display_path(path: Path) -> str:
-    """Render a mount target with the user's home abbreviated to ``~``."""
+    """Render a path with the user's home abbreviated to ``~``."""
     text = str(path)
     home = str(Path.home())
     return "~" + text[len(home) :] if text.startswith(home) else text
@@ -195,9 +211,10 @@ def _virtual_file_lines(mode: str) -> list[str]:
     """Describe the virtual files agedum would inject for ``mode``, without launching.
 
     Compiles the located project + global sources to a throwaway directory to obtain the
-    bind plan, formats each mount target (the path the harness will read — directories
-    marked with a trailing ``/``) plus any appended args, then removes the directory.
-    Returns indented display lines.
+    bind plan, then formats each injection as ``<source> → <dest>`` — the agent-neutral
+    source file (from ``plan.origins``) and the path the harness will read, directories
+    marked with a trailing ``/``. kimi's global ``AGENTS.md`` (injected via
+    ``--agent-file``) is listed too. The throwaway directory is removed before returning.
     """
     project = load_source()
     global_ = load_global_source()
@@ -208,15 +225,28 @@ def _virtual_file_lines(mode: str) -> list[str]:
         plan = _COMPILERS[mode](project, global_, dest)
         lines = []
         for src, target in plan.binds:
-            suffix = "/" if src.is_dir() else ""
-            lines.append(f"  {_display_path(target)}{suffix}")
+            lines.append(_injection_line(plan.origins.get(target), target, is_dir=src.is_dir()))
+        # kimi injects the global AGENTS.md via --agent-file rather than a bind.
+        for token in plan.extra_args:
+            origin = plan.origins.get(Path(token))
+            if origin:
+                lines.append(f"  {_display_path(Path(origin))} → (kimi --agent-file)")
         if not lines:
             lines.append("  (none)")
         if plan.extra_args:
-            lines.append(f"  extra args: {' '.join(plan.extra_args)}")
+            lines.append(f"  appended args: {' '.join(plan.extra_args)}")
         return lines
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+
+
+def _injection_line(origin: str | None, target: Path, *, is_dir: bool) -> str:
+    """Format one ``<source> → <dest>`` line (dest dirs get a trailing ``/``)."""
+    dest = f"{_display_path(target)}{'/' if is_dir else ''}"
+    if origin is None:
+        return f"  {dest}"
+    source = f"{_display_path(Path(origin))}{'/' if Path(origin).is_dir() else ''}"
+    return f"  {source} → {dest}"
 
 
 # ---------------------------------------------------------------------------
