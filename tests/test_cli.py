@@ -236,7 +236,7 @@ def test_provider_dry_run_lists_virtual_files_and_extra_args(monkeypatch, tmp_pa
     out = capsys.readouterr().out
     assert "virtual files (kimi)" in out
     assert "/g/.agents/skills → /proj/.kimi/skills" in out  # source → dest
-    assert "/g/AGENTS.md → (kimi --agent-file)" in out  # global instructions via agent-file
+    assert "/g/AGENTS.md → kimi agent file (passed via --agent-file)" in out  # via agent-file
     assert "appended args: --agent-file /tmp/k/agent.yaml" in out
 
 

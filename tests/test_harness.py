@@ -56,6 +56,19 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
     assert not (skills_src / "demo" / "SKILL.kimi.md").exists()
 
 
+def test_load_source_excludes_home_as_project_root(tmp_path, monkeypatch):
+    # $HOME holds the *global* source (~/.agents/skills), so find_project_root always
+    # matches it via .agents — but home is not a project. load_source must yield an empty
+    # project source there, or the global skills get re-injected as project scope.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".agents" / "skills" / "demo").mkdir(parents=True)
+    (tmp_path / "AGENTS.md").write_text("# would-be project instructions\n")
+
+    src = load_source(tmp_path)
+    assert src.skills_dir is None
+    assert src.agents_md is None
+
+
 def test_compile_with_no_source_is_empty(tmp_path):
     (tmp_path / ".git").mkdir()
     src = load_source(tmp_path)

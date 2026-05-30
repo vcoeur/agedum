@@ -226,11 +226,14 @@ def _virtual_file_lines(mode: str) -> list[str]:
         lines = []
         for src, target in plan.binds:
             lines.append(_injection_line(plan.origins.get(target), target, is_dir=src.is_dir()))
-        # kimi injects the global AGENTS.md via --agent-file rather than a bind.
+        # kimi injects the global AGENTS.md via --agent-file rather than a bind: it is
+        # compiled into a generated agent file that kimi reads through that flag.
         for token in plan.extra_args:
             origin = plan.origins.get(Path(token))
             if origin:
-                lines.append(f"  {_display_path(Path(origin))} → (kimi --agent-file)")
+                lines.append(
+                    f"  {_display_path(Path(origin))} → kimi agent file (passed via --agent-file)"
+                )
         if not lines:
             lines.append("  (none)")
         if plan.extra_args:
