@@ -338,6 +338,36 @@ def test_opencode_config_passthrough_wins_over_modeled_keys():
     assert payload["model"] == "x/y"
 
 
+def test_opencode_auto_injects_transcript_plugin():
+    # Even a config-less opencode provider gets the bundled transcript plugin,
+    # so condash (and any pty capturer) gets a clean transcript for free.
+    launch = build_launch({"harness": "opencode", "config": {}}, base_env={})
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert any(p.endswith("assets/opencode/transcript-osc.js") for p in payload["plugin"])
+
+
+def test_opencode_transcript_plugin_opt_out():
+    launch = build_launch(
+        {"harness": "opencode", "config": {"model": "p/m", "emitTranscript": False}},
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert "plugin" not in payload
+
+
+def test_opencode_transcript_plugin_unions_with_passthrough_plugins():
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {"opencodeConfig": {"plugin": ["my-other-plugin"]}},
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert "my-other-plugin" in payload["plugin"]
+    assert any(p.endswith("assets/opencode/transcript-osc.js") for p in payload["plugin"])
+
+
 def test_opencode_config_passthrough_rejects_non_object():
     with pytest.raises(ProviderError):
         build_launch(
