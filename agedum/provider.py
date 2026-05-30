@@ -137,6 +137,15 @@ def required_env(config: dict) -> list[str]:
                 result.append(name)
     if secret and secret not in result:
         result.append(secret)
+    # An opencode providerDef's key env var is validated + exported even if the author
+    # forgot to list it, so the apiKey baked into the config doc always has a value.
+    block = config.get("config")
+    if isinstance(block, dict):
+        provider_def = block.get("providerDef")
+        if isinstance(provider_def, dict):
+            api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
+            if api_key_env and api_key_env not in result:
+                result.append(api_key_env)
     return result
 
 
@@ -173,6 +182,10 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
 
     secrets = set(required)
     secrets.update(var for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY") if var in env)
+    # An opencode providerDef bakes the API key value into OPENCODE_CONFIG_CONTENT, so
+    # mask the whole document in --dry-run.
+    if isinstance(block.get("providerDef"), dict) and "OPENCODE_CONFIG_CONTENT" in env:
+        secrets.add("OPENCODE_CONFIG_CONTENT")
     return Launch(
         harness=harness,
         label=label,
@@ -284,9 +297,46 @@ def _opencode_env(
     if block.get("disableExternalSkills") is True:
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     document = _opencode_config_doc(block)
+    if block.get("providerDef") is not None:
+        document = _apply_provider_def(document, block["providerDef"], base_env)
     if document:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
     return env, [], ["opencode"]
+
+
+def _apply_provider_def(document: dict, provider_def: object, base_env: dict[str, str]) -> dict:
+    """Deep-merge an explicit provider definition into the opencode ``document``.
+
+    ``providerDef`` ({id, npm, baseUrl, apiKeyEnv}) becomes
+    ``provider.<id> = {npm, options: {baseURL, apiKey}}``, with ``apiKey`` set to the
+    *value* of ``apiKeyEnv`` from ``base_env``. Unlike opencode's ``{env:…}``
+    substitution — unreliable for a custom provider's ``options.apiKey`` — the resolved
+    key is written straight into the config doc agedum hands the child (the same
+    in-process token handling ``_claude_env`` already uses for ``ANTHROPIC_AUTH_TOKEN``).
+    """
+    if not isinstance(provider_def, dict):
+        raise ProviderError("`providerDef` must be a JSON object")
+    fields = {
+        "id": str(provider_def.get("id") or "").strip(),
+        "npm": str(provider_def.get("npm") or "").strip(),
+        "baseUrl": str(provider_def.get("baseUrl") or "").strip(),
+        "apiKeyEnv": str(provider_def.get("apiKeyEnv") or "").strip(),
+    }
+    missing = [key for key, value in fields.items() if not value]
+    if missing:
+        raise ProviderError(f"providerDef is missing required field(s): {', '.join(missing)}")
+    entry: dict = {
+        "npm": fields["npm"],
+        "options": {"baseURL": fields["baseUrl"], "apiKey": base_env.get(fields["apiKeyEnv"], "")},
+    }
+    name = str(provider_def.get("name") or "").strip()
+    if name:
+        entry["name"] = name
+    providers = dict(document.get("provider") or {})
+    providers[fields["id"]] = _deep_merge(providers.get(fields["id"], {}), entry)
+    merged = dict(document)
+    merged["provider"] = providers
+    return merged
 
 
 def _opencode_config_doc(block: dict) -> dict:
