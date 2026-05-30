@@ -36,6 +36,12 @@ def find_project_root(start: Path | None = None) -> Path:
 def load_source(root: Path | None = None) -> Source:
     """Resolve the project root and the agent-neutral source files under it."""
     root = find_project_root(root)
+    # $HOME is where the *global* source lives (``~/.agents/skills``, ``~/.config/agents``),
+    # so ``find_project_root`` always matches it via ``.agents`` — but home is not a project.
+    # Treating it as one would re-inject the global skills as project scope (a duplicate
+    # bind). Yield an empty project source so only the global scope applies there.
+    if root == Path.home().resolve():
+        return Source(root=root, agents_md=None, skills_dir=None)
     agents = root / AGENTS_MD
     skills = root / SKILLS_REL
     return Source(

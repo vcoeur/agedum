@@ -47,6 +47,13 @@ class Plan:
     binds: list[tuple[Path, Path]] = field(default_factory=list)
     # Extra args appended to the launched command (e.g. kimi's --agent-file).
     extra_args: list[str] = field(default_factory=list)
+    # Provenance for --dry-run: injected dest path -> the agent-neutral source it came
+    # from (a bind target, or kimi's --agent-file path). Display-only; the launcher
+    # ignores it.
+    origins: dict[Path, str] = field(default_factory=dict)
+    # Sources the harness reads *in place* without a bind (kimi/opencode read the project
+    # AGENTS.md natively). Display-only for --dry-run, so they are not invisible.
+    native_reads: list[Path] = field(default_factory=list)
 
 
 def claude_config_dir() -> Path:
@@ -138,6 +145,8 @@ def _compile_scope(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(instructions)
         plan.binds.append((out, claude_md_target))
+        if source.agents_md is not None:
+            plan.origins[claude_md_target] = str(source.agents_md)
 
     if source.skills_dir is not None:
         skill_dirs = sorted(p for p in source.skills_dir.iterdir() if p.is_dir())
@@ -146,6 +155,7 @@ def _compile_scope(
             for skill_dir in skill_dirs:
                 _compile_skill(skill_dir, skills_out / skill_dir.name, "SKILL.claude.md")
             plan.binds.append((skills_out, skills_target))
+            plan.origins[skills_target] = str(source.skills_dir)
 
 
 def _compile_skill(src: Path, out: Path, overlay_name: str) -> None:
@@ -230,6 +240,11 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
     # Global instructions (base + AGENTS.kimi.md overlay) -> a custom --agent-file (kimi
     # has no user-scope AGENTS.md). Project instructions are read natively from
     # ./AGENTS.md, so they are left in place.
@@ -240,19 +255,25 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
         agent_file.parent.mkdir(parents=True, exist_ok=True)
         agent_file.write_text(_kimi_agent_file_yaml(instructions))
         plan.extra_args += ["--agent-file", str(agent_file)]
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[agent_file] = str(global_.agents_md)
 
     # Global skills -> ~/.kimi/skills (read by default; merge_all_available_skills).
     if global_ is not None and global_.skills_dir is not None:
         out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.kimi.md")
         if out is not None:
-            plan.binds.append((out, kimi_config_dir() / "skills"))
+            target = kimi_config_dir() / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
 
     # Project skills -> ./.kimi/skills (project-local; kimi auto-reads it, matching
     # condash's prior layout — uniform with the Claude harness, no config rewrite).
     if project.skills_dir is not None:
         out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.kimi.md")
         if out is not None:
-            plan.binds.append((out, project.root / ".kimi" / "skills"))
+            target = project.root / ".kimi" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
 
     return plan
 
@@ -316,6 +337,11 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     plan = Plan()
     config = opencode_config_dir()
 
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
     # Global instructions (base + AGENTS.opencode.md overlay) -> <config>/AGENTS.md
     # (project ./AGENTS.md is read natively).
     global_instructions = _instructions(global_, "opencode") if global_ is not None else None
@@ -323,18 +349,25 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
         out = dest / "global" / "AGENTS.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(global_instructions)
-        plan.binds.append((out, config / "AGENTS.md"))
+        target = config / "AGENTS.md"
+        plan.binds.append((out, target))
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[target] = str(global_.agents_md)
 
     # Project skills -> ./.opencode/skills.
     if project.skills_dir is not None:
         out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.opencode.md")
         if out is not None:
-            plan.binds.append((out, project.root / ".opencode" / "skills"))
+            target = project.root / ".opencode" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
 
     # Global skills -> <config>/skills.
     if global_ is not None and global_.skills_dir is not None:
         out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.opencode.md")
         if out is not None:
-            plan.binds.append((out, config / "skills"))
+            target = config / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
 
     return plan

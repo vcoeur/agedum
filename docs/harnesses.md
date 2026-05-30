@@ -1,6 +1,6 @@
 ---
 title: Harnesses · agedum
-description: Exactly what agedum does for each harness command — the Claude (--claude) and kimi (--kimi) compilers, the targets they inject, and the extra flags they append.
+description: Exactly what agedum injects for each harness — the Claude, kimi, and opencode compilers, the targets they bind, and the extra flags they append. This is the mechanism provider mode (agedum <name>) uses under the hood.
 ---
 
 # Harnesses
@@ -18,10 +18,14 @@ agedum --wrapper kimi     -- kimi -p "…"       # render for kimi, run kimi
 agedum --wrapper opencode -- opencode run "…"  # render for opencode, run opencode
 ```
 
-The bare `--claude` / `--kimi` / `--opencode` flags are **deprecated aliases** for
-`--wrapper <harness>`. To launch a harness with a *provider/model/auth* environment too,
-generate a wrapper script with [build-script mode](build-script.md) — it sets that
-environment, then `exec`s `agedum --wrapper`.
+This page documents what each compiler injects — the mechanism [provider mode](provider.md)
+(`agedum <name>`, the normal entry point) uses under the hood. You rarely invoke
+`--wrapper` directly; do so only to front a harness with the injected context but no
+provider env. Add `--dry-run` before `--` to print the plan below without running:
+
+```bash
+agedum --wrapper claude --dry-run -- claude   # list the injected virtual files, don't run
+```
 
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
@@ -62,6 +66,18 @@ agedum --wrapper claude -- claude
 # Headless review with a specific model:
 agedum --wrapper claude -- claude --model sonnet -p "review this change"
 ```
+
+### System-role fold proxy { #fold-proxy }
+
+When `AGEDUM_FOLD_SYSTEM_MESSAGES=1` is set (from a provider config's
+[`foldSystemMessages`](provider.md#foldsystemmessages-strict-anthropic-compat-upstreams)
+flag), the claude wrapper interposes a local `127.0.0.1` reverse proxy in front of
+`ANTHROPIC_BASE_URL`. It folds every `system`-role entry in the request's `messages`
+array into the top-level `system` field, then forwards to the real upstream and streams
+the response back unchanged. This makes Claude Code usable against strict
+Anthropic-compat endpoints (e.g. DeepSeek's `/anthropic`) that reject a `system` role in
+`messages`. The proxy lives only for the duration of the wrapped command. A no-op for
+other harnesses and when the flag is unset.
 
 ## `--wrapper kimi` { #kimi }
 

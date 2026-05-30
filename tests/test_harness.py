@@ -41,6 +41,10 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
     assert _src_for(plan, tmp_path / "CLAUDE.md").read_text() == "# project instructions\n"
     skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
 
+    # Provenance (for --dry-run): each target maps back to its agent-neutral source.
+    assert plan.origins[tmp_path / "CLAUDE.md"] == str(tmp_path / "AGENTS.md")
+    assert plan.origins[tmp_path / ".claude" / "skills"] == str(tmp_path / ".agents" / "skills")
+
     skill_md = (skills_src / "demo" / "SKILL.md").read_text()
     assert "name: demo" in skill_md
     assert "description: a demo" in skill_md
@@ -50,6 +54,19 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
     assert (skills_src / "demo" / "task1.md").exists()
     assert (skills_src / "demo" / "helper.sh").exists()
     assert not (skills_src / "demo" / "SKILL.kimi.md").exists()
+
+
+def test_load_source_excludes_home_as_project_root(tmp_path, monkeypatch):
+    # $HOME holds the *global* source (~/.agents/skills), so find_project_root always
+    # matches it via .agents — but home is not a project. load_source must yield an empty
+    # project source there, or the global skills get re-injected as project scope.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".agents" / "skills" / "demo").mkdir(parents=True)
+    (tmp_path / "AGENTS.md").write_text("# would-be project instructions\n")
+
+    src = load_source(tmp_path)
+    assert src.skills_dir is None
+    assert src.agents_md is None
 
 
 def test_compile_with_no_source_is_empty(tmp_path):
@@ -135,6 +152,9 @@ def test_compile_kimi(tmp_path, monkeypatch):
     assert "GLOBAL-INSTR" in yaml_text
     assert "PROJECT-INSTR" not in yaml_text
 
+    # The natively-read project AGENTS.md is recorded so --dry-run can surface it.
+    assert (proj / "AGENTS.md") in plan.native_reads
+
     # Global skills -> bound into ~/.kimi/skills.
     assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
     assert (_src_for(plan, home / ".kimi" / "skills") / "gskill" / "SKILL.md").exists()
@@ -193,8 +213,10 @@ def test_compile_opencode(tmp_path, monkeypatch):
     # opencode is pure path-discovery — no extra args.
     assert plan.extra_args == []
 
-    # Project AGENTS.md is read natively at ./AGENTS.md — never injected.
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded
+    # as a native read so --dry-run can surface it.
     assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
 
     # Global instructions -> <config>/AGENTS.md.
     assert config / "AGENTS.md" in targets
