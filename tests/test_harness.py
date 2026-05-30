@@ -41,6 +41,10 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
     assert _src_for(plan, tmp_path / "CLAUDE.md").read_text() == "# project instructions\n"
     skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
 
+    # Provenance (for --dry-run): each target maps back to its agent-neutral source.
+    assert plan.origins[tmp_path / "CLAUDE.md"] == str(tmp_path / "AGENTS.md")
+    assert plan.origins[tmp_path / ".claude" / "skills"] == str(tmp_path / ".agents" / "skills")
+
     skill_md = (skills_src / "demo" / "SKILL.md").read_text()
     assert "name: demo" in skill_md
     assert "description: a demo" in skill_md

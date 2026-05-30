@@ -87,7 +87,8 @@ def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
 def test_wrapper_dry_run_lists_virtual_files_without_launching(monkeypatch, capsys):
     _hermetic_sources(monkeypatch)
     _no_launch(monkeypatch)
-    plan = cli.Plan(binds=[(Path("/tmp/c/CLAUDE.md"), Path.home() / ".claude" / "CLAUDE.md")])
+    target = Path.home() / ".claude" / "CLAUDE.md"
+    plan = cli.Plan(binds=[(Path("/tmp/c/CLAUDE.md"), target)], origins={target: "/proj/AGENTS.md"})
     monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: plan)
     monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "--dry-run", "--", "claude"])
     with pytest.raises(SystemExit) as exc:
@@ -95,6 +96,8 @@ def test_wrapper_dry_run_lists_virtual_files_without_launching(monkeypatch, caps
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "virtual files (claude)" in out
+    assert "/proj/AGENTS.md → ~/.claude/CLAUDE.md" in out  # source → dest
+    assert "command:  claude" in out
     assert "~/.claude/CLAUDE.md" in out
     assert "command:  claude" in out
 
@@ -219,6 +222,10 @@ def test_provider_dry_run_lists_virtual_files_and_extra_args(monkeypatch, tmp_pa
     plan = cli.Plan(
         binds=[(Path("/tmp/k/skills"), Path("/proj/.kimi/skills"))],
         extra_args=["--agent-file", "/tmp/k/agent.yaml"],
+        origins={
+            Path("/proj/.kimi/skills"): "/g/.agents/skills",
+            Path("/tmp/k/agent.yaml"): "/g/AGENTS.md",
+        },
     )
     monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: plan)
     _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
@@ -228,7 +235,33 @@ def test_provider_dry_run_lists_virtual_files_and_extra_args(monkeypatch, tmp_pa
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "virtual files (kimi)" in out
-    assert "extra args: --agent-file /tmp/k/agent.yaml" in out
+    assert "/g/.agents/skills → /proj/.kimi/skills" in out  # source → dest
+    assert "/g/AGENTS.md → (kimi --agent-file)" in out  # global instructions via agent-file
+    assert "appended args: --agent-file /tmp/k/agent.yaml" in out
+
+
+def test_provider_dry_run_pretty_prints_opencode_config(monkeypatch, tmp_path, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path,
+        "oc",
+        {
+            "harness": "opencode",
+            "config": {"model": "deepseek/deepseek-v4-pro", "effortLevel": "high"},
+        },
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "oc"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    # OPENCODE_CONFIG_CONTENT is pretty-printed (indented), not a one-line blob.
+    assert "export OPENCODE_CONFIG_CONTENT=\n" in out
+    assert '"model": "deepseek/deepseek-v4-pro"' in out
+    assert '"reasoningEffort": "high"' in out
 
 
 def test_provider_missing_required_env_returns_1(monkeypatch, tmp_path):
