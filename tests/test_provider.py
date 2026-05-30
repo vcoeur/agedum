@@ -362,3 +362,51 @@ def test_build_launch_is_deterministic():
     b = build_launch(json.loads(json.dumps(config)), base_env={"K": "v"})
     assert a == b
     assert isinstance(a, Launch)
+
+
+def _provider_def_config():
+    return {
+        "harness": "opencode",
+        "requiredEnv": ["OPENROUTER_API_KEY"],
+        "config": {
+            "model": "openrouter/moonshotai/kimi-k2.6",
+            "effortLevel": "max",
+            "providerDef": {
+                "id": "openrouter",
+                "npm": "@openrouter/ai-sdk-provider",
+                "baseUrl": "https://openrouter.ai/api/v1",
+                "apiKeyEnv": "OPENROUTER_API_KEY",
+            },
+        },
+    }
+
+
+def test_opencode_provider_def_renders_explicit_provider_with_key():
+    launch = build_launch(_provider_def_config(), base_env={"OPENROUTER_API_KEY": "sk-or-v1-xyz"})
+    provider = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])["provider"]["openrouter"]
+    assert provider["npm"] == "@openrouter/ai-sdk-provider"
+    assert provider["options"]["baseURL"] == "https://openrouter.ai/api/v1"
+    # The resolved key value is baked straight into the config doc (no {env:} placeholder).
+    assert provider["options"]["apiKey"] == "sk-or-v1-xyz"
+    # Deep-merged with the per-model reasoning options, not clobbered.
+    assert provider["models"]["moonshotai/kimi-k2.6"]["options"]["reasoningEffort"] == "max"
+
+
+def test_opencode_provider_def_masks_config_doc_in_dry_run():
+    launch = build_launch(_provider_def_config(), base_env={"OPENROUTER_API_KEY": "sk-or-v1-xyz"})
+    # The doc embeds the key, so the whole var is masked in --dry-run.
+    assert "OPENCODE_CONFIG_CONTENT" in launch.secrets
+
+
+def test_opencode_provider_def_key_env_validated_even_if_unlisted():
+    config = _provider_def_config()
+    config.pop("requiredEnv")  # apiKeyEnv must still be required defensively
+    with pytest.raises(ProviderError, match="OPENROUTER_API_KEY is required"):
+        build_launch(config, base_env={})
+
+
+def test_opencode_provider_def_missing_field_errors():
+    config = _provider_def_config()
+    del config["config"]["providerDef"]["npm"]
+    with pytest.raises(ProviderError, match="providerDef is missing required field"):
+        build_launch(config, base_env={"OPENROUTER_API_KEY": "sk-or-v1-xyz"})

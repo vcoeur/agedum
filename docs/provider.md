@@ -258,9 +258,48 @@ The token (`secretEnv`) reaches kimi via the `requiredEnv` export.
 | `defaultOptions.{reasoningEffort,textVerbosity,reasoningSummary}` | the default model's `provider.<id>.models.<model>.options` |
 | `effortLevel` (flat alias) | the default model's `reasoningEffort` (explicit `defaultOptions.reasoningEffort` wins) |
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
+| `providerDef` | an explicit provider block `provider.<id> = { npm, options: { baseURL, apiKey } }` with the key resolved from the environment — see below |
 | `opencodeConfig` | a literal opencode config object, deep-merged into the document last (wins on conflict) — see below |
 
 The document is set as a single `OPENCODE_CONFIG_CONTENT` env var (no file written).
+
+#### `providerDef` — declare the provider + key inline
+
+By default an opencode `model` like `openrouter/deepseek/deepseek-v4-pro` relies on
+opencode resolving the `openrouter` provider from its **own** auth store
+(`opencode auth login`). `providerDef` instead **defines the provider in the config**
+and resolves the API key from the environment, so no prior login is needed:
+
+```json
+{
+  "harness": "opencode",
+  "requiredEnv": ["OPENROUTER_API_KEY"],
+  "config": {
+    "model": "openrouter/deepseek/deepseek-v4-pro",
+    "providerDef": {
+      "id": "openrouter",
+      "npm": "@openrouter/ai-sdk-provider",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | provider id; must match the prefix of the `model` strings (e.g. `openrouter`) |
+| `npm` | the AI-SDK package opencode loads for the provider |
+| `baseUrl` | becomes `provider.<id>.options.baseURL` |
+| `apiKeyEnv` | env var whose **value** is resolved into `provider.<id>.options.apiKey` |
+
+The provider block is deep-merged with any per-model reasoning options. The key's
+**value** (not a `{env:…}` placeholder) is written into `provider.<id>.options.apiKey`,
+because opencode's `{env:…}` substitution is unreliable for a custom provider's
+`options.apiKey`. This is the same in-process token handling `claude` already uses for
+`ANTHROPIC_AUTH_TOKEN`; `apiKeyEnv` is auto-added to the validated `requiredEnv`, and
+the resulting `OPENCODE_CONFIG_CONTENT` is masked in `--dry-run`. (Keys containing `"`
+or `\` would break the surrounding JSON; standard `sk-or-…` keys are fine.)
 
 #### `opencodeConfig` — anything agedum doesn't model
 
