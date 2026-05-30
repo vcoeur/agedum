@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from agedum.harness import (
@@ -327,3 +328,53 @@ def test_compile_opencode_global_agents_harness_overlay_merged(tmp_path, monkeyp
     assert "GLOBAL-BASE" in merged
     assert "OPENCODE-EXTRA" in merged
     assert "KIMI-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_compile_claude_injects_transcript_hooks(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# proj\n")
+    src = load_source(tmp_path)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    settings = json.loads(_src_for(plan, tmp_path / ".claude" / "settings.json").read_text())
+    events = settings["hooks"]
+    assert set(events) == {"UserPromptSubmit", "Stop"}
+    user_cmd = events["UserPromptSubmit"][0]["hooks"][0]["command"]
+    stop_cmd = events["Stop"][0]["hooks"][0]["command"]
+    assert user_cmd.startswith("node ")
+    assert user_cmd.endswith("emit-transcript.mjs user")
+    assert stop_cmd.endswith("emit-transcript.mjs stop")
+
+
+def test_compile_claude_transcript_hooks_merge_existing_settings(tmp_path):
+    # A project with its own settings.json (permissions + a SessionStart hook) keeps all
+    # of it; the transcript hooks are added alongside, never clobbering it.
+    (tmp_path / "AGENTS.md").write_text("# proj\n")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["Read(//x/**)"]},
+                "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]},
+            }
+        )
+    )
+
+    src = load_source(tmp_path)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    merged = json.loads(_src_for(plan, tmp_path / ".claude" / "settings.json").read_text())
+    assert merged["permissions"] == {"allow": ["Read(//x/**)"]}
+    assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
+    assert "UserPromptSubmit" in merged["hooks"]
+    assert "Stop" in merged["hooks"]
+
+
+def test_claude_emitter_asset_is_shipped():
+    from agedum.harness import _claude_emitter_path
+
+    assert Path(_claude_emitter_path()).is_file()
