@@ -48,6 +48,34 @@ Unlike the retired `--build-script` codegen — which emitted a wrapper that sou
 `.env` itself, so agedum never saw a token — provider mode reads the env file into the
 agedum process and sets the resolved values in the child environment.
 
+## Seeding an initial prompt — `--prompt` / `--run`
+
+Two agedum flags seed the launched harness with a first prompt, abstracting over each
+harness's own prompt syntax (mutually exclusive, each given once):
+
+- **`--prompt "<text>"`** — launch **interactively** with `<text>` as the first message;
+  the session stays open.
+- **`--run "<text>"`** — run `<text>` **non-interactively** and exit. The form for scripts
+  and tasks.
+
+agedum maps the flag to the harness named in the config:
+
+| Harness | `--prompt` (interactive) | `--run` (non-interactive) |
+|---|---|---|
+| claude | positional prompt: `claude "<text>"` | `claude --print "<text>"` |
+| kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
+| opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
+
+A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
+never guesses). Harness passthrough args are preserved, before the prompt text. Use
+`--dry-run` to see the exact argv:
+
+```bash
+agedum claude-deepseek-auto --run "review this" --dry-run
+#   command
+#     claude --print review this
+```
+
 ## Config shape
 
 The config is the condash-style agent envelope:
