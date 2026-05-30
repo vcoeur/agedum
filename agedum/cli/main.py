@@ -170,26 +170,40 @@ def _run_config(argv: list[str]) -> int:
 
 
 def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
-    """Print the resolved launch (secret values masked) without running anything."""
-    print(f"provider: {launch.label}")
-    print(f"harness:  {launch.harness}")
-    print(f"env file: {env_path}")
+    """Print the resolved launch (secrets masked) without running anything."""
+    print(f"provider   {launch.label}")
+    print(f"harness    {launch.harness}")
+    print(f"env file   {_abs_display(env_path)}")
+    print()
+    _print_environment(launch)
+    extra_args = _print_plan_sections(launch.harness)
+    _print_command(command, extra_args)
+
+
+def _print_environment(launch) -> None:
+    """The resolved provider environment (secrets masked; opencode config pretty-printed)."""
+    if not launch.env and not launch.unset:
+        return
+    print("environment")
+    width = max((len(key) for key in launch.env), default=0)
     for key, value in launch.env.items():
-        if key in launch.secrets:
-            print(f"  export {key}=***")
-        elif key == "OPENCODE_CONFIG_CONTENT":
+        if key == "OPENCODE_CONFIG_CONTENT":
             # The resolved opencode config — pretty-print the JSON instead of a one-liner.
-            print(f"  export {key}=")
+            print(f"  {key}")
             for line in _pretty_json(value).splitlines():
                 print(f"    {line}")
         else:
-            print(f"  export {key}={value}")
+            print(f"  {key.ljust(width)}   {'***' if key in launch.secrets else value}")
     for var in launch.unset:
         print(f"  unset {var}")
-    print(f"command:  {' '.join(command)}")
-    print(f"virtual files ({launch.harness}):")
-    for line in _virtual_file_lines(launch.harness):
-        print(line)
+    print()
+
+
+def _print_command(command: list[str], extra_args: list[str]) -> None:
+    print("command")
+    print(f"  {' '.join(command)}")
+    if extra_args:
+        print(f"  + agedum appends: {' '.join(extra_args)}")
 
 
 def _pretty_json(text: str) -> str:
@@ -200,56 +214,95 @@ def _pretty_json(text: str) -> str:
         return text
 
 
-def _display_path(path: Path) -> str:
-    """Render a path with the user's home abbreviated to ``~``."""
+def _abs_display(path: Path) -> str:
+    """Absolute path with the user's home abbreviated to ``~``."""
     text = str(path)
     home = str(Path.home())
     return "~" + text[len(home) :] if text.startswith(home) else text
 
 
-def _virtual_file_lines(mode: str) -> list[str]:
-    """Describe the virtual files agedum would inject for ``mode``, without launching.
+def _display_path(path: Path) -> str:
+    """Render a path relative to the cwd when it lives under it, else home-abbreviated.
 
-    Compiles the located project + global sources to a throwaway directory to obtain the
-    bind plan, then formats each injection as ``<source> → <dest>`` — the agent-neutral
-    source file (from ``plan.origins``) and the path the harness will read, directories
-    marked with a trailing ``/``. kimi's global ``AGENTS.md`` (injected via
-    ``--agent-file``) is listed too. The throwaway directory is removed before returning.
+    Paths inside the current directory read as ``.agents/skills`` etc.; anything else
+    (the global config, a parent project) keeps a ``~``-abbreviated absolute form.
+    """
+    rel = os.path.relpath(path, Path.cwd())
+    if not rel.startswith(".."):
+        return rel
+    return _abs_display(path)
+
+
+def _print_plan_sections(mode: str) -> list[str]:
+    """Compile the located sources and print the per-scope source dispositions.
+
+    For each scope (project, global) every source is listed with what happens to it:
+    injected ``→ <dest>``, ``read in place`` (kimi/opencode read the project AGENTS.md
+    natively), routed to the kimi ``--agent-file``, or an explicit note when the scope is
+    empty. Returns the launch's appended args (kimi ``--agent-file``) for the command line.
     """
     project = load_source()
     global_ = load_global_source()
-    if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
-        return ["  (no AGENTS.md or skills found — nothing injected)"]
     dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-dry-"))
     try:
         plan = _COMPILERS[mode](project, global_, dest)
-        lines = []
-        for src, target in plan.binds:
-            lines.append(_injection_line(plan.origins.get(target), target, is_dir=src.is_dir()))
-        # kimi injects the global AGENTS.md via --agent-file rather than a bind: it is
-        # compiled into a generated agent file that kimi reads through that flag.
-        for token in plan.extra_args:
-            origin = plan.origins.get(Path(token))
-            if origin:
-                lines.append(
-                    f"  {_display_path(Path(origin))} → kimi agent file (passed via --agent-file)"
-                )
-        if not lines:
-            lines.append("  (none)")
-        if plan.extra_args:
-            lines.append(f"  appended args: {' '.join(plan.extra_args)}")
-        return lines
+        # is_dir() reflects whether a bind is a skills dir vs a file; resolve before cleanup.
+        dir_targets = {target for src, target in plan.binds if src.is_dir()}
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+    # Project-scope paths display relative to the cwd; global-scope stays ~-absolute so
+    # the user config never looks like a project-relative path (e.g. when run from $HOME).
+    _print_scope(
+        f"project scope · {_abs_display(project.root)}",
+        project,
+        plan,
+        dir_targets,
+        empty="(no AGENTS.md or .agents/skills found here)",
+        display=_display_path,
+    )
+    _print_scope(
+        "global scope",
+        global_,
+        plan,
+        dir_targets,
+        empty="(no ~/.config/agents/AGENTS.md or ~/.agents/skills)",
+        display=_abs_display,
+    )
+    return plan.extra_args
 
 
-def _injection_line(origin: str | None, target: Path, *, is_dir: bool) -> str:
-    """Format one ``<source> → <dest>`` line (dest dirs get a trailing ``/``)."""
-    dest = f"{_display_path(target)}{'/' if is_dir else ''}"
-    if origin is None:
-        return f"  {dest}"
-    source = f"{_display_path(Path(origin))}{'/' if Path(origin).is_dir() else ''}"
-    return f"  {source} → {dest}"
+def _print_scope(
+    title: str, source: Source, plan: Plan, dir_targets: set, *, empty: str, display
+) -> None:
+    """Print one scope's sources, each with its disposition, aligned."""
+    print(title)
+    rows = []
+    for path in (source.agents_md, source.skills_dir):
+        if path is None:
+            continue
+        label = f"{display(path)}{'/' if path.is_dir() else ''}"
+        rows.append((label, _disposition(path, plan, dir_targets, display)))
+    if not rows:
+        print(f"  {empty}")
+    else:
+        width = max(len(label) for label, _ in rows)
+        for label, disposition in rows:
+            print(f"  {label.ljust(width)}   {disposition}")
+    print()
+
+
+def _disposition(source_path: Path, plan: Plan, dir_targets: set, display) -> str:
+    """How the harness consumes ``source_path``: injected, native, agent-file, or neither."""
+    key = str(source_path)
+    for _, target in plan.binds:
+        if plan.origins.get(target) == key:
+            return f"→ {display(target)}{'/' if target in dir_targets else ''}"
+    for token in plan.extra_args:
+        if plan.origins.get(Path(token)) == key:
+            return "→ kimi agent file (passed via --agent-file)"
+    if source_path in plan.native_reads:
+        return "read in place (read natively — not injected)"
+    return "(not injected)"
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +344,10 @@ def _run_wrapper(argv: list[str]) -> int:
         _die("a harness is required: --wrapper claude|kimi|opencode")
 
     if dry_run:
-        print(f"harness:  {mode}")
-        print(f"command:  {' '.join(command)}")
-        print(f"virtual files ({mode}):")
-        for line in _virtual_file_lines(mode):
-            print(line)
+        print(f"harness    {mode}")
+        print()
+        extra_args = _print_plan_sections(mode)
+        _print_command(command, extra_args)
         return 0
 
     return _run(mode, command)

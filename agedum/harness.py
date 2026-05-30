@@ -51,6 +51,9 @@ class Plan:
     # from (a bind target, or kimi's --agent-file path). Display-only; the launcher
     # ignores it.
     origins: dict[Path, str] = field(default_factory=dict)
+    # Sources the harness reads *in place* without a bind (kimi/opencode read the project
+    # AGENTS.md natively). Display-only for --dry-run, so they are not invisible.
+    native_reads: list[Path] = field(default_factory=list)
 
 
 def claude_config_dir() -> Path:
@@ -237,6 +240,11 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
     # Global instructions (base + AGENTS.kimi.md overlay) -> a custom --agent-file (kimi
     # has no user-scope AGENTS.md). Project instructions are read natively from
     # ./AGENTS.md, so they are left in place.
@@ -328,6 +336,11 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     """
     plan = Plan()
     config = opencode_config_dir()
+
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
 
     # Global instructions (base + AGENTS.opencode.md overlay) -> <config>/AGENTS.md
     # (project ./AGENTS.md is read natively).

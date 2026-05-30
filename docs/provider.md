@@ -141,52 +141,56 @@ from the environment. The `config` block is translated into opencode's
 
 ## `--dry-run`
 
-Prints the full resolved launch without running it: the provider label, harness, env
-file, the **resolved config** (secret values masked as `***`; opencode's
-`OPENCODE_CONFIG_CONTENT` pretty-printed as indented JSON), the vars to unset, the final
-command, and the **virtual files** agedum would inject — each as `source → dest`, the
-agent-neutral file and the path the harness will read (directories marked with a trailing
-`/`). Use it to verify a provider resolves *and* to see exactly what context the harness
-is given:
+Prints the full resolved launch without running it, so you can see exactly what context
+the harness is given. It is grouped by **scope** (project / global); under each, every
+source (`AGENTS.md`, `.agents/skills/`) is listed with its **disposition**: `→ <dest>`
+when injected, `read in place` when the harness reads it natively (kimi/opencode read the
+project `AGENTS.md` in place — never invisible), `→ kimi agent file` for the kimi
+`--agent-file`, or an explicit note when a scope contributes nothing. Project-scope paths
+display relative to the cwd; global-scope stays `~`-absolute. The resolved config (env
+vars; opencode's `OPENCODE_CONFIG_CONTENT` pretty-printed) and the final command are shown
+too. For a kimi provider run from a project root:
 
 ```text
-provider: claude-deepseek-auto
-harness:  claude
-env file: /home/you/.config/agents/.env
-  export DEEPSEEK_API_KEY=***
-  export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-  export ANTHROPIC_AUTH_TOKEN=***
-  …
-  unset ANTHROPIC_API_KEY
-command:  claude
-virtual files (claude):
-  ~/project/AGENTS.md → ~/project/CLAUDE.md
-  ~/project/.agents/skills/ → ~/project/.claude/skills/
-  ~/.config/agents/AGENTS.md → ~/.claude/CLAUDE.md
-  ~/.agents/skills/ → ~/.claude/skills/
+provider   Kimi
+harness    kimi
+env file   ~/.config/agents/.env
+
+project scope · ~/src/foo
+  AGENTS.md         read in place (read natively — not injected)
+  .agents/skills/   → .kimi/skills/
+
+global scope
+  ~/.config/agents/AGENTS.md   → kimi agent file (passed via --agent-file)
+  ~/.agents/skills/            → ~/.kimi/skills/
+
+command
+  kimi
+  + agedum appends: --agent-file /tmp/agedum-kimi-dry-…/agent.yaml
 ```
 
-For an **opencode** provider, the resolved config is shown as indented JSON, and the
-virtual files land under `~/.config/opencode/`:
+For an **opencode** provider the resolved config is shown as indented JSON (the `environment`
+section), and a scope with no sources is stated explicitly, e.g.:
 
 ```text
-  export OPENCODE_CONFIG_CONTENT=
+environment
+  OPENCODE_CONFIG_CONTENT
     {
       "model": "deepseek/deepseek-v4-pro",
-      "provider": {
-        "deepseek": { "models": { "deepseek-v4-pro": { "options": { "reasoningEffort": "max" } } } }
-      }
+      "provider": { "deepseek": { "models": { "deepseek-v4-pro": { "options": { "reasoningEffort": "max" } } } } }
     }
-command:  opencode
-virtual files (opencode):
-  ~/.config/agents/AGENTS.md → ~/.config/opencode/AGENTS.md
-  ~/.agents/skills/ → ~/.config/opencode/skills/
+
+project scope · ~
+  (no AGENTS.md or .agents/skills found here)
+
+global scope
+  ~/.config/agents/AGENTS.md   → ~/.config/opencode/AGENTS.md
+  ~/.agents/skills/            → ~/.config/opencode/skills/
 ```
 
-The `virtual files` block is the same view [wrapper mode](harnesses.md) injects — it is
-how agedum renders the agent-neutral [source](source-shape.md) for the harness. For kimi
-it also lists the global `AGENTS.md` injected via `--agent-file`. Nothing is written to
-your real tree: the listed destinations exist only inside the launched process's
+This is the same view [wrapper mode](harnesses.md) shows — how agedum renders the
+agent-neutral [source](source-shape.md) for the harness. Nothing is written to your real
+tree: the listed destinations exist only inside the launched process's
 [mount namespace](internals.md).
 
 ## Per-harness `config` mapping

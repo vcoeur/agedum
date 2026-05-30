@@ -95,11 +95,25 @@ def test_wrapper_dry_run_lists_virtual_files_without_launching(monkeypatch, caps
         cli.app()
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "virtual files (claude)" in out
-    assert "/proj/AGENTS.md → ~/.claude/CLAUDE.md" in out  # source → dest
-    assert "command:  claude" in out
-    assert "~/.claude/CLAUDE.md" in out
-    assert "command:  claude" in out
+    assert "project scope" in out
+    assert "/proj/AGENTS.md" in out and "→ ~/.claude/CLAUDE.md" in out  # source disposition
+    assert "command" in out
+
+
+def test_dry_run_notes_empty_project_scope(monkeypatch, capsys):
+    # A scope that contributes nothing is stated explicitly, not silently omitted.
+    monkeypatch.setattr(cli, "load_source", lambda: cli.Source(Path("/proj"), None, None))
+    monkeypatch.setattr(
+        cli, "load_global_source", lambda: cli.Source(Path("/g"), Path("/g/AGENTS.md"), None)
+    )
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "--dry-run", "--", "claude"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "(no AGENTS.md or .agents/skills found here)" in out
 
 
 def test_wrapper_without_harness_errors(monkeypatch):
@@ -184,12 +198,12 @@ def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
         cli.app()
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic" in out
+    assert "ANTHROPIC_BASE_URL" in out and "https://api.deepseek.com/anthropic" in out
     assert "sk-supersecret" not in out  # secret value masked
     assert "***" in out
     assert "unset ANTHROPIC_API_KEY" in out
-    assert "command:  claude" in out
-    assert "virtual files (claude)" in out
+    assert "command" in out
+    assert "project scope" in out and "global scope" in out
 
 
 def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
@@ -213,31 +227,45 @@ def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
-    assert "ANTHROPIC_BASE_URL=https://x/anthropic" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "ANTHROPIC_BASE_URL" in out and "https://x/anthropic" in out
 
 
-def test_provider_dry_run_lists_virtual_files_and_extra_args(monkeypatch, tmp_path, capsys):
-    _hermetic_sources(monkeypatch)
+def test_provider_dry_run_shows_dispositions_and_native_read(monkeypatch, tmp_path, capsys):
+    # Realistic kimi sources + plan: project AGENTS.md read natively, project/global skills
+    # bound, global AGENTS.md routed to the --agent-file.
+    project = cli.Source(Path("/proj"), Path("/proj/AGENTS.md"), Path("/proj/.agents/skills"))
+    global_ = cli.Source(Path("/g"), Path("/g/AGENTS.md"), Path("/g/.agents/skills"))
+    monkeypatch.setattr(cli, "load_source", lambda: project)
+    monkeypatch.setattr(cli, "load_global_source", lambda: global_)
     _no_launch(monkeypatch)
-    plan = cli.Plan(
-        binds=[(Path("/tmp/k/skills"), Path("/proj/.kimi/skills"))],
-        extra_args=["--agent-file", "/tmp/k/agent.yaml"],
-        origins={
-            Path("/proj/.kimi/skills"): "/g/.agents/skills",
-            Path("/tmp/k/agent.yaml"): "/g/AGENTS.md",
-        },
+    p_skills, g_skills, agent_file = (
+        Path("/proj/.kimi/skills"),
+        Path("/g/.kimi/skills"),
+        Path("/tmp/k/agent.yaml"),
     )
-    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: plan)
+    plan = cli.Plan(
+        binds=[(Path("/tmp/ps"), p_skills), (Path("/tmp/gs"), g_skills)],
+        extra_args=["--agent-file", str(agent_file)],
+        origins={
+            p_skills: "/proj/.agents/skills",
+            g_skills: "/g/.agents/skills",
+            agent_file: "/g/AGENTS.md",
+        },
+        native_reads=[Path("/proj/AGENTS.md")],
+    )
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda p, g, d: plan)
     _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
     monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "mykimi"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "virtual files (kimi)" in out
-    assert "/g/.agents/skills → /proj/.kimi/skills" in out  # source → dest
-    assert "/g/AGENTS.md → kimi agent file (passed via --agent-file)" in out  # via agent-file
-    assert "appended args: --agent-file /tmp/k/agent.yaml" in out
+    assert "project scope" in out and "global scope" in out
+    assert "read in place" in out  # project AGENTS.md read natively, not invisible
+    assert "→ /proj/.kimi/skills" in out  # project skills injected
+    assert "→ kimi agent file (passed via --agent-file)" in out  # global AGENTS.md
+    assert "+ agedum appends: --agent-file /tmp/k/agent.yaml" in out
 
 
 def test_provider_dry_run_pretty_prints_opencode_config(monkeypatch, tmp_path, capsys):
@@ -259,7 +287,7 @@ def test_provider_dry_run_pretty_prints_opencode_config(monkeypatch, tmp_path, c
     assert exc.value.code == 0
     out = capsys.readouterr().out
     # OPENCODE_CONFIG_CONTENT is pretty-printed (indented), not a one-line blob.
-    assert "export OPENCODE_CONFIG_CONTENT=\n" in out
+    assert "OPENCODE_CONFIG_CONTENT\n" in out
     assert '"model": "deepseek/deepseek-v4-pro"' in out
     assert '"reasoningEffort": "high"' in out
 
