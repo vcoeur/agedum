@@ -81,13 +81,14 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   the provider/model/auth env in `os.environ`, then run the same virtual-FS launch as
   wrapper mode with `command = [<harness-binary>, *harness-args]`. The harness is read
   **from the config**; there is no `--harness` flag. `--dry-run` prints the resolved env
-  (secrets masked) + argv without launching. Secrets are read into the agedum process
-  (not kept out as the retired `--build-script` codegen did).
-- **wrapper** — `agedum --wrapper <harness> -- <command...>`. The flag before `--`
-  chooses the virtual-file context (`claude` / `kimi` / `opencode`); everything after
-  `--` is the child argv (some harnesses get extra flags appended — kimi's
-  `--agent-file`; Claude and opencode are pure binds). The bare `--claude` / `--kimi` /
-  `--opencode` flags are **deprecated aliases** (stderr notice, still run). Context and
+  (secrets masked), the injected virtual files, and the argv without launching. Secrets
+  are read into the agedum process (not kept out as the retired `--build-script` codegen
+  did). This is the primary, user-facing entry.
+- **wrapper** — `agedum --wrapper <harness> [--dry-run] -- <command...>`. The low-level
+  entry provider mode builds on. The flag before `--` chooses the virtual-file context
+  (`claude` / `kimi` / `opencode`); everything after `--` is the child argv (some
+  harnesses get extra flags appended — kimi's `--agent-file`; Claude and opencode are
+  pure binds). `--dry-run` prints the injected virtual files without running. Context and
   command are decoupled.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /

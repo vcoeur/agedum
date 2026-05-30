@@ -313,19 +313,6 @@ def test_opencode_explicit_options_win_over_flat_effort():
     assert payload["provider"]["p"]["models"]["m"]["options"]["reasoningEffort"] == "high"
 
 
-def test_opencode_extra_config_json_merges():
-    launch = build_launch(
-        {
-            "harness": "opencode",
-            "config": {"model": "p/m", "extraConfigJson": '{"theme": "tokyonight"}'},
-        },
-        base_env={},
-    )
-    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
-    assert payload["theme"] == "tokyonight"
-    assert payload["model"] == "p/m"
-
-
 def test_opencode_config_passthrough_object_merges():
     launch = build_launch(
         {
@@ -349,21 +336,6 @@ def test_opencode_config_passthrough_wins_over_modeled_keys():
     )
     payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
     assert payload["model"] == "x/y"
-
-
-def test_opencode_config_passthrough_wins_over_extra_config_json():
-    launch = build_launch(
-        {
-            "harness": "opencode",
-            "config": {
-                "extraConfigJson": '{"theme": "old"}',
-                "opencodeConfig": {"theme": "new"},
-            },
-        },
-        base_env={},
-    )
-    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
-    assert payload["theme"] == "new"
 
 
 def test_opencode_config_passthrough_rejects_non_object():

@@ -34,6 +34,11 @@ Internally this is three modules:
 The compiled tree lives under a `tempfile.mkdtemp()` directory that is removed when the
 command exits.
 
+To see the `Plan` for a given source without launching — the exact mount targets the
+harness will read — run `--dry-run`: `agedum <name> --dry-run` (provider mode) or
+`agedum --wrapper <harness> --dry-run -- <cmd>` (wrapper mode). It compiles the source,
+prints the bind targets and any appended args, and stops before the `bwrap` step.
+
 ## The mount namespace
 
 The `bwrap` argv starts by mirroring the whole real filesystem read-write into the

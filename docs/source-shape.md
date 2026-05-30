@@ -56,8 +56,8 @@ When agedum compiles the global source for harness `H`, it merges
 `~/.config/agents/AGENTS.md` (base) with `~/.config/agents/AGENTS.<harness>.md` when that
 sibling exists:
 
-- `AGENTS.claude.md` is applied for `--claude`, `AGENTS.kimi.md` for `--kimi`,
-  `AGENTS.opencode.md` for `--opencode`. An overlay for a *different* harness is ignored.
+- `AGENTS.claude.md` is applied for the claude harness, `AGENTS.kimi.md` for kimi,
+  `AGENTS.opencode.md` for opencode. An overlay for a *different* harness is ignored.
 - Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
   concatenation: the base, a blank line, then the overlay body.
 - This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
@@ -91,9 +91,9 @@ When a skill needs something only one harness understands — e.g. Claude's
 `allowed-tools` front-matter key, or harness-specific wording — put it in a
 `SKILL.<harness>.md` file beside the base:
 
-- `SKILL.claude.md` is applied when compiling for `--claude`.
-- `SKILL.kimi.md` is applied when compiling for `--kimi`.
-- `SKILL.opencode.md` is applied when compiling for `--opencode`.
+- `SKILL.claude.md` is applied when compiling for the claude harness.
+- `SKILL.kimi.md` is applied when compiling for the kimi harness.
+- `SKILL.opencode.md` is applied when compiling for the opencode harness.
 - An overlay for a *different* harness is ignored (a `SKILL.kimi.md` is skipped when
   compiling for Claude or opencode, and so on).
 

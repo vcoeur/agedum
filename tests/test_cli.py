@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,21 @@ def _capture_run(monkeypatch):
 
     monkeypatch.setattr(cli, "run_virtualfs", fake_run)
     return captured
+
+
+def _hermetic_sources(monkeypatch):
+    """Point the source loaders at a fake non-empty project so ``--dry-run`` compiles
+    deterministically instead of reading the host's real project/global sources."""
+    project = cli.Source(root=Path("/proj"), agents_md=Path("/proj/AGENTS.md"), skills_dir=None)
+    monkeypatch.setattr(cli, "load_source", lambda: project)
+    monkeypatch.setattr(cli, "load_global_source", lambda: cli.Source(Path("/g"), None, None))
+
+
+def _no_launch(monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("dry-run must not launch")
+
+    monkeypatch.setattr(cli, "run_virtualfs", boom)
 
 
 def test_version(monkeypatch, capsys):
@@ -59,15 +75,28 @@ def test_wrapper_equals_form(monkeypatch):
     assert captured["command"] == ["kimi", "-p", "hi"]
 
 
-def test_legacy_alias_still_works_with_deprecation(monkeypatch, capsys):
-    captured = _capture_run(monkeypatch)
-    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
+def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
+    # The `--claude`/`--kimi`/`--opencode` aliases were removed; the bare flag is no
+    # longer wrapper mode and is rejected as an unknown provider option.
     monkeypatch.setattr("sys.argv", ["agedum", "--claude", "--", "claude"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
+    assert exc.value.code == 2
+
+
+def test_wrapper_dry_run_lists_virtual_files_without_launching(monkeypatch, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    plan = cli.Plan(binds=[(Path("/tmp/c/CLAUDE.md"), Path.home() / ".claude" / "CLAUDE.md")])
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: plan)
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "--dry-run", "--", "claude"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
     assert exc.value.code == 0
-    assert captured["command"] == ["claude"]
-    assert "deprecated" in capsys.readouterr().err
+    out = capsys.readouterr().out
+    assert "virtual files (claude)" in out
+    assert "~/.claude/CLAUDE.md" in out
+    assert "command:  claude" in out
 
 
 def test_wrapper_without_harness_errors(monkeypatch):
@@ -145,6 +174,8 @@ def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
         raise AssertionError("dry-run must not launch")
 
     monkeypatch.setattr(cli, "run_virtualfs", boom)
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
     monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "ds"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
@@ -155,6 +186,7 @@ def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
     assert "***" in out
     assert "unset ANTHROPIC_API_KEY" in out
     assert "command:  claude" in out
+    assert "virtual files (claude)" in out
 
 
 def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
@@ -172,11 +204,31 @@ def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
     env_file = tmp_path / "alt.env"
     env_file.write_text("DEEPSEEK_API_KEY=tok\n")
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
     monkeypatch.setattr("sys.argv", ["agedum", "--env", str(env_file), "--dry-run", "ds"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
     assert "ANTHROPIC_BASE_URL=https://x/anthropic" in capsys.readouterr().out
+
+
+def test_provider_dry_run_lists_virtual_files_and_extra_args(monkeypatch, tmp_path, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    plan = cli.Plan(
+        binds=[(Path("/tmp/k/skills"), Path("/proj/.kimi/skills"))],
+        extra_args=["--agent-file", "/tmp/k/agent.yaml"],
+    )
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda project, global_, dest: plan)
+    _write_provider(tmp_path, "mykimi", {"harness": "kimi", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "mykimi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "virtual files (kimi)" in out
+    assert "extra args: --agent-file /tmp/k/agent.yaml" in out
 
 
 def test_provider_missing_required_env_returns_1(monkeypatch, tmp_path):

@@ -26,18 +26,18 @@ appear at their expected paths — visible only to that process and its children
 written into your real tree or `$HOME`.
 
 ```bash
-# Render the project + global source for Claude, then run Claude inside it:
-agedum --wrapper claude -- claude -p "review this change"
-
-# Same source, rendered for kimi or opencode instead:
-agedum --wrapper kimi     -- kimi -p "review this change"
-agedum --wrapper opencode -- opencode run "review this change"
+# The normal way to launch: name a provider; agedum sets its model/auth env and
+# injects your source, then runs the harness named in that provider's config.
+agedum claude-deepseek -p "review this change"
+agedum kimi            -p "review this change"
+agedum opencode-deepseek run "review this change"
 ```
 
-`--wrapper <harness>` chooses the *format*; everything after `--` is the command, run
-verbatim. The two are decoupled, so one source can front any agent CLI. To launch a
-harness with a provider/model/auth environment as well, use [provider mode](provider.md)
-— `agedum <provider-name>` reads a provider config + `.env` and runs the same launch.
+A [provider config](provider.md) names the harness and its model/auth; `agedum <name>`
+resolves it from a `.env`, injects the source, and launches. Under the hood it uses
+**wrapper mode** (`agedum --wrapper <harness> -- <command>`), the lower-level entry that
+just injects the source and runs a command — reach for that directly only when you want
+the context with no provider env (e.g. native Claude with your own login).
 
 ## Why agedum
 
@@ -83,9 +83,9 @@ flowchart LR
 | kimi   | `--wrapper kimi`   | Implemented — project + global scope |
 | opencode | `--wrapper opencode` | Implemented — project + global scope |
 
-The bare `--claude` / `--kimi` / `--opencode` flags still work as deprecated aliases.
-[Provider mode](provider.md) (`agedum <provider-name>`) launches a harness from a
-provider config JSON, resolving its env from a `.env`.
+[Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
+launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper
+mode (`agedum --wrapper <harness> -- <command>`) is the lower-level path it builds on.
 
 agedum is Linux-only and requires `bwrap`
 ([bubblewrap](https://github.com/containers/bubblewrap)) on `PATH` for the virtual-FS

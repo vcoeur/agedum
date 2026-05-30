@@ -52,21 +52,20 @@ agedum has two modes:
 agedum claude-deepseek-auto                       # resolve the named provider, launch claude
 agedum claude-deepseek-auto -p "review this"      # extra args go to the harness
 agedum ./providers/my-claude.json                 # a config path instead of a name
-agedum claude-deepseek-auto --dry-run             # print resolved env + argv, don't launch
+agedum claude-deepseek-auto --dry-run             # print resolved env, virtual files + argv
 
-# Wrapper mode — virtual files injected, no provider env:
-agedum --wrapper claude   -- claude --model sonnet -p "review this"
-agedum --wrapper kimi     -- kimi -p "explain this code"
-agedum --wrapper opencode -- opencode run "explain this code"
+# Wrapper mode (low-level; provider mode builds on it) — virtual files, no provider env:
+agedum --wrapper claude -- claude --model sonnet -p "review this"
+agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --version
 ```
 
-In wrapper mode, everything after `--` is the command, run verbatim; `--wrapper <harness>`
-chooses the format. The two are decoupled, so one context can front any command. Injected
-paths must be gitignored — agedum refuses to overlay a git-tracked file (the namespace
-shares your real `.git`). The bare `--claude` / `--kimi` / `--opencode` flags remain as
-deprecated aliases for `--wrapper <harness>`.
+`agedum <name>` is the normal way to launch. Wrapper mode is the lower-level entry it
+uses: everything after `--` is the command, run verbatim, and `--wrapper <harness>`
+chooses the format; `--dry-run` prints the injected virtual files without running.
+Injected paths must be gitignored — agedum refuses to overlay a git-tracked file (the
+namespace shares your real `.git`).
 
 ## Documentation
 
