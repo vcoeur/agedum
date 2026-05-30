@@ -440,3 +440,60 @@ def test_opencode_provider_def_missing_field_errors():
     del config["config"]["providerDef"]["npm"]
     with pytest.raises(ProviderError, match="providerDef is missing required field"):
         build_launch(config, base_env={"OPENROUTER_API_KEY": "sk-or-v1-xyz"})
+
+
+def _provider_def_list_config():
+    # One config drawing a Kimi primary + DeepSeek fast subagents, each provider keyed.
+    return {
+        "harness": "opencode",
+        "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+        "config": {
+            "model": "kimi-for-coding/kimi-k2.6",
+            "agentOptions": [
+                {"agent": "general", "model": "deepseek/deepseek-v4-flash"},
+            ],
+            "providerDef": [
+                {
+                    "id": "kimi-for-coding",
+                    "npm": "@ai-sdk/anthropic",
+                    "baseUrl": "https://api.kimi.com/coding/v1",
+                    "apiKeyEnv": "KIMI_API_KEY",
+                },
+                {
+                    "id": "deepseek",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "baseUrl": "https://api.deepseek.com",
+                    "apiKeyEnv": "DEEPSEEK_API_KEY",
+                },
+            ],
+        },
+    }
+
+
+def test_opencode_provider_def_list_renders_every_provider_with_its_key():
+    launch = build_launch(
+        _provider_def_list_config(),
+        base_env={"KIMI_API_KEY": "sk-kimi-abc", "DEEPSEEK_API_KEY": "sk-ds-xyz"},
+    )
+    providers = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])["provider"]
+    assert providers["kimi-for-coding"]["options"]["apiKey"] == "sk-kimi-abc"
+    assert providers["kimi-for-coding"]["options"]["baseURL"] == "https://api.kimi.com/coding/v1"
+    assert providers["deepseek"]["options"]["apiKey"] == "sk-ds-xyz"
+    assert providers["deepseek"]["npm"] == "@ai-sdk/openai-compatible"
+
+
+def test_opencode_provider_def_list_validates_every_key_env():
+    config = _provider_def_list_config()
+    config.pop("requiredEnv")  # every entry's apiKeyEnv must still be required defensively
+    with pytest.raises(ProviderError, match="DEEPSEEK_API_KEY is required"):
+        build_launch(config, base_env={"KIMI_API_KEY": "sk-kimi-abc"})
+
+
+def test_opencode_provider_def_list_rejects_non_dict_entry():
+    config = _provider_def_list_config()
+    config["config"]["providerDef"].append("nope")
+    with pytest.raises(ProviderError, match="each `providerDef` entry must be a JSON object"):
+        build_launch(
+            config,
+            base_env={"KIMI_API_KEY": "sk-kimi-abc", "DEEPSEEK_API_KEY": "sk-ds-xyz"},
+        )

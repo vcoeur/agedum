@@ -323,6 +323,28 @@ because opencode's `{env:…}` substitution is unreliable for a custom provider'
 the resulting `OPENCODE_CONFIG_CONTENT` is masked in `--dry-run`. (Keys containing `"`
 or `\` would break the surrounding JSON; standard `sk-or-…` keys are fine.)
 
+`providerDef` may also be a **list** of these objects when one config draws models from
+more than one provider — e.g. a Kimi primary model plus DeepSeek fast subagents, each
+needing its own baked-in key. Each entry is applied in order (later entries deep-merge
+over earlier ones), and every entry's `apiKeyEnv` is auto-added to `requiredEnv`:
+
+```json
+{
+  "harness": "opencode",
+  "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+  "config": {
+    "model": "kimi-for-coding/kimi-k2.6",
+    "agentOptions": [
+      { "agent": "general", "model": "deepseek/deepseek-v4-flash" }
+    ],
+    "providerDef": [
+      { "id": "kimi-for-coding", "npm": "@ai-sdk/anthropic",          "baseUrl": "https://api.kimi.com/coding/v1", "apiKeyEnv": "KIMI_API_KEY" },
+      { "id": "deepseek",        "npm": "@ai-sdk/openai-compatible",   "baseUrl": "https://api.deepseek.com",        "apiKeyEnv": "DEEPSEEK_API_KEY" }
+    ]
+  }
+}
+```
+
 #### `opencodeConfig` — anything agedum doesn't model
 
 The keys above are the common, cross-harness-meaningful knobs. For any other opencode

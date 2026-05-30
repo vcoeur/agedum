@@ -141,8 +141,7 @@ def required_env(config: dict) -> list[str]:
     # forgot to list it, so the apiKey baked into the config doc always has a value.
     block = config.get("config")
     if isinstance(block, dict):
-        provider_def = block.get("providerDef")
-        if isinstance(provider_def, dict):
+        for provider_def in _provider_defs(block.get("providerDef")):
             api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
             if api_key_env and api_key_env not in result:
                 result.append(api_key_env)
@@ -184,7 +183,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
     secrets.update(var for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY") if var in env)
     # An opencode providerDef bakes the API key value into OPENCODE_CONFIG_CONTENT, so
     # mask the whole document in --dry-run.
-    if isinstance(block.get("providerDef"), dict) and "OPENCODE_CONFIG_CONTENT" in env:
+    if _provider_defs(block.get("providerDef")) and "OPENCODE_CONFIG_CONTENT" in env:
         secrets.add("OPENCODE_CONFIG_CONTENT")
     return Launch(
         harness=harness,
@@ -297,22 +296,44 @@ def _opencode_env(
     if block.get("disableExternalSkills") is True:
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     document = _opencode_config_doc(block)
-    if block.get("providerDef") is not None:
-        document = _apply_provider_def(document, block["providerDef"], base_env)
+    for provider_def in _provider_defs(block.get("providerDef")):
+        document = _apply_provider_def(document, provider_def, base_env)
     if document:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
     return env, [], ["opencode"]
 
 
-def _apply_provider_def(document: dict, provider_def: object, base_env: dict[str, str]) -> dict:
-    """Deep-merge an explicit provider definition into the opencode ``document``.
+def _provider_defs(value: object) -> list[dict]:
+    """Normalise a ``providerDef`` config value into a list of provider-def dicts.
 
-    ``providerDef`` ({id, npm, baseUrl, apiKeyEnv}) becomes
+    Accepts a single dict (one provider) or a list of dicts (several providers — e.g. a
+    primary model and a fast-subagent model that live on different providers, each
+    needing its own baked-in key). ``None`` yields an empty list. Order is preserved so
+    later defs deep-merge over earlier ones.
+    """
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                raise ProviderError("each `providerDef` entry must be a JSON object")
+        return value
+    raise ProviderError("`providerDef` must be a JSON object or a list of them")
+
+
+def _apply_provider_def(document: dict, provider_def: object, base_env: dict[str, str]) -> dict:
+    """Deep-merge one explicit provider definition into the opencode ``document``.
+
+    A providerDef ({id, npm, baseUrl, apiKeyEnv}) becomes
     ``provider.<id> = {npm, options: {baseURL, apiKey}}``, with ``apiKey`` set to the
     *value* of ``apiKeyEnv`` from ``base_env``. Unlike opencode's ``{env:…}``
     substitution — unreliable for a custom provider's ``options.apiKey`` — the resolved
     key is written straight into the config doc agedum hands the child (the same
     in-process token handling ``_claude_env`` already uses for ``ANTHROPIC_AUTH_TOKEN``).
+    The config may carry a single providerDef or a list of them (see ``_provider_defs``);
+    this applies one.
     """
     if not isinstance(provider_def, dict):
         raise ProviderError("`providerDef` must be a JSON object")
