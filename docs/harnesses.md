@@ -1,6 +1,6 @@
 ---
 title: Harnesses · agedum
-description: Exactly what agedum does for each harness command — the Claude (--claude) and kimi (--kimi) compilers, the targets they inject, and the extra flags they append.
+description: Exactly what agedum injects for each harness — the Claude, kimi, and opencode compilers, the targets they bind, and the extra flags they append. This is the mechanism provider mode (agedum <name>) uses under the hood.
 ---
 
 # Harnesses
@@ -18,10 +18,14 @@ agedum --wrapper kimi     -- kimi -p "…"       # render for kimi, run kimi
 agedum --wrapper opencode -- opencode run "…"  # render for opencode, run opencode
 ```
 
-The bare `--claude` / `--kimi` / `--opencode` flags are **deprecated aliases** for
-`--wrapper <harness>`. To launch a harness with a *provider/model/auth* environment too,
-use [provider mode](provider.md) (`agedum <provider-name>`) — it resolves that
-environment from a provider config + `.env`, then runs the same virtual-FS launch.
+This page documents what each compiler injects — the mechanism [provider mode](provider.md)
+(`agedum <name>`, the normal entry point) uses under the hood. You rarely invoke
+`--wrapper` directly; do so only to front a harness with the injected context but no
+provider env. Add `--dry-run` before `--` to print the plan below without running:
+
+```bash
+agedum --wrapper claude --dry-run -- claude   # list the injected virtual files, don't run
+```
 
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its

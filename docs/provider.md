@@ -70,11 +70,82 @@ The config is the condash-style agent envelope:
 | `config` | The per-harness option block — see below. |
 | `name` / `slug` | Labels; `slug` (else `name`, else the harness) names the provider in error and `--dry-run` messages. |
 
+Save the file as `<slug>.json` under `~/.config/agents/providers/` (or anywhere, and
+launch it by path), put the API token in `~/.config/agents/.env`, then
+`agedum <slug> --dry-run` to check it before launching for real.
+
+## Recipes
+
+A complete, working config for each harness. The `config` block's keys are detailed in
+[Per-harness `config` mapping](#per-harness-config-mapping) below.
+
+### claude against a custom endpoint
+
+```json
+{
+  "harness": "claude",
+  "slug": "claude-deepseek",
+  "secretEnv": "DEEPSEEK_API_KEY",
+  "requiredEnv": ["DEEPSEEK_API_KEY"],
+  "config": {
+    "baseUrl": "https://api.deepseek.com/anthropic",
+    "model": "deepseek-v4-pro",
+    "foldSystemMessages": true
+  }
+}
+```
+
+`baseUrl` + `secretEnv` repoint Claude Code at the endpoint; `foldSystemMessages` is
+needed for strict Anthropic-compat upstreams (see [below](#foldsystemmessages-strict-anthropic-compat-upstreams)).
+Native Claude (the real Anthropic API, your own login) needs no provider at all — just run
+`claude`; a provider is only for overriding the endpoint/model/auth.
+
+### kimi against Moonshot
+
+```json
+{
+  "harness": "kimi",
+  "slug": "kimi",
+  "secretEnv": "MOONSHOT_API_KEY",
+  "requiredEnv": ["MOONSHOT_API_KEY"],
+  "config": { "model": "kimi-k2", "thinking": true }
+}
+```
+
+kimi reads its token from the environment, so the key must be in `requiredEnv`; the
+`config` knobs become appended CLI flags (`--model kimi-k2 --thinking`).
+
+### opencode with per-agent routing
+
+```json
+{
+  "harness": "opencode",
+  "slug": "opencode-deepseek",
+  "requiredEnv": ["DEEPSEEK_API_KEY"],
+  "config": {
+    "model": "deepseek/deepseek-v4-pro",
+    "disableExternalSkills": true,
+    "effortLevel": "high",
+    "agentOptions": [
+      { "agent": "general", "model": "deepseek/deepseek-v4-flash", "reasoningEffort": "low" }
+    ]
+  }
+}
+```
+
+opencode resolves provider credentials from its **own** auth store
+(`opencode auth login`), so a key is only in `requiredEnv` when opencode itself reads it
+from the environment. The `config` block is translated into opencode's
+`OPENCODE_CONFIG_CONTENT` document; for anything not modeled, use
+[`opencodeConfig`](#opencodeconfig-anything-agedum-doesnt-model).
+
 ## `--dry-run`
 
 Prints the provider label, harness, env file, the resolved environment (secret values
-masked as `***`), the vars to unset, and the final command — without launching. Use it
-to verify a provider resolves as expected:
+masked as `***`), the vars to unset, the **virtual files** agedum would inject (the paths
+the harness will read, directories marked with a trailing `/`, plus any appended args),
+and the final command — without launching. Use it to verify a provider resolves *and* to
+see exactly what context the harness is given:
 
 ```text
 provider: claude-deepseek-auto
@@ -86,7 +157,18 @@ env file: /home/you/.config/agents/.env
   …
   unset ANTHROPIC_API_KEY
 command:  claude
+virtual files (claude):
+  ~/project/CLAUDE.md
+  ~/project/.claude/skills/
+  ~/.claude/CLAUDE.md
+  ~/.claude/skills/
 ```
+
+The `virtual files` block is the same view [wrapper mode](harnesses.md) injects — it is
+how agedum renders the agent-neutral [source](source-shape.md) for the harness. For kimi
+it also lists the appended `--agent-file …` arg; for opencode the `~/.config/opencode/`
+binds. Nothing is written to your real tree: the listed paths exist only inside the
+launched process's [mount namespace](internals.md).
 
 ## Per-harness `config` mapping
 
@@ -154,7 +236,6 @@ The token (`secretEnv`) reaches kimi via the `requiredEnv` export.
 | `effortLevel` (flat alias) | the default model's `reasoningEffort` (explicit `defaultOptions.reasoningEffort` wins) |
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
 | `opencodeConfig` | a literal opencode config object, deep-merged into the document last (wins on conflict) — see below |
-| `extraConfigJson` | **deprecated**: the JSON-string form of `opencodeConfig`; parsed and deep-merged |
 
 The document is set as a single `OPENCODE_CONFIG_CONTENT` env var (no file written).
 
@@ -179,6 +260,7 @@ conflict:
 }
 ```
 
-Prefer `opencodeConfig` (a real JSON object) over the deprecated `extraConfigJson` (a
-JSON string inside the JSON). If both are present, `extraConfigJson` is applied first and
-`opencodeConfig` wins. A non-object `opencodeConfig` is an error.
+`opencodeConfig` must be a JSON object (a non-object is an error). It is the one escape
+hatch you need for opencode: the modeled keys cover the common cases tersely and stay
+consistent with the other harnesses, and anything else is written in opencode's own
+format here.

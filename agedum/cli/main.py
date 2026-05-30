@@ -5,14 +5,16 @@ condash-style provider config (a name resolved under
 ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`` or a ``/``/``.json`` path),
 resolves its env from ``${AGENTS_ENV_FILE:-~/.config/agents/.env}`` (or ``--env``),
 sets the provider/model/auth environment, and launches the harness named in the config
-inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked)
-and the final argv without launching. See :mod:`agedum.provider`.
+inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked),
+the virtual files that would be injected, and the final argv without launching. See
+:mod:`agedum.provider`.
 
-**wrapper**: ``agedum --wrapper <harness> -- <command…>``. The harness before ``--``
-chooses which virtual files to build (Claude / kimi / opencode); everything after
-``--`` is the child argv, run inside a mount namespace where those files are injected
-at the harness's expected paths. The legacy ``--claude`` / ``--kimi`` / ``--opencode``
-flags remain as deprecated aliases for ``--wrapper <h>``.
+**wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
+``--`` chooses which virtual files to build (Claude / kimi / opencode); everything after
+``--`` is the child argv, run inside a mount namespace where those files are injected at
+the harness's expected paths. ``--dry-run`` prints the virtual files that would be
+injected without running the command. This is the low-level entry that provider mode
+builds on; users normally launch via ``agedum <name>``.
 """
 
 from __future__ import annotations
@@ -51,27 +53,29 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode> -- <command> [args...]"
+    "       agedum --wrapper <claude|kimi|opencode> [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
 
-Provider mode — launch a harness from a provider config JSON, with the provider's
-env resolved from the env file and the agent-neutral source injected as virtual files:
+Provider mode (the normal way to launch) — run a harness from a provider config JSON,
+with the provider's env resolved from the env file and the agent-neutral source injected
+as virtual files:
 
   <provider-name>       resolve <name>.json under $AGENTS_PROVIDERS_DIR
                         (default ~/.config/agents/providers)
   <config.json> / path  a config path (contains / or ends in .json; CWD-relative)
   --env <file>          override the env file ($AGENTS_ENV_FILE, default
                         ~/.config/agents/.env)
-  --dry-run             print the resolved env (secrets masked) + argv, don't launch
+  --dry-run             print the resolved env (secrets masked), the virtual files that
+                        would be injected, and the argv — don't launch
   harness args          everything after the provider is passed to the harness
 
-Wrapper mode — run a command inside the virtual-file context, no provider env:
+Wrapper mode (low-level; provider mode builds on it) — run any command inside the
+virtual-file context, with no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode)
                         then run the command after -- inside the namespace
-  --claude / --kimi / --opencode
-                        deprecated aliases for `--wrapper <harness>`
+  --dry-run             print the virtual files that would be injected, don't run
 
 Other:
   --version, -V         print the version and exit
@@ -97,11 +101,7 @@ def app() -> None:
         return
 
     first = argv[0]
-    is_wrapper = (
-        first == "--wrapper"
-        or first.startswith("--wrapper=")
-        or (first.startswith("--") and first.removeprefix("--") in _COMPILERS)
-    )
+    is_wrapper = first == "--wrapper" or first.startswith("--wrapper=")
     if is_wrapper:
         raise SystemExit(_run_wrapper(argv))
     raise SystemExit(_run_config(argv))
@@ -179,6 +179,44 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     for var in launch.unset:
         print(f"  unset {var}")
     print(f"command:  {' '.join(command)}")
+    print(f"virtual files ({launch.harness}):")
+    for line in _virtual_file_lines(launch.harness):
+        print(line)
+
+
+def _display_path(path: Path) -> str:
+    """Render a mount target with the user's home abbreviated to ``~``."""
+    text = str(path)
+    home = str(Path.home())
+    return "~" + text[len(home) :] if text.startswith(home) else text
+
+
+def _virtual_file_lines(mode: str) -> list[str]:
+    """Describe the virtual files agedum would inject for ``mode``, without launching.
+
+    Compiles the located project + global sources to a throwaway directory to obtain the
+    bind plan, formats each mount target (the path the harness will read — directories
+    marked with a trailing ``/``) plus any appended args, then removes the directory.
+    Returns indented display lines.
+    """
+    project = load_source()
+    global_ = load_global_source()
+    if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
+        return ["  (no AGENTS.md or skills found — nothing injected)"]
+    dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-dry-"))
+    try:
+        plan = _COMPILERS[mode](project, global_, dest)
+        lines = []
+        for src, target in plan.binds:
+            suffix = "/" if src.is_dir() else ""
+            lines.append(f"  {_display_path(target)}{suffix}")
+        if not lines:
+            lines.append("  (none)")
+        if plan.extra_args:
+            lines.append(f"  extra args: {' '.join(plan.extra_args)}")
+        return lines
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +233,7 @@ def _run_wrapper(argv: list[str]) -> int:
         _die("no command given after `--`")
 
     mode: str | None = None
+    dry_run = False
     index = 0
     while index < len(flags):
         flag = flags[index]
@@ -209,16 +248,22 @@ def _run_wrapper(argv: list[str]) -> int:
             if value not in _COMPILERS:
                 _die(f"unknown harness for --wrapper: {value}")
             mode = value
-        elif flag.removeprefix("--") in _COMPILERS:
-            name = flag.removeprefix("--")
-            _err.print(f"[yellow]agedum:[/] `{flag}` is deprecated; use `--wrapper {name}`")
-            mode = name
+        elif flag == "--dry-run":
+            dry_run = True
         else:
             _die(f"unknown option: {flag}")
         index += 1
 
     if mode is None:
         _die("a harness is required: --wrapper claude|kimi|opencode")
+
+    if dry_run:
+        print(f"harness:  {mode}")
+        print(f"command:  {' '.join(command)}")
+        print(f"virtual files ({mode}):")
+        for line in _virtual_file_lines(mode):
+            print(line)
+        return 0
 
     return _run(mode, command)
 

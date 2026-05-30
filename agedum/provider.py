@@ -331,19 +331,9 @@ def _opencode_config_doc(block: dict) -> dict:
     if agents:
         document["agent"] = agents
 
-    # `extraConfigJson` is the deprecated JSON-string escape hatch; `opencodeConfig`
-    # is the preferred literal-object form of the same thing. Both are deep-merged
-    # into the document last (so they win on conflict with the modeled keys); when
-    # both are present the object form is applied second and wins.
-    extra = block.get("extraConfigJson")
-    if isinstance(extra, str) and extra.strip():
-        try:
-            merged = json.loads(extra)
-        except json.JSONDecodeError as exc:
-            raise ProviderError(f"extraConfigJson is not valid JSON: {exc}") from exc
-        if isinstance(merged, dict):
-            document = _deep_merge(document, merged)
-
+    # `opencodeConfig` is a literal opencode config object, deep-merged into the
+    # document last so it wins on conflict with the modeled keys — the escape hatch
+    # for any opencode option agedum does not model, written in opencode's own format.
     passthrough = block.get("opencodeConfig")
     if passthrough is not None:
         if not isinstance(passthrough, dict):
