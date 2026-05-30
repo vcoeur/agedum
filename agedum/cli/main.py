@@ -186,11 +186,22 @@ def _print_environment(launch) -> None:
         return
     print("environment")
     width = max((len(key) for key in launch.env), default=0)
+    # Values of the secret env vars, longest first — redacted from the pretty-printed
+    # opencode config so a key baked into it (e.g. providerDef.apiKey) is not exposed.
+    secret_values = sorted(
+        (
+            launch.env[name]
+            for name in launch.secrets
+            if name != "OPENCODE_CONFIG_CONTENT" and launch.env.get(name)
+        ),
+        key=len,
+        reverse=True,
+    )
     for key, value in launch.env.items():
         if key == "OPENCODE_CONFIG_CONTENT":
             # The resolved opencode config — pretty-print the JSON instead of a one-liner.
             print(f"  {key}")
-            for line in _pretty_json(value).splitlines():
+            for line in _redact(_pretty_json(value), secret_values).splitlines():
                 print(f"    {line}")
         else:
             print(f"  {key.ljust(width)}   {'***' if key in launch.secrets else value}")
@@ -204,6 +215,14 @@ def _print_command(command: list[str], extra_args: list[str]) -> None:
     print(f"  {' '.join(command)}")
     if extra_args:
         print(f"  + agedum appends: {' '.join(extra_args)}")
+
+
+def _redact(text: str, secret_values: list[str]) -> str:
+    """Replace each secret value with ``***`` (longest first, so a shorter secret that
+    is a substring of a longer one cannot leave a fragment unmasked)."""
+    for secret in secret_values:
+        text = text.replace(secret, "***")
+    return text
 
 
 def _pretty_json(text: str) -> str:
