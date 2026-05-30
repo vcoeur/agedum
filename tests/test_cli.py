@@ -455,3 +455,121 @@ def test_provider_unknown_option_errors(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 2
+
+
+# --- --prompt / --run ---
+
+
+def test_prompt_flag_claude_interactive_positional(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--prompt", "hello there"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude", "hello there"]
+
+
+def test_run_flag_claude_non_interactive(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--run", "do the thing"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude", "--print", "do the thing"]
+
+
+def test_run_flag_kimi_appends_print(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "kimi", lambda p, g, d: cli.Plan())
+    config = {"harness": "kimi", "config": {"model": "kimi-k2.6"}}
+    _write_provider(tmp_path, "k", config, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "k", "--run", "summarise"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == [
+        "kimi",
+        "--model",
+        "kimi-k2.6",
+        "--prompt",
+        "summarise",
+        "--print",
+    ]
+
+
+def test_run_flag_opencode_uses_run_subcommand(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "oc", {"harness": "opencode", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "oc", "--run", "explain this"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["opencode", "run", "explain this"]
+
+
+def test_prompt_flag_recognised_before_provider(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--prompt", "hi", "native"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude", "hi"]
+
+
+def test_run_equals_form(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--run=ship it"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude", "--print", "ship it"]
+
+
+def test_run_keeps_harness_passthrough_args(monkeypatch, tmp_path):
+    # Passthrough harness args precede the seeded mode flags + prompt text.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--add-dir", "/x", "--run", "go"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude", "--add-dir", "/x", "--print", "go"]
+
+
+def test_prompt_and_run_mutually_exclusive(monkeypatch, tmp_path):
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--prompt", "a", "--run", "b"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 2
+
+
+def test_run_requires_a_value(monkeypatch, tmp_path):
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 2
+
+
+def test_run_shows_in_dry_run_command(monkeypatch, tmp_path, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native", "--run", "do x", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--print" in out and "do x" in out

@@ -195,6 +195,43 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
     )
 
 
+def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool) -> list[str]:
+    """Build the harness argv that seeds an initial prompt (agedum ``--prompt``/``--run``).
+
+    ``interactive`` (agedum ``--prompt``) seeds the prompt but keeps the session open;
+    otherwise (agedum ``--run``) the harness runs the prompt once, non-interactively, and
+    exits. Each harness seeds a prompt differently, so the mapping is explicit:
+
+    * **claude** — a positional prompt seeds an interactive session; ``--print`` runs and
+      exits (``claude "<text>"`` vs ``claude --print "<text>"``).
+    * **kimi** — ``--prompt`` seeds the agent (interactive by default); adding ``--print``
+      makes that invocation non-interactive (``kimi --prompt "<text>" [--print]``).
+    * **opencode** — top-level ``--prompt`` seeds the TUI; the ``run`` subcommand runs and
+      exits (``opencode --prompt "<text>"`` vs ``opencode run "<text>"``).
+
+    A harness with no known prompt-seeding convention raises :class:`ProviderError` —
+    agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
+    passthrough args) is preserved before the prompt text.
+    """
+    binary, *base_flags = launch.command
+    harness = launch.harness
+    if harness == "claude":
+        mode_flags = [] if interactive else ["--print"]
+        return [binary, *base_flags, *rest, *mode_flags, text]
+    if harness == "kimi":
+        mode_flags = [] if interactive else ["--print"]
+        return [binary, *base_flags, *rest, "--prompt", text, *mode_flags]
+    if harness == "opencode":
+        if interactive:
+            return [binary, *base_flags, *rest, "--prompt", text]
+        # The `run` subcommand must lead, before any passthrough args or the message.
+        return [binary, "run", *base_flags, *rest, text]
+    raise ProviderError(
+        f"harness {harness!r} has no known prompt-seeding flags; "
+        "agedum --prompt/--run is not supported for it"
+    )
+
+
 # ---------------------------------------------------------------------------
 # per-harness env/command builders -> (env_to_set, env_to_unset, base_command)
 # ---------------------------------------------------------------------------
