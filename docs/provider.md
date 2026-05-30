@@ -31,9 +31,10 @@ The single positional argument is **a name or a path**:
 - **name** — anything else. Resolved to
   `${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json`.
 
-Everything after the provider token is passed to the harness verbatim
-(`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env` and `--dry-run`
-come **before** the provider.
+Any token after the provider that isn't an agedum flag is passed to the harness verbatim
+(`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env` and `--dry-run` are
+agedum's own flags and may appear **before or after** the provider; to forward a literal
+`--dry-run`/`--env` to the harness, put it after a `--` (`agedum claude-deepseek-auto -- --dry-run`).
 
 ## The env file
 

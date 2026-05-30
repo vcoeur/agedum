@@ -35,8 +35,9 @@ reference: [Provider mode](provider.md).
 | `agedum <provider> --env <file>` | Read secrets from `<file>` instead of the default env file. |
 | `agedum <provider> --dry-run` | Print the resolved env (secrets masked), the injected virtual files, and the argv; don't launch. |
 
-`--env` and `--dry-run` come before the provider; everything after the provider is passed
-to the harness verbatim.
+`--env` and `--dry-run` are agedum's own flags and are recognised **before or after** the
+provider. Any other token after the provider is passed to the harness verbatim; reach for
+a `--` to forward a literal `--dry-run`/`--env` to the harness (`agedum <provider> -- --dry-run`).
 
 ```bash
 agedum claude-deepseek-auto
