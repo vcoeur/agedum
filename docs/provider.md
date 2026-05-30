@@ -278,8 +278,9 @@ ESC ] 7373 ; agent-transcript ; <frameId> ; <i> ; <n> ; <base64piece> BEL
 ```
 
 A capturer recovers a clean transcript by reassembling the base64 pieces and decoding the JSON
-frames (`{v,t:"msg",sid,mid,role,text}` / `{v,t:"end"}`). The protocol **names no viewer**, so
-agedum stays viewer-agnostic — any capturer can consume it. The plugin path is appended to
+frames (`{v,t:"msg",sid,mid,role,text}` / `{v,t:"end"}`, where `role` is `user` (prompt),
+`assistant` (response), or `reasoning`). The protocol **names no viewer**, so agedum stays
+viewer-agnostic — any capturer can consume it. The plugin path is appended to
 `OPENCODE_CONFIG_CONTENT.plugin` (unioned with any `opencodeConfig.plugin`); agedum's bwrap
 launch binds the whole filesystem, so the bundled path resolves inside the namespace. Set
 `"emitTranscript": false` to disable.

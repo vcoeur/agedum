@@ -55,6 +55,22 @@ function emitFrame(frame) {
 
 export const TranscriptOscPlugin = async () => {
   return {
+    // User prompts: `chat.message` hands us the new user message + its parts
+    // directly. (Prompt text parts aren't streamed, so they have no `time.end`
+    // and would be missed by the completion gate in `event` below.)
+    "chat.message": async (input, output) => {
+      try {
+        const sid = output?.message?.sessionID ?? input?.sessionID;
+        for (const part of output?.parts || []) {
+          if (part?.type !== "text" || part.synthetic || !part.text) continue;
+          if (emitted.has(part.id)) continue;
+          emitted.add(part.id);
+          emitFrame({ v: 1, t: "msg", sid, mid: part.messageID, role: "user", text: part.text });
+        }
+      } catch {
+        /* never break the harness over logging */
+      }
+    },
     event: async ({ event }) => {
       try {
         if (event.type === "message.updated") {
@@ -64,16 +80,22 @@ export const TranscriptOscPlugin = async () => {
         }
         if (event.type === "message.part.updated") {
           const part = event.properties?.part;
-          if (!part || part.type !== "text" || part.synthetic) return;
+          if (!part || part.synthetic) return;
+          // Assistant text and reasoning both stream; emit each once it has
+          // finished (time.end set). User text parts are emitted via
+          // `chat.message` above and skipped here by the `emitted` guard.
+          if (part.type !== "text" && part.type !== "reasoning") return;
           const done = part.time && typeof part.time.end === "number";
           if (!done || emitted.has(part.id)) return;
           emitted.add(part.id);
+          const role =
+            part.type === "reasoning" ? "reasoning" : roles.get(part.messageID) || "assistant";
           emitFrame({
             v: 1,
             t: "msg",
             sid: part.sessionID,
             mid: part.messageID,
-            role: roles.get(part.messageID) || "assistant",
+            role,
             text: part.text || "",
           });
           return;
