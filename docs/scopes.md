@@ -70,6 +70,11 @@ skills directory under the user config dir — for Claude, just `~/.claude/CLAUD
 `~/.claude.json` auth, settings, history, and any other state are never shadowed. The
 overlay is scoped as tightly as possible.
 
+The skills overlay is tighter still: agedum binds each skill folder it ships
+individually (`~/.claude/skills/<name>`), so a hand-authored skill you keep in that dir
+but agedum does not ship stays visible. Only same-named folders are replaced. See
+[the mount namespace](internals.md#the-mount-namespace).
+
 `$CLAUDE_CONFIG_DIR` is honoured throughout, so if you relocate Claude's config dir,
 the global scope follows it.
 

@@ -4,7 +4,13 @@ import subprocess
 import pytest
 
 from agedum.harness import Plan, compile_claude
-from agedum.launcher import LauncherError, assert_safe, build_bwrap_argv, run_virtualfs
+from agedum.launcher import (
+    LauncherError,
+    _effective_binds,
+    assert_safe,
+    build_bwrap_argv,
+    run_virtualfs,
+)
 from agedum.sources import load_source
 
 
@@ -26,6 +32,35 @@ def test_build_bwrap_argv_binds_absolute_targets(tmp_path):
     assert argv[-3:] == ["--", "claude", "-p"]
     assert str(tmp_path / "CLAUDE.md") in argv
     assert str(tmp_path / ".claude" / "skills") in argv
+
+
+def test_effective_binds_expands_directory_one_level(tmp_path):
+    # A directory bind overlays each child at target/<child>; a file bind passes through.
+    skills = tmp_path / "sk"
+    (skills / "a").mkdir(parents=True)
+    (skills / "b").mkdir(parents=True)
+    plan = Plan(
+        binds=[
+            (tmp_path / "c.md", tmp_path / "CLAUDE.md"),
+            (skills, tmp_path / ".claude" / "skills"),
+        ]
+    )
+    effective = set(_effective_binds(plan))
+    assert (tmp_path / "c.md", tmp_path / "CLAUDE.md") in effective  # file passthrough
+    assert (skills / "a", tmp_path / ".claude" / "skills" / "a") in effective
+    assert (skills / "b", tmp_path / ".claude" / "skills" / "b") in effective
+    # the whole-dir target is never bound directly — that would mask siblings
+    assert (skills, tmp_path / ".claude" / "skills") not in effective
+
+
+def test_build_bwrap_argv_overlays_skills_per_child(tmp_path):
+    skills = tmp_path / "sk"
+    (skills / "demo").mkdir(parents=True)
+    plan = Plan(binds=[(skills, tmp_path / ".claude" / "skills")])
+    argv = build_bwrap_argv(plan, ["claude"])
+    assert str(tmp_path / ".claude" / "skills" / "demo") in argv
+    # the parent skills dir itself is not a bind target (so on-disk siblings stay visible)
+    assert str(tmp_path / ".claude" / "skills") not in argv
 
 
 def test_assert_safe_refuses_tracked_target(tmp_path):
@@ -85,6 +120,43 @@ def test_virtualfs_injects_then_sweeps_stubs(tmp_path):
         ["git", "-C", str(proj), "status", "--porcelain"], capture_output=True, text=True
     ).stdout
     assert status.strip() == ""
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+def test_virtualfs_overlay_preserves_hand_authored_sibling(tmp_path):
+    # A skill already in the target skills dir, not shipped by agedum, must stay visible —
+    # the overlay binds only agedum's skills per-child, never the whole dir.
+    proj = tmp_path / "proj"
+    skill = proj / ".agents" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\nb\n")
+    (proj / "AGENTS.md").write_text("X\n")
+    (proj / ".gitignore").write_text("CLAUDE.md\n.claude/\n")
+    # a pre-existing, hand-authored skill living in the real target dir
+    user_skill = proj / ".claude" / "skills" / "user-skill"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("---\nname: user-skill\ndescription: u\n---\nu\n")
+    _git_init(proj)
+    subprocess.run(["git", "-C", str(proj), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(proj), "commit", "-qm", "init"], check=True)
+
+    src = load_source(proj)
+    dest = tmp_path / "compiled"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    marker = tmp_path / "marker.txt"
+    cmd = ["bash", "-c", f"cd {proj} && ls .claude/skills > {marker}"]
+    rc = run_virtualfs(proj, plan, cmd)
+
+    assert rc == 0
+    listed = marker.read_text()
+    assert "demo" in listed  # agedum's skill was overlaid in
+    assert "user-skill" in listed  # the hand-authored sibling survived
+
+    # the shipped-only skill left no stub; the pre-existing user skill is untouched
+    assert not (proj / ".claude" / "skills" / "demo").exists()
+    assert (proj / ".claude" / "skills" / "user-skill" / "SKILL.md").exists()
 
 
 def test_run_appends_plan_extra_args_after_command(monkeypatch, tmp_path):

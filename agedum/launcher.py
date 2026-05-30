@@ -29,10 +29,33 @@ class LauncherError(RuntimeError):
     """A launch could not proceed safely (e.g. tracked target, or bwrap missing)."""
 
 
-def build_bwrap_argv(plan: Plan, command: list[str]) -> list[str]:
-    """Compose the ``bwrap`` argv: bind each compiled tree at its absolute target."""
-    argv = ["bwrap", "--dev-bind", "/", "/"]
+def _effective_binds(plan: Plan) -> list[tuple[Path, Path]]:
+    """Expand each *directory* bind one level so it overlays rather than masks its target.
+
+    A whole-dir ``--ro-bind src target`` replaces the entire view of ``target``, hiding
+    anything already there. The only directory binds agedum emits are skill trees, and we
+    want to inject exactly the skills agedum ships while leaving hand-authored skills
+    already in the target dir (``~/.config/opencode/skills/``, ``~/.claude/skills/``, …)
+    visible. Binding each child at ``target/<child>`` does that: agedum's skill folders
+    replace any same-named on-disk folder, but unrelated siblings show through the
+    underlying real dir. File binds (CLAUDE.md / AGENTS.md) pass through unchanged.
+    """
+    expanded: list[tuple[Path, Path]] = []
     for src, target in plan.binds:
+        if src.is_dir():
+            expanded += [(child, target / child.name) for child in sorted(src.iterdir())]
+        else:
+            expanded.append((src, target))
+    return expanded
+
+
+def build_bwrap_argv(plan: Plan, command: list[str]) -> list[str]:
+    """Compose the ``bwrap`` argv: bind each compiled tree at its absolute target.
+
+    Directory binds are overlaid per-child (see :func:`_effective_binds`) so a skills bind
+    adds agedum's skills without erasing hand-authored ones already in the target dir."""
+    argv = ["bwrap", "--dev-bind", "/", "/"]
+    for src, target in _effective_binds(plan):
         argv += ["--ro-bind", str(src), str(target)]
     argv += ["--", *command]
     return argv
@@ -65,10 +88,19 @@ def assert_safe(project_root: Path, plan: Plan) -> None:
 
 
 def _cleanup_candidates(plan: Plan) -> set[Path]:
-    """Paths bwrap may have stubbed on the host: each target and its immediate parent
-    (the parent covers a `.claude` dir created to hold a `skills` bind)."""
+    """Paths bwrap may have stubbed on the host. We union two levels because skills binds
+    are overlaid per-child:
+
+    * **dir-level** (``plan.binds``) — a skills target ``.claude/skills`` and its parent
+      ``.claude``: the dirs bwrap may create to hold the bind;
+    * **per-child** (:func:`_effective_binds`) — ``.claude/skills/<name>``: the empty stub
+      bwrap leaves for an overlaid skill that has no on-disk counterpart.
+
+    The sweep is deepest-first and skips anything that pre-existed, so listing a real dir
+    (e.g. a user's ``~/.config/opencode/skills`` that already held skills) is harmless — it
+    is never removed."""
     candidates: set[Path] = set()
-    for _, target in plan.binds:
+    for _, target in (*plan.binds, *_effective_binds(plan)):
         candidates.add(target)
         candidates.add(target.parent)
     return candidates
