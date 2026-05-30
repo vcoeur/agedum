@@ -152,6 +152,9 @@ def test_compile_kimi(tmp_path, monkeypatch):
     assert "GLOBAL-INSTR" in yaml_text
     assert "PROJECT-INSTR" not in yaml_text
 
+    # The natively-read project AGENTS.md is recorded so --dry-run can surface it.
+    assert (proj / "AGENTS.md") in plan.native_reads
+
     # Global skills -> bound into ~/.kimi/skills.
     assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
     assert (_src_for(plan, home / ".kimi" / "skills") / "gskill" / "SKILL.md").exists()
@@ -210,8 +213,10 @@ def test_compile_opencode(tmp_path, monkeypatch):
     # opencode is pure path-discovery — no extra args.
     assert plan.extra_args == []
 
-    # Project AGENTS.md is read natively at ./AGENTS.md — never injected.
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded
+    # as a native read so --dry-run can surface it.
     assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
 
     # Global instructions -> <config>/AGENTS.md.
     assert config / "AGENTS.md" in targets
