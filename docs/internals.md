@@ -54,6 +54,15 @@ files inside the tree (`./CLAUDE.md`) and global-scope files under the user conf
 for the duration of the run, and the mask is visible only inside this namespace — other
 processes, and your shell after the command exits, see the original tree.
 
+**Directory binds are overlaid one level deep, not masked wholesale.** The only directory
+binds agedum emits are skill trees, and binding the whole compiled dir over
+`~/.config/opencode/skills/` (or `~/.claude/skills/`, `~/.kimi/skills/`) would hide any
+hand-authored skill already living there. So `build_bwrap_argv` expands a directory bind
+into one `--ro-bind` per child — `<compiled>/<name>` over `<target>/<name>` — leaving
+unrelated siblings in the real target dir visible. A shipped skill still wins over a
+same-named on-disk one (its child bind overlays that subdir); only folders agedum does
+not ship survive. File binds (CLAUDE.md / AGENTS.md) pass through unchanged.
+
 This is why agedum is harness-agnostic at the launch layer: every agent CLI ultimately
 just *reads files*, and the namespace makes the compiled files be those files.
 
@@ -80,11 +89,14 @@ real filesystem first. After the namespace exits, those mountpoints remain as **
 stubs** (a 0-byte file, or an empty directory) — the *injected content* never leaks,
 but the empty placeholder can.
 
-`run_virtualfs` records which candidate paths (each target **and its immediate parent**,
-e.g. the `.claude` dir created to hold `.claude/skills`) existed before the run, and
-after the command sweeps the ones it created — deepest first, and only if still empty.
-Anything that pre-existed is left alone. The net effect: a clean working tree after the
-command, with the real repo untouched.
+`run_virtualfs` records which candidate paths existed before the run, and after the
+command sweeps the ones it created — deepest first, and only if still empty. Candidates
+are each target **and its immediate parent**, taken over both the dir-level binds (e.g.
+the `.claude` dir created to hold `.claude/skills`) and the per-child overlay targets
+(e.g. `.claude/skills/<name>` — the empty stub left when agedum ships a skill the target
+dir did not already have). Anything that pre-existed — including a user's
+`~/.config/opencode/skills/` that already held skills — is left alone. The net effect: a
+clean working tree after the command, with the real repo untouched.
 
 ## Adding a harness
 
