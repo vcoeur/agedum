@@ -326,6 +326,54 @@ def test_opencode_extra_config_json_merges():
     assert payload["model"] == "p/m"
 
 
+def test_opencode_config_passthrough_object_merges():
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {"model": "p/m", "opencodeConfig": {"theme": "tokyonight"}},
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["theme"] == "tokyonight"
+    assert payload["model"] == "p/m"
+
+
+def test_opencode_config_passthrough_wins_over_modeled_keys():
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {"model": "p/m", "opencodeConfig": {"model": "x/y"}},
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["model"] == "x/y"
+
+
+def test_opencode_config_passthrough_wins_over_extra_config_json():
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {
+                "extraConfigJson": '{"theme": "old"}',
+                "opencodeConfig": {"theme": "new"},
+            },
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["theme"] == "new"
+
+
+def test_opencode_config_passthrough_rejects_non_object():
+    with pytest.raises(ProviderError):
+        build_launch(
+            {"harness": "opencode", "config": {"opencodeConfig": "nope"}},
+            base_env={},
+        )
+
+
 def test_build_launch_is_deterministic():
     config = {
         "harness": "opencode",
