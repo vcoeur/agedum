@@ -119,9 +119,49 @@ kimi's knobs become **appended CLI flags** on the exec line:
 | `defaultOptions.{reasoningEffort,textVerbosity,reasoningSummary}` | the default model's `provider.<id>.models.<model>.options` |
 | `effortLevel` (flat alias) | the default model's `reasoningEffort` (explicit `defaultOptions.reasoningEffort` wins) |
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
+| `providerDef` | an explicit provider block: `provider.<id> = { npm, options: { baseURL, apiKey } }` — see below |
 | `extraConfigJson` | parsed and deep-merged into the document |
 
 The document is emitted as a single `OPENCODE_CONFIG_CONTENT` env var (no file written).
+
+#### Explicit provider — `providerDef`
+
+By default an opencode `model` like `openrouter/deepseek/deepseek-v4-pro` relies on
+opencode resolving the `openrouter` provider from its own auth store
+(`opencode auth login`) or models.dev catalog. `providerDef` instead **defines the
+provider inline** and injects the API key from the environment, so no prior
+`opencode auth login` is needed:
+
+```json
+"providerDef": {
+  "id": "openrouter",
+  "npm": "@openrouter/ai-sdk-provider",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "apiKeyEnv": "OPENROUTER_API_KEY"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | provider id; must match the prefix of the `model` strings (e.g. `openrouter`) |
+| `npm` | the AI-SDK package opencode loads for the provider |
+| `baseUrl` | becomes `provider.<id>.options.baseURL` |
+| `apiKeyEnv` | env var whose **value** is spliced into `provider.<id>.options.apiKey` at run time |
+
+The provider block is deep-merged with any per-model reasoning options. agedum does
+**not** write the key into the JSON: it emits a placeholder and the generated wrapper
+substitutes `$<apiKeyEnv>`'s value via bash parameter expansion when it runs —
+
+```bash
+__agedum_oc_config='{… "apiKey":"__AGEDUM_OPENCODE_APIKEY__" …}'
+export OPENCODE_CONFIG_CONTENT="${__agedum_oc_config/__AGEDUM_OPENCODE_APIKEY__/${OPENROUTER_API_KEY}}"
+```
+
+This is deliberate: opencode's `{env:…}` substitution is unreliable for a custom
+provider's `options.apiKey`, and agedum stays tokenless (the shell does the splice).
+`apiKeyEnv` is auto-added to the validated `requiredEnv` set, so the wrapper fails
+fast if the key is unset. (Keys containing `"` or `\` are not supported — they would
+break the surrounding JSON; standard `sk-or-…` keys are fine.)
 
 ## Drift guard — `--check`
 

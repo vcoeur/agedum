@@ -203,3 +203,76 @@ def test_extra_config_json_merges():
     payload = json.loads(line.split("=", 1)[1].strip().strip("'"))
     assert payload["theme"] == "tokyonight"
     assert payload["model"] == "p/m"
+
+
+def _opencode_doc_with_provider_def(script):
+    """Parse the JSON document off the ``__agedum_oc_config=`` line of a providerDef script."""
+    line = next(line for line in script.splitlines() if line.startswith("__agedum_oc_config="))
+    return json.loads(line.split("=", 1)[1].strip().strip("'"))
+
+
+def test_opencode_provider_def_renders_explicit_provider():
+    script = build_script(
+        {
+            "harness": "opencode",
+            "requiredEnv": ["OPENROUTER_API_KEY"],
+            "config": {
+                "model": "openrouter/moonshotai/kimi-k2.6",
+                "effortLevel": "max",
+                "providerDef": {
+                    "id": "openrouter",
+                    "npm": "@openrouter/ai-sdk-provider",
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "apiKeyEnv": "OPENROUTER_API_KEY",
+                },
+            },
+        }
+    )
+    payload = _opencode_doc_with_provider_def(script)
+    provider = payload["provider"]["openrouter"]
+    assert provider["npm"] == "@openrouter/ai-sdk-provider"
+    assert provider["options"]["baseURL"] == "https://openrouter.ai/api/v1"
+    # The key is a placeholder in the JSON; the shell substitutes the value at run time.
+    assert provider["options"]["apiKey"] == "__AGEDUM_OPENCODE_APIKEY__"
+    # Deep-merged with the per-model reasoning options, not clobbered.
+    assert provider["models"]["moonshotai/kimi-k2.6"]["options"]["reasoningEffort"] == "max"
+
+
+def test_opencode_provider_def_runtime_key_substitution():
+    script = build_script(
+        {
+            "harness": "opencode",
+            "config": {
+                "model": "openrouter/deepseek/deepseek-v4-pro",
+                "providerDef": {
+                    "id": "openrouter",
+                    "npm": "@openrouter/ai-sdk-provider",
+                    "baseUrl": "https://openrouter.ai/api/v1",
+                    "apiKeyEnv": "OPENROUTER_API_KEY",
+                },
+            },
+        }
+    )
+    # The key env var is validated + exported even though it was not in requiredEnv.
+    assert 'export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:?' in script
+    # The config is exported with the placeholder replaced by the env var's value.
+    assert (
+        'export OPENCODE_CONFIG_CONTENT="${__agedum_oc_config/'
+        '__AGEDUM_OPENCODE_APIKEY__/${OPENROUTER_API_KEY}}"' in script
+    )
+    assert "unset __agedum_oc_config" in script
+    # The raw token never appears literally — only the env-var reference does.
+    assert "__AGEDUM_OPENCODE_APIKEY__" in script
+
+
+def test_opencode_provider_def_missing_field_errors():
+    with pytest.raises(BuildScriptError, match="providerDef is missing required field"):
+        build_script(
+            {
+                "harness": "opencode",
+                "config": {
+                    "model": "openrouter/deepseek/deepseek-v4-pro",
+                    "providerDef": {"id": "openrouter", "npm": "@openrouter/ai-sdk-provider"},
+                },
+            }
+        )

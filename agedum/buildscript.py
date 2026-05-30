@@ -26,6 +26,13 @@ HARNESSES = ("claude", "kimi", "opencode")
 # applies to custom agents.
 OPENCODE_BUILTINS = frozenset({"build", "plan", "general", "explore", "scout"})
 
+# Sentinel baked into an opencode ``providerDef``'s rendered ``options.apiKey``.
+# The generated wrapper replaces it with the *value* of the provider's API-key env
+# var at run time (bash parameter expansion), because opencode's ``{env:…}``
+# substitution is unreliable for a custom provider's ``options.apiKey``. agedum
+# never sees the token — the shell does the splice.
+OPENCODE_APIKEY_PLACEHOLDER = "__AGEDUM_OPENCODE_APIKEY__"
+
 
 class BuildScriptError(RuntimeError):
     """The config could not be compiled into a wrapper script."""
@@ -81,6 +88,15 @@ def _required_env(config: dict, secret_env: str) -> list[str]:
                 result.append(name)
     if secret_env and secret_env not in result:
         result.append(secret_env)
+    # An opencode providerDef's key env var is validated + exported even if the
+    # author forgot to list it, so the run-time apiKey splice always has a value.
+    block = config.get("config")
+    if isinstance(block, dict):
+        provider_def = block.get("providerDef")
+        if isinstance(provider_def, dict):
+            api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
+            if api_key_env and api_key_env not in result:
+                result.append(api_key_env)
     return result
 
 
@@ -176,8 +192,51 @@ def _opencode_body(block: dict, secret_env: str) -> tuple[list[str], list[str]]:
         exports.append(_export_lit("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"))
     document = _opencode_config_doc(block)
     if document:
-        exports.append(_export_lit("OPENCODE_CONFIG_CONTENT", json.dumps(document, sort_keys=True)))
+        doc_json = json.dumps(document, sort_keys=True)
+        api_key_env = _opencode_provider_def(block)[3] if block.get("providerDef") else ""
+        if api_key_env:
+            exports += _opencode_config_runtime_key(doc_json, api_key_env)
+        else:
+            exports.append(_export_lit("OPENCODE_CONFIG_CONTENT", doc_json))
     return exports, ["opencode"]
+
+
+def _opencode_provider_def(block: dict) -> tuple[str, str, str, str, str]:
+    """Validate and unpack a ``providerDef``: (id, npm, baseUrl, apiKeyEnv, name).
+
+    Raises :class:`BuildScriptError` when a required field is missing.
+    """
+    provider_def = block.get("providerDef") or {}
+    if not isinstance(provider_def, dict):
+        raise BuildScriptError("`providerDef` must be a JSON object")
+    fields = {
+        "id": str(provider_def.get("id") or "").strip(),
+        "npm": str(provider_def.get("npm") or "").strip(),
+        "baseUrl": str(provider_def.get("baseUrl") or "").strip(),
+        "apiKeyEnv": str(provider_def.get("apiKeyEnv") or "").strip(),
+    }
+    missing = [key for key, value in fields.items() if not value]
+    if missing:
+        raise BuildScriptError(f"providerDef is missing required field(s): {', '.join(missing)}")
+    name = str(provider_def.get("name") or "").strip()
+    return fields["id"], fields["npm"], fields["baseUrl"], fields["apiKeyEnv"], name
+
+
+def _opencode_config_runtime_key(doc_json: str, api_key_env: str) -> list[str]:
+    """Emit the shell that exports ``OPENCODE_CONFIG_CONTENT`` with the provider key
+    spliced in at run time.
+
+    The config JSON carries :data:`OPENCODE_APIKEY_PLACEHOLDER` where the key goes;
+    bash parameter expansion replaces it with ``$<api_key_env>`` (already validated
+    and exported by the required-env block). agedum never holds the token.
+    """
+    tmp = "__agedum_oc_config"
+    expansion = "${" + tmp + "/" + OPENCODE_APIKEY_PLACEHOLDER + "/${" + api_key_env + "}}"
+    return [
+        f"{tmp}={shlex.quote(doc_json)}",
+        f'export OPENCODE_CONFIG_CONTENT="{expansion}"',
+        f"unset {tmp}",
+    ]
 
 
 def _opencode_config_doc(block: dict) -> dict:
@@ -198,6 +257,19 @@ def _opencode_config_doc(block: dict) -> dict:
     if options and model and "/" in model:
         provider_id, model_id = model.split("/", 1)
         document["provider"] = {provider_id: {"models": {model_id: {"options": options}}}}
+
+    # An explicit provider definition (npm + baseURL + run-time-injected apiKey),
+    # deep-merged so it coexists with any per-model reasoning options above.
+    if block.get("providerDef"):
+        def_id, npm, base_url, _api_key_env, name = _opencode_provider_def(block)
+        entry: dict = {
+            "npm": npm,
+            "options": {"baseURL": base_url, "apiKey": OPENCODE_APIKEY_PLACEHOLDER},
+        }
+        if name:
+            entry["name"] = name
+        providers = document.setdefault("provider", {})
+        providers[def_id] = _deep_merge(providers.get(def_id, {}), entry)
 
     agents: dict = {}
     rows = block.get("agentOptions")
