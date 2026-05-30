@@ -206,6 +206,52 @@ def test_provider_dry_run_masks_secrets(monkeypatch, tmp_path, capsys):
     assert "project scope" in out and "global scope" in out
 
 
+def test_provider_dry_run_redacts_key_in_opencode_config(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "oc.json").write_text(
+        json.dumps(
+            {
+                "harness": "opencode",
+                "slug": "opencode-kimi",
+                "requiredEnv": ["OPENROUTER_API_KEY"],
+                "config": {
+                    "model": "openrouter/moonshotai/kimi-k2.6",
+                    "providerDef": {
+                        "id": "openrouter",
+                        "npm": "@openrouter/ai-sdk-provider",
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "apiKeyEnv": "OPENROUTER_API_KEY",
+                    },
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENROUTER_API_KEY=sk-or-supersecret\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+
+    def boom(*a, **k):
+        raise AssertionError("dry-run must not launch")
+
+    monkeypatch.setattr(cli, "run_virtualfs", boom)
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "oc"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    # The key baked into options.apiKey is redacted inside the pretty-printed config...
+    assert "sk-or-supersecret" not in out
+    assert "***" in out
+    # ...while the non-secret provider details stay visible.
+    assert "https://openrouter.ai/api/v1" in out
+    assert "@openrouter/ai-sdk-provider" in out
+    assert "openrouter/moonshotai/kimi-k2.6" in out
+
+
 def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
     providers = tmp_path / "providers"
     providers.mkdir()
