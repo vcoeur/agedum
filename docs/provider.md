@@ -153,6 +153,32 @@ The token (`secretEnv`) reaches kimi via the `requiredEnv` export.
 | `defaultOptions.{reasoningEffort,textVerbosity,reasoningSummary}` | the default model's `provider.<id>.models.<model>.options` |
 | `effortLevel` (flat alias) | the default model's `reasoningEffort` (explicit `defaultOptions.reasoningEffort` wins) |
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
-| `extraConfigJson` | parsed and deep-merged into the document |
+| `opencodeConfig` | a literal opencode config object, deep-merged into the document last (wins on conflict) — see below |
+| `extraConfigJson` | **deprecated**: the JSON-string form of `opencodeConfig`; parsed and deep-merged |
 
 The document is set as a single `OPENCODE_CONFIG_CONTENT` env var (no file written).
+
+#### `opencodeConfig` — anything agedum doesn't model
+
+The keys above are the common, cross-harness-meaningful knobs. For any other opencode
+setting, drop it into `opencodeConfig` in opencode's **own** config shape — it is
+deep-merged into the generated document last, so it overrides the modeled keys on
+conflict:
+
+```json
+{
+  "harness": "opencode",
+  "config": {
+    "model": "deepseek/deepseek-v4-pro",
+    "effortLevel": "high",
+    "opencodeConfig": {
+      "theme": "tokyonight",
+      "agent": { "build": { "temperature": 0.2 } }
+    }
+  }
+}
+```
+
+Prefer `opencodeConfig` (a real JSON object) over the deprecated `extraConfigJson` (a
+JSON string inside the JSON). If both are present, `extraConfigJson` is applied first and
+`opencodeConfig` wins. A non-object `opencodeConfig` is an error.
