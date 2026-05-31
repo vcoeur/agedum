@@ -106,14 +106,24 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
     return candidates
 
 
-def run_virtualfs(project_root: Path, plan: Plan, command: list[str]) -> int:
-    """Run `command` with `plan` injected; return its exit code. Sweeps stub mountpoints."""
+def run_virtualfs(
+    project_root: Path, plan: Plan, command: list[str], *, close_stdin: bool = False
+) -> int:
+    """Run `command` with `plan` injected; return its exit code. Sweeps stub mountpoints.
+
+    ``close_stdin`` redirects the child's stdin to ``/dev/null``. A non-interactive
+    ``--run`` reads its whole task from argv and must never block waiting on input it will
+    never get — opencode's ``run`` subcommand otherwise hangs forever on an open, non-tty
+    stdin (e.g. a pipe). Interactive launches (a bare provider or ``--prompt``) keep the
+    inherited stdin so the live session can read keystrokes.
+    """
     assert_safe(project_root, plan)
     argv = build_bwrap_argv(plan, [*command, *plan.extra_args])
     candidates = _cleanup_candidates(plan)
     pre_existing = {p: p.exists() for p in candidates}
+    stdin = subprocess.DEVNULL if close_stdin else None
     try:
-        return subprocess.run(argv).returncode
+        return subprocess.run(argv, stdin=stdin).returncode
     except FileNotFoundError as exc:
         raise LauncherError(
             "bwrap (bubblewrap) is required for the virtual-FS launch but was not found "

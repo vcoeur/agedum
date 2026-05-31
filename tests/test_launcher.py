@@ -179,3 +179,28 @@ def test_run_appends_plan_extra_args_after_command(monkeypatch, tmp_path):
     argv = captured["argv"]
     tail = argv[argv.index("--") + 1 :]
     assert tail == ["kimi", "-p", "hi", "--agent-file", "/tmp/a.yaml", "--config", "{}"]
+
+
+def test_run_virtualfs_stdin_handling(monkeypatch, tmp_path):
+    import subprocess as sp
+
+    import agedum.launcher as launcher_mod
+
+    captured = {}
+
+    class _Result:
+        returncode = 0
+
+    def fake_run(argv, *a, **k):
+        captured["stdin"] = k.get("stdin")
+        return _Result()
+
+    monkeypatch.setattr(launcher_mod.subprocess, "run", fake_run)
+
+    # Default (interactive): the child inherits stdin (no override).
+    run_virtualfs(tmp_path, Plan(), ["opencode"])
+    assert captured["stdin"] is None
+
+    # close_stdin (a non-interactive --run): stdin is /dev/null so the harness can't block.
+    run_virtualfs(tmp_path, Plan(), ["opencode", "run", "go"], close_stdin=True)
+    assert captured["stdin"] is sp.DEVNULL

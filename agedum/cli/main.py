@@ -203,7 +203,10 @@ def _run_config(argv: list[str]) -> int:
     os.environ.update(launch.env)
     for var in launch.unset:
         os.environ.pop(var, None)
-    return _run(launch.harness, command)
+    # `--run` is non-interactive: the prompt is in argv, so the harness must not inherit a
+    # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
+    non_interactive = prompt_text is not None and not prompt_interactive
+    return _run(launch.harness, command, close_stdin=non_interactive)
 
 
 def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
@@ -409,7 +412,7 @@ def _run_wrapper(argv: list[str]) -> int:
     return _run(mode, command)
 
 
-def _run(mode: str, command: list[str]) -> int:
+def _run(mode: str, command: list[str], *, close_stdin: bool = False) -> int:
     project = load_source()
     global_ = load_global_source()
     if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
@@ -421,7 +424,7 @@ def _run(mode: str, command: list[str]) -> int:
     try:
         plan = _COMPILERS[mode](project, global_, dest)
         with _maybe_fold_proxy(mode):
-            return run_virtualfs(project.root, plan, command)
+            return run_virtualfs(project.root, plan, command, close_stdin=close_stdin)
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1

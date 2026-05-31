@@ -67,8 +67,14 @@ agedum maps the flag to the harness named in the config:
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
 
 A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
-never guesses). Harness passthrough args are preserved, before the prompt text. Use
-`--dry-run` to see the exact argv:
+never guesses). Harness passthrough args are preserved, before the prompt text.
+
+Because `--run` is non-interactive, agedum runs the harness with **`/dev/null` for stdin**
+so it can never block on input it will never receive — notably `opencode run`, which hangs
+forever on an open, non-tty stdin (a pipe, a headless task runner). `--prompt` keeps the
+inherited stdin for the live session.
+
+Use `--dry-run` to see the exact argv:
 
 ```bash
 agedum claude-deepseek-auto --run "review this" --dry-run

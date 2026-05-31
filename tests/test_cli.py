@@ -10,9 +10,10 @@ from agedum.cli import main as cli
 def _capture_run(monkeypatch):
     captured = {}
 
-    def fake_run(root, plan, command):
+    def fake_run(root, plan, command, *, close_stdin=False):
         captured["command"] = command
         captured["plan"] = plan
+        captured["close_stdin"] = close_stdin
         return 0
 
     monkeypatch.setattr(cli, "run_virtualfs", fake_run)
@@ -469,6 +470,8 @@ def test_prompt_flag_claude_interactive_positional(monkeypatch, tmp_path):
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["claude", "hello there"]
+    # --prompt is interactive: the harness keeps the inherited stdin.
+    assert captured["close_stdin"] is False
 
 
 def test_run_flag_claude_non_interactive(monkeypatch, tmp_path):
@@ -480,6 +483,8 @@ def test_run_flag_claude_non_interactive(monkeypatch, tmp_path):
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["claude", "--print", "do the thing"]
+    # --run is non-interactive: the harness gets /dev/null stdin so it cannot block.
+    assert captured["close_stdin"] is True
 
 
 def test_run_flag_kimi_appends_print(monkeypatch, tmp_path):
@@ -510,6 +515,8 @@ def test_run_flag_opencode_uses_run_subcommand(monkeypatch, tmp_path):
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["opencode", "run", "explain this"]
+    # opencode `run` blocks forever on an open stdin — --run must close it.
+    assert captured["close_stdin"] is True
 
 
 def test_prompt_flag_recognised_before_provider(monkeypatch, tmp_path):
@@ -573,3 +580,16 @@ def test_run_shows_in_dry_run_command(monkeypatch, tmp_path, capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     assert "--print" in out and "do x" in out
+
+
+def test_bare_launch_keeps_stdin(monkeypatch, tmp_path):
+    # No --prompt/--run: the harness launches interactively and inherits stdin.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    _write_provider(tmp_path, "native", {"harness": "claude", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "native"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude"]
+    assert captured["close_stdin"] is False
