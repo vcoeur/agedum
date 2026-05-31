@@ -70,6 +70,12 @@ If a harness has no known prompt-seeding convention, agedum **fails loudly** wit
 error rather than launching the wrong way. Any harness passthrough args you add are kept,
 placed before the prompt text.
 
+A `--run` launch is non-interactive, so agedum gives the harness **`/dev/null` for stdin**:
+the whole task is already in argv, and the harness must never block waiting on input. (This
+matters for `opencode run`, which otherwise hangs forever on an open, non-tty stdin — e.g.
+when launched from a pipe or a headless task runner.) `--prompt` and a bare launch keep the
+inherited stdin so the live session can read your keystrokes.
+
 ```bash
 agedum claude-deepseek-auto --prompt "review this change"   # interactive, seeded
 agedum claude-deepseek-auto --run "summarise the diff"      # run once, then exit
