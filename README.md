@@ -46,6 +46,13 @@ agedum has two modes:
 > (project) and `~/.config/opencode/skills/` (global), both searched before
 > `.agents/skills/` so the overlaid copy wins. No extra flags. Wrapper mode is Linux-only
 > and requires `bwrap` on PATH.
+>
+> **Cline** (`--wrapper cline`) is supported as well — like opencode, pure
+> path-discovery. The project `AGENTS.md` is read natively (Cline reads it as a
+> cross-tool rules file); the global `AGENTS.md` binds to the cross-tool path
+> `~/.agents/AGENTS.md`; skills bind to `./.cline/skills/` (project) and
+> `~/.cline/skills/` (global, `$CLINE_DATA_DIR`-aware). No extra flags. Cline is
+> wrapper-mode only — it has no documented env interface for provider mode to drive.
 
 ## Usage
 
@@ -60,6 +67,7 @@ agedum claude-deepseek-auto --dry-run             # print resolved env, virtual 
 
 # Wrapper mode (low-level; provider mode builds on it) — virtual files, no provider env:
 agedum --wrapper claude -- claude --model sonnet -p "review this"
+agedum --wrapper cline -- cline task "review this"  # drive Cline with the same source
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --version

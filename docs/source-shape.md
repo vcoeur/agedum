@@ -19,6 +19,7 @@ my-project/
         │   ├── SKILL.claude.md   # optional Claude-only overlay
         │   ├── SKILL.kimi.md     # optional kimi-only overlay
         │   ├── SKILL.opencode.md # optional opencode-only overlay
+        │   ├── SKILL.cline.md    # optional Cline-only overlay
         │   ├── checklist.md      # task file, copied verbatim
         │   └── lint.sh           # script, copied verbatim
         └── release/
@@ -41,6 +42,8 @@ be merged with a per-harness overlay — see below):
   prompt.
 - **opencode** → the project `AGENTS.md` is read natively at its source location; the
   global `AGENTS.md` is relocated to `~/.config/opencode/AGENTS.md`.
+- **Cline** → the project `AGENTS.md` is read natively at its source location; the global
+  `AGENTS.md` is relocated to the cross-tool path `~/.agents/AGENTS.md`.
 
 See [Harnesses](harnesses.md) for exactly where it lands per harness, and
 [Scopes](scopes.md) for the project vs global copies.
@@ -57,7 +60,8 @@ When agedum compiles the global source for harness `H`, it merges
 sibling exists:
 
 - `AGENTS.claude.md` is applied for the claude harness, `AGENTS.kimi.md` for kimi,
-  `AGENTS.opencode.md` for opencode. An overlay for a *different* harness is ignored.
+  `AGENTS.opencode.md` for opencode, `AGENTS.cline.md` for Cline. An overlay for a
+  *different* harness is ignored.
 - Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
   concatenation: the base, a blank line, then the overlay body.
 - This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
@@ -94,8 +98,9 @@ When a skill needs something only one harness understands — e.g. Claude's
 - `SKILL.claude.md` is applied when compiling for the claude harness.
 - `SKILL.kimi.md` is applied when compiling for the kimi harness.
 - `SKILL.opencode.md` is applied when compiling for the opencode harness.
+- `SKILL.cline.md` is applied when compiling for the Cline harness.
 - An overlay for a *different* harness is ignored (a `SKILL.kimi.md` is skipped when
-  compiling for Claude or opencode, and so on).
+  compiling for Claude, opencode, or Cline, and so on).
 
 The overlay is **merged** onto the base, not substituted:
 

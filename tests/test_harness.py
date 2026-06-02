@@ -4,7 +4,10 @@ from pathlib import Path
 
 from agedum.harness import (
     claude_config_dir,
+    cline_config_dir,
+    cline_global_agents_md,
     compile_claude,
+    compile_cline,
     compile_kimi,
     compile_opencode,
     kimi_config_dir,
@@ -329,6 +332,97 @@ def test_compile_opencode_global_agents_harness_overlay_merged(tmp_path, monkeyp
     assert "GLOBAL-BASE" in merged
     assert "OPENCODE-EXTRA" in merged
     assert "KIMI-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_compile_cline(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.cline.md").write_text("---\nlicense: MIT\n---\ncline note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    data_dir = tmp_path / "cline-data"
+    monkeypatch.setenv("CLINE_DATA_DIR", str(data_dir))
+    assert cline_config_dir() == data_dir
+    assert cline_global_agents_md() == home / ".agents" / "AGENTS.md"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_cline(project, global_, dest)
+
+    targets = _targets(plan)
+    # Cline is pure path-discovery — no extra args.
+    assert plan.extra_args == []
+
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded.
+    assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
+
+    # Global instructions -> the cross-tool ~/.agents/AGENTS.md (NOT under CLINE_DATA_DIR).
+    assert home / ".agents" / "AGENTS.md" in targets
+    assert _src_for(plan, home / ".agents" / "AGENTS.md").read_text() == "GLOBAL-INSTR\n"
+
+    # Project skills -> ./.cline/skills, with the cline overlay merged.
+    assert proj / ".cline" / "skills" in targets
+    pskill_md = (_src_for(plan, proj / ".cline" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "license: MIT" in pskill_md
+    assert "cline note" in pskill_md
+
+    # Global skills -> <CLINE_DATA_DIR>/skills.
+    assert data_dir / "skills" in targets
+    assert (_src_for(plan, data_dir / "skills") / "gskill" / "SKILL.md").exists()
+
+
+def test_compile_cline_project_only_injects_skills_not_instructions(tmp_path):
+    # No global scope: project AGENTS.md is native (no bind), only project skills bind.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_cline(project, None, dest)
+
+    assert plan.extra_args == []
+    assert _targets(plan) == [proj / ".cline" / "skills"]
+
+
+def test_compile_cline_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.cline.md").write_text("CLINE-EXTRA\n")
+    (gconf / "AGENTS.opencode.md").write_text("OPENCODE-EXTRA\n")
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_cline(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, cline_global_agents_md()).read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "CLINE-EXTRA" in merged
+    assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
 
 
 def _git_init_commit(root):

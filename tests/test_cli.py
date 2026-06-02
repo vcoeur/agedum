@@ -76,6 +76,17 @@ def test_wrapper_equals_form(monkeypatch):
     assert captured["command"] == ["kimi", "-p", "hi"]
 
 
+def test_wrapper_cline_is_registered(monkeypatch):
+    # cline is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "cline", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "cline", "--", "cline", "task"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["cline", "task"]
+
+
 def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
     # The `--claude`/`--kimi`/`--opencode` aliases were removed; the bare flag is no
     # longer wrapper mode and is rejected as an unknown provider option.
