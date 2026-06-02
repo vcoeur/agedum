@@ -14,7 +14,7 @@ process. The real working tree and `$HOME` are never written to.
 
 ```mermaid
 flowchart TD
-  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode<br/>→ Plan(binds, extra_args)"]
+  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline<br/>→ Plan(binds, extra_args)"]
   b --> c["assert_safe(): refuse git-tracked targets"]
   c --> d["bwrap --dev-bind / / --ro-bind src target … -- command extra_args"]
   d --> e["child runs, sees injected files"]
@@ -25,7 +25,7 @@ Internally this is three modules:
 
 - **`sources.py`** — locates the project root and the project/global source files into
   a `Source` (`root`, `agents_md`, `skills_dir`).
-- **`harness.py`** — `compile_claude` / `compile_kimi` / `compile_opencode` render a `Source` pair into a
+- **`harness.py`** — `compile_claude` / `compile_kimi` / `compile_opencode` / `compile_cline` render a `Source` pair into a
   `Plan`: a list of absolute `(compiled-file → mount-target)` binds **plus**
   `extra_args` to append to the command.
 - **`launcher.py`** — `assert_safe`, `build_bwrap_argv`, and `run_virtualfs` validate,
@@ -80,7 +80,7 @@ the repo), injected content could be committed by accident.
 `assert_safe` therefore **refuses to inject over any git-tracked path**. Targets must
 be untracked and gitignored. Targets outside the project repo (e.g. `~/.claude/...`)
 are never tracked by this repo, so they are allowed. In practice: list `CLAUDE.md`,
-`.claude/`, and `.kimi/` in your `.gitignore`.
+`.claude/`, `.kimi/`, `.opencode/`, and `.cline/` in your `.gitignore`.
 
 ### Stub sweeping
 
@@ -102,6 +102,7 @@ clean working tree after the command, with the real repo untouched.
 
 A new harness is a single compiler function `compile_<harness>(project, global_, dest)
 -> Plan`. It renders the source however that harness expects and returns binds and/or
-`extra_args`. Register it in the CLI's compiler table under a `--<harness>` flag. The
-launcher and safety rules are shared, so a new harness inherits the namespace,
-git-safety, and cleanup for free.
+`extra_args`. Register it in the CLI's `_COMPILERS` table under its `--wrapper <harness>`
+name (the Cline harness is the most recent example — it mirrors opencode's pure
+path-discovery shape). The launcher and safety rules are shared, so a new harness
+inherits the namespace, git-safety, and cleanup for free.

@@ -64,10 +64,12 @@ flowchart LR
   agedum -->|"--wrapper claude"| cl["CLAUDE.md + .claude/skills/"]
   agedum -->|"--wrapper kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
   agedum -->|"--wrapper opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
+  agedum -->|"--wrapper cline"| cln["AGENTS.md (native) + .cline/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   oc --> ns
-  ns --> cmd["your command<br/>(claude / kimi / opencode)"]
+  cln --> ns
+  ns --> cmd["your command<br/>(claude / kimi / opencode / cline)"]
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
@@ -82,6 +84,7 @@ flowchart LR
 | Claude | `--wrapper claude` | Implemented — project + global scope |
 | kimi   | `--wrapper kimi`   | Implemented — project + global scope |
 | opencode | `--wrapper opencode` | Implemented — project + global scope |
+| Cline  | `--wrapper cline`  | Implemented — project + global scope (wrapper mode only) |
 
 [Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
 launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper

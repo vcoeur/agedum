@@ -59,7 +59,9 @@ source location (no injection), the global `AGENTS.md` is injected via a generat
 `--agent-file`, and skills bind to `~/.kimi/skills/` and `./.kimi/skills/`. opencode is
 like Claude but with its own native project read: project `AGENTS.md` stays in place,
 global `AGENTS.md` binds to `~/.config/opencode/AGENTS.md`, and skills bind to
-`./.opencode/skills/` and `~/.config/opencode/skills/`. See
+`./.opencode/skills/` and `~/.config/opencode/skills/`. Cline is the same shape as
+opencode: project `AGENTS.md` stays in place, global `AGENTS.md` binds to the cross-tool
+`~/.agents/AGENTS.md`, and skills bind to `./.cline/skills/` and `~/.cline/skills/`. See
 [Harnesses](harnesses.md) for the full per-harness mapping.
 
 ## Only the two scope paths are touched

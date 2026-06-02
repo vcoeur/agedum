@@ -10,7 +10,7 @@ the virtual files that would be injected, and the final argv without launching. 
 :mod:`agedum.provider`.
 
 **wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
-``--`` chooses which virtual files to build (Claude / kimi / opencode); everything after
+``--`` chooses which virtual files to build (Claude / kimi / opencode / cline); everything after
 ``--`` is the child argv, run inside a mount namespace where those files are injected at
 the harness's expected paths. ``--dry-run`` prints the virtual files that would be
 injected without running the command. This is the low-level entry that provider mode
@@ -31,7 +31,7 @@ from pathlib import Path
 from rich.console import Console
 
 from agedum import __version__
-from agedum.harness import Plan, compile_claude, compile_kimi, compile_opencode
+from agedum.harness import Plan, compile_claude, compile_cline, compile_kimi, compile_opencode
 from agedum.launcher import LauncherError, run_virtualfs
 from agedum.provider import (
     ProviderError,
@@ -50,11 +50,12 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "claude": compile_claude,
     "kimi": compile_kimi,
     "opencode": compile_opencode,
+    "cline": compile_cline,
 }
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode> [--dry-run] -- <command> [args...]"
+    "       agedum --wrapper <claude|kimi|opencode|cline> [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
 
@@ -76,8 +77,8 @@ as virtual files:
 Wrapper mode (low-level; provider mode builds on it) — run any command inside the
 virtual-file context, with no provider env:
 
-  --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode)
-                        then run the command after -- inside the namespace
+  --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
+                        cline) then run the command after -- inside the namespace
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
@@ -359,7 +360,7 @@ def _run_wrapper(argv: list[str]) -> int:
             else:
                 index += 1
                 if index >= len(flags):
-                    _die("--wrapper requires a harness: claude, kimi, or opencode")
+                    _die("--wrapper requires a harness: claude, kimi, opencode, or cline")
                 value = flags[index]
             if value not in _COMPILERS:
                 _die(f"unknown harness for --wrapper: {value}")
@@ -371,7 +372,7 @@ def _run_wrapper(argv: list[str]) -> int:
         index += 1
 
     if mode is None:
-        _die("a harness is required: --wrapper claude|kimi|opencode")
+        _die("a harness is required: --wrapper claude|kimi|opencode|cline")
 
     if dry_run:
         print(f"harness    {mode}")

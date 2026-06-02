@@ -12,7 +12,7 @@ no provider env.
 
 ```text
 agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
-agedum --wrapper <claude|kimi|opencode> [--dry-run] -- <command> [args...]
+agedum --wrapper <claude|kimi|opencode|cline> [--dry-run] -- <command> [args...]
 ```
 
 ## Provider mode
@@ -59,7 +59,7 @@ Claude with your own login), or to inspect what gets injected with `--dry-run`.
 The invocation has two halves split by a literal `--`:
 
 - **Before `--`** — `--wrapper <harness>` selects the harness format
-  (`claude` / `kimi` / `opencode`), plus the optional `--dry-run`.
+  (`claude` / `kimi` / `opencode` / `cline`), plus the optional `--dry-run`.
 - **After `--`** — the command to run, **verbatim**, including its own binary and
   flags. agedum does not parse or rewrite it (some harnesses get extra flags
   *appended* — see [Harnesses](harnesses.md)).
@@ -72,6 +72,7 @@ modes without touching how commands are passed.
 | `--wrapper claude` | Render the source in Claude format ([details](harnesses.md#claude)). |
 | `--wrapper kimi` | Render the source in kimi-cli format ([details](harnesses.md#kimi)). |
 | `--wrapper opencode` | Render the source in opencode format ([details](harnesses.md#opencode)). |
+| `--wrapper cline` | Render the source in Cline format ([details](harnesses.md#cline)). |
 | `--dry-run` | Print the virtual files that would be injected (and any appended args), then exit without running the command. |
 
 `--wrapper claude` and `--wrapper=claude` are both accepted. A harness is required; an
@@ -82,6 +83,7 @@ agedum --wrapper claude -- claude
 agedum --wrapper claude -- claude --model sonnet -p "review this change"
 agedum --wrapper kimi -- kimi -p "explain this code"
 agedum --wrapper opencode --dry-run -- opencode   # show what would be injected
+agedum --wrapper cline -- cline task "review this change"
 ```
 
 ## Other options

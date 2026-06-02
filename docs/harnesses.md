@@ -1,6 +1,6 @@
 ---
 title: Harnesses · agedum
-description: Exactly what agedum injects for each harness — the Claude, kimi, and opencode compilers, the targets they bind, and the extra flags they append. This is the mechanism provider mode (agedum <name>) uses under the hood.
+description: Exactly what agedum injects for each harness — the Claude, kimi, opencode, and Cline compilers, the targets they bind, and the extra flags they append. This is the mechanism provider mode (agedum <name>) uses under the hood.
 ---
 
 # Harnesses
@@ -16,6 +16,7 @@ format; everything after `--` is run verbatim.
 agedum --wrapper claude   -- claude -p "…"     # render for Claude, run claude
 agedum --wrapper kimi     -- kimi -p "…"       # render for kimi, run kimi
 agedum --wrapper opencode -- opencode run "…"  # render for opencode, run opencode
+agedum --wrapper cline    -- cline task "…"    # render for Cline, run cline
 ```
 
 This page documents what each compiler injects — the mechanism [provider mode](provider.md)
@@ -30,7 +31,8 @@ agedum --wrapper claude --dry-run -- claude   # list the injected virtual files,
 Every compiler processes the project and global [scopes](scopes.md) and applies the
 [skill overlay rules](source-shape.md#skillharnessmd-per-harness-overlay) for its
 harness (`SKILL.claude.md` for Claude, `SKILL.kimi.md` for kimi, `SKILL.opencode.md` for
-opencode; other harnesses' overlays are skipped). The **global** `AGENTS.md` gets the
+opencode, `SKILL.cline.md` for Cline; other harnesses' overlays are skipped). The
+**global** `AGENTS.md` gets the
 same treatment — a sibling [`AGENTS.<harness>.md`](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope)
 overlay is merged onto it for the matching harness.
 
@@ -169,6 +171,43 @@ place rather than relocated.
 ```bash
 agedum --wrapper opencode -- opencode run "review this change"
 agedum --wrapper opencode -- opencode            # interactive TUI
+```
+
+## `--wrapper cline` { #cline }
+
+Cline, like opencode, is **pure path-discovery** — it reads its instructions and skills
+from fixed locations and needs no flags — so every scope is a bind or a native read, and
+nothing is appended to your command. Cline reads `AGENTS.md` as a cross-tool rules file,
+which is exactly the agent-neutral source, so the project instructions stay in place.
+
+| Source | Injected at |
+|---|---|
+| project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
+| project `.agents/skills/` | `<root>/.cline/skills/` |
+| global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.cline.md` overlay) | `~/.agents/AGENTS.md` |
+| global `~/.agents/skills/` | `$CLINE_DATA_DIR/skills/` (default `~/.cline/skills/`) |
+
+- **Project instructions** — Cline reads the project-root `AGENTS.md` as a cross-tool
+  rules file. That is the agent-neutral source, already in place, so **agedum injects
+  nothing** for it — and never could, since the root `AGENTS.md` is git-tracked.
+- **Global instructions** — Cline reads the cross-tool global path `~/.agents/AGENTS.md`,
+  so the global `AGENTS.md` is bound there — base merged with an optional `AGENTS.cline.md`
+  [overlay](source-shape.md#agentsharnessmd-per-harness-overlay-user-scope). Note this is
+  **not** under `$CLINE_DATA_DIR`: Cline reads global *skills* from `~/.cline/skills/` but
+  global cross-tool *instructions* from `~/.agents/AGENTS.md` — the asymmetry is Cline's.
+- **Skills** — each skill is a `SKILL.md` folder (the shape Cline already expects),
+  compiled with the `SKILL.cline.md` overlay and bound to `./.cline/skills/` (project) and
+  `$CLINE_DATA_DIR/skills/` (global, default `~/.cline/skills/`).
+- `extra_args`: **none** — Cline discovers everything from disk, like Claude and opencode.
+
+Cline is **wrapper-mode only** for now: it has no documented env-var interface for
+provider/model/token selection (keys live in its own settings store), so there is nothing
+for [provider mode](provider.md) to map. `agedum <provider>` does not accept a `cline`
+harness; drive Cline through `--wrapper cline`.
+
+```bash
+agedum --wrapper cline -- cline task "review this change"
+agedum --wrapper cline --dry-run -- cline        # show what would be injected
 ```
 
 ## Other harnesses

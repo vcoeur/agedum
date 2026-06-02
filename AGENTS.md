@@ -2,8 +2,8 @@
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
-private mount namespace at launch. Implemented: **Claude**, **kimi**, and **opencode**
-harnesses at **project + global scope**.
+private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**, and
+**Cline** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
@@ -23,14 +23,23 @@ harnesses at **project + global scope**.
   searches those skills dirs before `.agents/skills/` / `~/.agents/skills/`, so the
   overlaid (`SKILL.opencode.md`) copy wins over the raw source. Matches condash's
   opencode layout; uniform with the Claude harness, no `extra_args`.
+- **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
+  is read natively at `./AGENTS.md` (Cline reads it as a cross-tool rules file), so agedum
+  leaves it in place. Global `AGENTS.md` → the cross-tool path `~/.agents/AGENTS.md` (not
+  under the config dir); skills → `./.cline/skills/` (project) + `<cline-config>/skills/`
+  (global), where `<cline-config>` is `$CLINE_DATA_DIR` (default `~/.cline`). Skills use
+  the `SKILL.cline.md` overlay; no `extra_args`. **Wrapper-mode only** — Cline has no
+  documented env interface for provider/model/token, so it is absent from
+  `provider.HARNESSES` and has no `_cline_env` builder.
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
-  `AGENTS.opencode.md`) for the active harness — the instructions analogue of
+  `AGENTS.opencode.md` / `AGENTS.cline.md`) for the active harness — the instructions analogue of
   `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).
 
-Follow-ups: `--<harness>-variant` composition.
+Follow-ups: `--<harness>-variant` composition; Cline provider mode (once Cline documents
+an env interface for provider/model/token selection).
 
 ## Stack
 
@@ -86,13 +95,13 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   did). This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--dry-run] -- <command...>`. The low-level
   entry provider mode builds on. The flag before `--` chooses the virtual-file context
-  (`claude` / `kimi` / `opencode`); everything after `--` is the child argv (some
-  harnesses get extra flags appended — kimi's `--agent-file`; Claude and opencode are
+  (`claude` / `kimi` / `opencode` / `cline`); everything after `--` is the child argv (some
+  harnesses get extra flags appended — kimi's `--agent-file`; Claude, opencode, and cline are
   pure binds). `--dry-run` prints the injected virtual files without running. Context and
   command are decoupled.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
-`compile_kimi` / `compile_opencode` → a `Plan` of absolute binds **+ `extra_args`** for
+`compile_kimi` / `compile_opencode` / `compile_cline` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;

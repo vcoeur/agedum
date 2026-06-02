@@ -371,3 +371,81 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
             plan.origins[target] = str(global_.skills_dir)
 
     return plan
+
+
+# ---------------------------------------------------------------------------
+# Cline harness
+# ---------------------------------------------------------------------------
+
+
+def cline_config_dir() -> Path:
+    """Cline's user-scope config dir — ``$CLINE_DATA_DIR`` or ``~/.cline``."""
+    override = os.environ.get("CLINE_DATA_DIR")
+    return Path(override) if override else Path.home() / ".cline"
+
+
+def cline_global_agents_md() -> Path:
+    """Cline's cross-tool *global* instructions path — ``~/.agents/AGENTS.md``.
+
+    Cline reads a project-root ``AGENTS.md`` and the global ``~/.agents/AGENTS.md`` as
+    cross-tool agent instructions. This is **not** under :func:`cline_config_dir`: Cline
+    reads global *skills* from ``~/.cline/skills`` but global cross-tool *instructions*
+    from ``~/.agents/AGENTS.md`` — the asymmetry is Cline's own.
+    """
+    return Path.home() / ".agents" / "AGENTS.md"
+
+
+def compile_cline(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for Cline. Like opencode, Cline is pure path-discovery (no
+    appended flags), so every scope is a bind or a native read:
+
+    * **project instructions** — Cline reads the project-root ``./AGENTS.md`` natively
+      (as a cross-tool rules file), and that is exactly the agent-neutral source file, so
+      agedum injects nothing for it (and could not — it is git-tracked);
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an
+      optional ``AGENTS.cline.md`` overlay) → ``~/.agents/AGENTS.md``, the cross-tool
+      global path Cline reads (see :func:`cline_global_agents_md`);
+    * **project skills** → ``./.cline/skills/``; **global skills** →
+      ``<cline-config>/skills/``. Each skill is a ``SKILL.md`` folder, the same shape
+      Cline expects; the ``SKILL.cline.md`` overlay is merged in.
+
+    ``<cline-config>`` is :func:`cline_config_dir`. No ``extra_args`` — Cline discovers
+    everything from disk.
+    """
+    plan = Plan()
+    config = cline_config_dir()
+
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
+    # Global instructions (base + AGENTS.cline.md overlay) -> ~/.agents/AGENTS.md
+    # (project ./AGENTS.md is read natively).
+    global_instructions = _instructions(global_, "cline") if global_ is not None else None
+    if global_instructions is not None:
+        out = dest / "global" / "AGENTS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(global_instructions)
+        target = cline_global_agents_md()
+        plan.binds.append((out, target))
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[target] = str(global_.agents_md)
+
+    # Project skills -> ./.cline/skills.
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.cline.md")
+        if out is not None:
+            target = project.root / ".cline" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
+
+    # Global skills -> <cline-config>/skills.
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.cline.md")
+        if out is not None:
+            target = config / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
+
+    return plan
