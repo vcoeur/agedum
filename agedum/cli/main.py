@@ -40,6 +40,7 @@ from agedum.provider import (
     load_config,
     parse_env_file,
     resolve_config_path,
+    with_prompt,
 )
 from agedum.sources import Source, load_global_source, load_source
 
@@ -54,7 +55,8 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 }
 
 USAGE = (
-    "usage: agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]\n"
+    "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
+    "[--dry-run] [harness args...]\n"
     "       agedum --wrapper <claude|kimi|opencode|cline> [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
@@ -71,6 +73,9 @@ as virtual files:
   --dry-run             print the resolved env (secrets masked), the virtual files that
                         would be injected, and the argv — don't launch (accepted before
                         or after the provider)
+  --prompt TEXT         seed the harness with an initial prompt, then stay interactive
+  --run TEXT            run the prompt non-interactively, then exit (no interactive UI);
+                        --prompt and --run are mutually exclusive
   harness args          any token after the provider that isn't an agedum flag is passed
                         to the harness; use `--` to forward a literal --dry-run/--env
 
@@ -121,6 +126,15 @@ def _run_config(argv: list[str]) -> int:
     dry_run = False
     provider: str | None = None
     rest: list[str] = []
+    prompt_text: str | None = None
+    prompt_interactive = False
+
+    def claim_prompt(interactive: bool, value: str) -> None:
+        nonlocal prompt_text, prompt_interactive
+        if prompt_text is not None:
+            _die("--prompt and --run are mutually exclusive and may be given only once")
+        prompt_text = value
+        prompt_interactive = interactive
 
     # agedum's own flags (--env, --dry-run) are recognised wherever they appear before
     # an explicit `--`, including after the provider name — so the documented
@@ -150,6 +164,14 @@ def _run_config(argv: list[str]) -> int:
             env_file = argv[index]
         elif arg == "--dry-run":
             dry_run = True
+        elif arg.startswith("--prompt=") or arg.startswith("--run="):
+            flag, value = arg.split("=", 1)
+            claim_prompt(flag == "--prompt", value)
+        elif arg in ("--prompt", "--run"):
+            index += 1
+            if index >= len(argv):
+                _die(f"{arg} requires a prompt string")
+            claim_prompt(arg == "--prompt", argv[index])
         elif provider is None and arg.startswith("-") and arg != "-":
             _die(f"unknown option: {arg}")
         elif provider is None:
@@ -166,11 +188,15 @@ def _run_config(argv: list[str]) -> int:
         env_path = Path(env_file).expanduser() if env_file else default_env_file()
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
         launch = build_launch(config, {**os.environ, **dotenv})
+        command = (
+            with_prompt(launch, rest, prompt_text, interactive=prompt_interactive)
+            if prompt_text is not None
+            else [*launch.command, *rest]
+        )
     except ProviderError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1
 
-    command = [*launch.command, *rest]
     if dry_run:
         _print_dry_run(launch, env_path, command)
         return 0
@@ -178,7 +204,10 @@ def _run_config(argv: list[str]) -> int:
     os.environ.update(launch.env)
     for var in launch.unset:
         os.environ.pop(var, None)
-    return _run(launch.harness, command)
+    # `--run` is non-interactive: the prompt is in argv, so the harness must not inherit a
+    # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
+    non_interactive = prompt_text is not None and not prompt_interactive
+    return _run(launch.harness, command, close_stdin=non_interactive)
 
 
 def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
@@ -384,7 +413,7 @@ def _run_wrapper(argv: list[str]) -> int:
     return _run(mode, command)
 
 
-def _run(mode: str, command: list[str]) -> int:
+def _run(mode: str, command: list[str], *, close_stdin: bool = False) -> int:
     project = load_source()
     global_ = load_global_source()
     if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
@@ -396,7 +425,7 @@ def _run(mode: str, command: list[str]) -> int:
     try:
         plan = _COMPILERS[mode](project, global_, dest)
         with _maybe_fold_proxy(mode):
-            return run_virtualfs(project.root, plan, command)
+            return run_virtualfs(project.root, plan, command, close_stdin=close_stdin)
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1

@@ -33,6 +33,8 @@ reference: [Provider mode](provider.md).
 | `agedum claude-deepseek-auto` | Resolve the named provider and launch its harness. |
 | `agedum ./conf.json -p "hi"` | Launch from a config path; pass `-p "hi"` to the harness. |
 | `agedum <provider> --env <file>` | Read secrets from `<file>` instead of the default env file. |
+| `agedum <provider> --prompt "<text>"` | Seed the harness with an initial prompt, then stay interactive. |
+| `agedum <provider> --run "<text>"` | Run the prompt non-interactively, then exit (no interactive UI). |
 | `agedum <provider> --dry-run` | Print the resolved env (secrets masked), the injected virtual files, and the argv; don't launch. |
 
 `--env` and `--dry-run` are agedum's own flags and are recognised **before or after** the
@@ -44,6 +46,40 @@ agedum claude-deepseek-auto
 agedum claude-deepseek-auto -p "review this change"
 agedum opencode-deepseek run "explain this code"
 agedum claude-deepseek-auto --dry-run
+```
+
+### Seeding a prompt — `--prompt` and `--run`
+
+Two agedum flags seed the harness with an initial prompt, so you don't have to know each
+harness's own prompt syntax. They are mutually exclusive (each may be given once):
+
+- **`--prompt "<text>"`** — start the harness **interactively**, with `<text>` as the first
+  message; the session stays open for follow-ups.
+- **`--run "<text>"`** — run `<text>` **non-interactively** and exit (no interactive UI).
+  This is the form to use from scripts, tasks, and cron.
+
+agedum translates the flag to each harness's native invocation (verify it with `--dry-run`):
+
+| Harness | `--prompt "<text>"` (interactive) | `--run "<text>"` (non-interactive) |
+|---|---|---|
+| claude | `claude "<text>"` | `claude --print "<text>"` |
+| kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
+| opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
+
+If a harness has no known prompt-seeding convention, agedum **fails loudly** with a clear
+error rather than launching the wrong way. Any harness passthrough args you add are kept,
+placed before the prompt text.
+
+A `--run` launch is non-interactive, so agedum gives the harness **`/dev/null` for stdin**:
+the whole task is already in argv, and the harness must never block waiting on input. (This
+matters for `opencode run`, which otherwise hangs forever on an open, non-tty stdin — e.g.
+when launched from a pipe or a headless task runner.) `--prompt` and a bare launch keep the
+inherited stdin so the live session can read your keystrokes.
+
+```bash
+agedum claude-deepseek-auto --prompt "review this change"   # interactive, seeded
+agedum claude-deepseek-auto --run "summarise the diff"      # run once, then exit
+agedum opencode-deepseek --run "explain this code"
 ```
 
 ## Wrapper mode

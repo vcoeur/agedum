@@ -15,8 +15,10 @@ agedum has two modes:
 - **`agedum <provider-name|config.json> [harness args]`** — the primary form. Read a
   provider config JSON (a name resolved under `~/.config/agents/providers`, or a path),
   resolve its secrets from a `.env`, set the provider/model/auth environment, and launch
-  the harness named in the config — inside the virtual-file context below. `--dry-run`
-  prints the resolved env (secrets masked) + argv without launching.
+  the harness named in the config — inside the virtual-file context below. `--prompt
+  "<text>"` seeds an initial prompt and stays interactive; `--run "<text>"` runs it
+  non-interactively and exits. `--dry-run` prints the resolved env (secrets masked) + argv
+  without launching.
 - **`agedum --wrapper <harness> -- <command>`** — compile the source to the harness's
   native layout in a throwaway dir, then run your command inside a **private mount
   namespace** (bubblewrap) where the compiled files appear at their expected paths —
@@ -58,6 +60,8 @@ agedum has two modes:
 # Provider mode — launch a harness from a provider config, env resolved from .env:
 agedum claude-deepseek-auto                       # resolve the named provider, launch claude
 agedum claude-deepseek-auto -p "review this"      # extra args go to the harness
+agedum claude-deepseek-auto --prompt "review this"  # seed an initial prompt, stay interactive
+agedum claude-deepseek-auto --run "review this"     # run the prompt non-interactively, then exit
 agedum ./providers/my-claude.json                 # a config path instead of a name
 agedum claude-deepseek-auto --dry-run             # print resolved env, virtual files + argv
 

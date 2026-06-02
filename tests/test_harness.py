@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 from agedum.harness import (
@@ -421,3 +423,141 @@ def test_compile_cline_global_agents_harness_overlay_merged(tmp_path, monkeypatc
     assert "GLOBAL-BASE" in merged
     assert "CLINE-EXTRA" in merged
     assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def _git_init_commit(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+        check=True,
+    )
+
+
+def test_compile_claude_injects_transcript_hooks_into_settings_local(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# proj\n")
+    src = load_source(tmp_path)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    targets = [t for _, t in plan.binds]
+    # Hooks land in settings.local.json (untracked layer), never settings.json.
+    assert tmp_path / ".claude" / "settings.local.json" in targets
+    assert tmp_path / ".claude" / "settings.json" not in targets
+
+    settings = json.loads(_src_for(plan, tmp_path / ".claude" / "settings.local.json").read_text())
+    events = settings["hooks"]
+    assert set(events) == {"UserPromptSubmit", "Stop"}
+    user_cmd = events["UserPromptSubmit"][0]["hooks"][0]["command"]
+    stop_cmd = events["Stop"][0]["hooks"][0]["command"]
+    assert user_cmd.startswith("node ")
+    assert user_cmd.endswith("emit-transcript.mjs user")
+    assert stop_cmd.endswith("emit-transcript.mjs stop")
+
+
+def test_compile_claude_transcript_hooks_merge_existing_local_settings(tmp_path):
+    # An existing settings.local.json keeps its keys + hooks; transcript hooks add alongside.
+    (tmp_path / "AGENTS.md").write_text("# proj\n")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.local.json").write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["Read(//x/**)"]},
+                "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]},
+            }
+        )
+    )
+
+    src = load_source(tmp_path)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    merged = json.loads(_src_for(plan, tmp_path / ".claude" / "settings.local.json").read_text())
+    assert merged["permissions"] == {"allow": ["Read(//x/**)"]}
+    assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
+    assert "UserPromptSubmit" in merged["hooks"]
+    assert "Stop" in merged["hooks"]
+
+
+def test_compile_claude_launch_safe_when_settings_json_tracked(tmp_path):
+    # Regression: a repo that git-TRACKS .claude/settings.json must still launch. Hooks go
+    # into the untracked settings.local.json; the tracked file is never bound, so the
+    # launcher's assert_safe does not abort.
+    from agedum.launcher import assert_safe
+
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("# proj\n")
+    (proj / ".claude" / "settings.json").write_text('{"permissions": {"allow": []}}\n')
+    (proj / ".gitignore").write_text("CLAUDE.md\n.claude/settings.local.json\n")
+    _git_init_commit(proj)  # tracks settings.json; settings.local.json is gitignored
+
+    src = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)  # must not raise
+
+    targets = [t for _, t in plan.binds]
+    assert proj / ".claude" / "settings.local.json" in targets
+    assert proj / ".claude" / "settings.json" not in targets
+    assert_safe(proj, plan)  # the launch-time safety check must pass
+
+
+def test_compile_claude_skips_hooks_when_settings_local_tracked(tmp_path):
+    # If even settings.local.json is tracked, skip injection (graceful) — never abort.
+    # NB: a global gitignore (`**/.claude/*.local.*`) may exclude it from `add -A`, so
+    # force-add to genuinely track it and exercise the guard.
+    from agedum.launcher import assert_safe
+
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("# proj\n")
+    (proj / ".claude" / "settings.local.json").write_text("{}\n")
+    (proj / ".gitignore").write_text("CLAUDE.md\n")
+    subprocess.run(["git", "init", "-q", str(proj)], check=True)
+    subprocess.run(["git", "-C", str(proj), "add", "-f", ".claude/settings.local.json"], check=True)
+    subprocess.run(["git", "-C", str(proj), "add", "AGENTS.md", ".gitignore"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(proj),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+        check=True,
+    )
+
+    src = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(src, None, dest)
+
+    targets = [t for _, t in plan.binds]
+    assert proj / ".claude" / "settings.local.json" not in targets  # skipped, not bound
+    assert_safe(proj, plan)  # must not raise
+
+
+def test_claude_emitter_asset_is_shipped():
+    from agedum.harness import _claude_emitter_path
+
+    assert Path(_claude_emitter_path()).is_file()

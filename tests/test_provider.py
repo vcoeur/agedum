@@ -12,6 +12,7 @@ from agedum.provider import (
     providers_dir,
     required_env,
     resolve_config_path,
+    with_prompt,
 )
 
 # --- config-path resolution ---
@@ -497,3 +498,72 @@ def test_opencode_provider_def_list_rejects_non_dict_entry():
             config,
             base_env={"KIMI_API_KEY": "sk-kimi-abc", "DEEPSEEK_API_KEY": "sk-ds-xyz"},
         )
+
+
+# --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
+
+
+def _launch(harness, command):
+    return Launch(harness=harness, label=harness, command=command)
+
+
+def test_with_prompt_claude_interactive_is_positional():
+    # claude seeds an interactive session from a positional prompt.
+    assert with_prompt(_launch("claude", ["claude"]), [], "hello", interactive=True) == [
+        "claude",
+        "hello",
+    ]
+
+
+def test_with_prompt_claude_run_uses_print():
+    # --print is claude's non-interactive (run-and-exit) mode.
+    assert with_prompt(_launch("claude", ["claude"]), [], "hello", interactive=False) == [
+        "claude",
+        "--print",
+        "hello",
+    ]
+
+
+def test_with_prompt_kimi_interactive_uses_prompt_flag():
+    cmd = with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=True)
+    assert cmd == ["kimi", "--model", "k", "--prompt", "hi"]
+
+
+def test_with_prompt_kimi_run_appends_print():
+    # kimi: --prompt seeds; --print makes the invocation non-interactive.
+    assert with_prompt(_launch("kimi", ["kimi"]), [], "hi", interactive=False) == [
+        "kimi",
+        "--prompt",
+        "hi",
+        "--print",
+    ]
+
+
+def test_with_prompt_opencode_interactive_uses_prompt_flag():
+    assert with_prompt(_launch("opencode", ["opencode"]), [], "hi", interactive=True) == [
+        "opencode",
+        "--prompt",
+        "hi",
+    ]
+
+
+def test_with_prompt_opencode_run_uses_run_subcommand_first():
+    # opencode's `run` subcommand must lead, before the message.
+    assert with_prompt(_launch("opencode", ["opencode"]), [], "hi", interactive=False) == [
+        "opencode",
+        "run",
+        "hi",
+    ]
+
+
+def test_with_prompt_preserves_passthrough_args():
+    seeded = with_prompt(_launch("claude", ["claude"]), ["--add-dir", "/x"], "hi", interactive=True)
+    assert seeded == ["claude", "--add-dir", "/x", "hi"]
+    # passthrough lands after the `run` subcommand, before the message
+    ran = with_prompt(_launch("opencode", ["opencode"]), ["-m", "p/m"], "hi", interactive=False)
+    assert ran == ["opencode", "run", "-m", "p/m", "hi"]
+
+
+def test_with_prompt_unknown_harness_fails_loudly():
+    with pytest.raises(ProviderError, match="no known prompt-seeding flags"):
+        with_prompt(_launch("mystery", ["mystery"]), [], "hi", interactive=True)

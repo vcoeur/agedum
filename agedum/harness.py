@@ -25,8 +25,11 @@ carries no front-matter, so the merge is a plain body concatenation.
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -96,6 +99,88 @@ def _merge_instructions(base: str, overlay: str) -> str:
     return f"{base.rstrip()}\n\n{overlay.lstrip()}\n"
 
 
+def _claude_emitter_path() -> str:
+    """Absolute path of the bundled Claude transcript-capture hook script.
+
+    Shipped inside the agedum package (``agedum/assets/claude/emit-transcript.mjs``)
+    and resolved on disk; agedum's bwrap launch binds the whole real filesystem, so
+    the path is visible to Claude's hook subprocess inside the namespace.
+    """
+    return str(Path(__file__).resolve().parent / "assets" / "claude" / "emit-transcript.mjs")
+
+
+def _transcript_hook_settings() -> dict:
+    """Claude settings ``hooks`` block that emits the session transcript.
+
+    ``UserPromptSubmit`` frames the prompt as a ``[user]`` message; ``Stop`` tails
+    the session JSONL after each assistant turn and frames the new assistant +
+    thinking content. Both speak the neutral OSC 7373 protocol condash decodes (the
+    same one the opencode plugin emits) — see ``assets/claude/emit-transcript.mjs``.
+    """
+    emitter = shlex.quote(_claude_emitter_path())
+    return {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"node {emitter} user"}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": f"node {emitter} stop"}]}],
+    }
+
+
+def _is_git_tracked(project_root: Path, target: Path) -> bool:
+    """True when ``target`` is git-tracked in the repo at ``project_root``.
+
+    Mirrors the launcher's safety check (:func:`agedum.launcher.assert_safe`) so the
+    transcript injection can *skip* a tracked target instead of letting the launcher
+    abort the whole run there. Returns False when ``project_root`` is not a repo or
+    ``target`` is outside it.
+    """
+    try:
+        rel = target.relative_to(project_root)
+    except ValueError:
+        return False
+    if not (project_root / ".git").exists():
+        return False
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "ls-files", "--error-unmatch", str(rel)],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _inject_transcript_settings(plan: Plan, project_root: Path, proj_dest: Path) -> None:
+    """Bind a project ``.claude/settings.local.json`` that adds transcript-capture hooks.
+
+    Targets ``settings.local.json`` — Claude's highest-precedence, conventionally
+    *untracked* local-overrides layer — NOT the often-versioned ``settings.json``: the
+    launcher refuses to bind over a git-tracked path (the namespace shares the real
+    ``.git``, so injected content could be committed), and many repos track
+    ``settings.json`` deliberately. Hooks merge additively across layers, so ours still
+    combine with the project's ``settings.json`` and the user's ``~/.claude`` hooks.
+    If even ``settings.local.json`` is tracked, skip injection rather than break the
+    launch — a captured transcript is never worth a failed launch.
+    """
+    target = project_root / ".claude" / "settings.local.json"
+    if _is_git_tracked(project_root, target):
+        return
+    existing: dict = {}
+    try:
+        loaded = json.loads(target.read_text())
+        if isinstance(loaded, dict):
+            existing = loaded
+    except (OSError, ValueError):
+        existing = {}
+
+    merged = dict(existing)
+    hooks = dict(existing.get("hooks") or {})
+    for event, entries in _transcript_hook_settings().items():
+        hooks[event] = list(hooks.get(event) or []) + entries
+    merged["hooks"] = hooks
+
+    out = proj_dest / ".claude" / "settings.local.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(merged, indent=2) + "\n")
+    plan.binds.append((out, target))
+    plan.origins[target] = f"{_claude_emitter_path()} (transcript hooks)"
+
+
 def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
     """Render each scope into its own Claude location under `dest`; return the `Plan`.
 
@@ -114,6 +199,14 @@ def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
         claude_md_target=project.root / "CLAUDE.md",
         skills_target=project.root / ".claude" / "skills",
     )
+
+    # Emit a clean session transcript for any pty capturer (condash) by binding a
+    # project .claude/settings.local.json that registers the transcript-capture hooks.
+    # Default on, mirroring opencode; the OSC it emits is ignored by terminals that don't
+    # decode it. Gated on an actual project source so a sourceless launch stays fully
+    # transparent (no binds) and never injects into an unrelated directory.
+    if project.agents_md is not None or project.skills_dir is not None:
+        _inject_transcript_settings(plan, project.root, dest / "project")
 
     # Global scope -> the user-scope Claude config dir (separate from project), with the
     # AGENTS.claude.md overlay merged into the global instructions.
