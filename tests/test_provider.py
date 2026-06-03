@@ -579,6 +579,8 @@ def test_reasonix_chat_subcommand_and_model_flag():
     )
     # `chat` is the interactive subcommand; --model selects a reasonix provider by name.
     assert launch.command == ["reasonix", "chat", "--model", "deepseek-pro"]
+    # No baseUrl → no generated config file (uses reasonix's built-in/configured providers).
+    assert launch.config_files == ()
     # The token rides the required-env export (reasonix reads it via api_key_env) and is masked.
     assert launch.env["DEEPSEEK_API_KEY"] == "sk-rx-abc"
     assert "DEEPSEEK_API_KEY" in launch.secrets
@@ -589,19 +591,64 @@ def test_reasonix_bare_runs_chat():
     launch = build_launch({"harness": "reasonix", "config": {}}, base_env={})
     assert launch.command == ["reasonix", "chat"]
     assert launch.env == {}
+    assert launch.config_files == ()
 
 
-def test_reasonix_base_url_is_rejected():
-    # reasonix has no base-URL flag/env; a custom endpoint is a [[providers]] block selected
-    # by name, so a baseUrl would silently miss — reject it rather than launch wrong.
-    with pytest.raises(ProviderError, match="reasonix has no base-URL flag"):
+def test_reasonix_custom_endpoint_generates_toml():
+    # A baseUrl makes agedum generate a ./reasonix.toml [[providers]] block + default_model
+    # and select it by the fixed agedum provider name; `model` is the upstream model id.
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "slug": "reasonix-myhost",
+            "secretEnv": "MY_API_KEY",
+            "config": {"baseUrl": "https://my.host/v1", "model": "deepseek-v4-pro"},
+        },
+        base_env={"MY_API_KEY": "sk-secret-xyz"},
+    )
+    assert launch.command == ["reasonix", "chat", "--model", "agedum"]
+    assert [target for target, _ in launch.config_files] == ["reasonix.toml"]
+    toml = launch.config_files[0][1]
+    assert 'default_model = "agedum"' in toml
+    assert "[[providers]]" in toml
+    assert 'name = "agedum"' in toml
+    assert 'kind = "openai"' in toml
+    assert 'base_url = "https://my.host/v1"' in toml
+    assert 'model = "deepseek-v4-pro"' in toml
+    assert 'api_key_env = "MY_API_KEY"' in toml
+    # The toml references the key by env-var NAME — never its value (no secret on disk).
+    assert "sk-secret-xyz" not in toml
+    # The token still rides the required-env export so reasonix resolves api_key_env.
+    assert launch.env["MY_API_KEY"] == "sk-secret-xyz"
+    assert "MY_API_KEY" in launch.secrets
+
+
+def test_reasonix_custom_endpoint_kind_override():
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "config": {"baseUrl": "https://h/v1", "model": "m", "kind": "anthropic"},
+        },
+        base_env={},
+    )
+    assert 'kind = "anthropic"' in launch.config_files[0][1]
+
+
+def test_reasonix_keyless_endpoint_omits_api_key_env():
+    # No secretEnv (a local keyless endpoint): no api_key_env line, and no required env.
+    launch = build_launch(
+        {"harness": "reasonix", "config": {"baseUrl": "http://localhost:1234/v1", "model": "m"}},
+        base_env={},
+    )
+    assert "api_key_env" not in launch.config_files[0][1]
+    assert launch.command == ["reasonix", "chat", "--model", "agedum"]
+
+
+def test_reasonix_base_url_requires_model():
+    # baseUrl needs the upstream model id to fill the provider block.
+    with pytest.raises(ProviderError, match="reasonix `baseUrl` requires `model`"):
         build_launch(
-            {
-                "harness": "reasonix",
-                "secretEnv": "DEEPSEEK_API_KEY",
-                "config": {"baseUrl": "https://api.deepseek.com", "model": "deepseek-pro"},
-            },
-            base_env={"DEEPSEEK_API_KEY": "tok"},
+            {"harness": "reasonix", "config": {"baseUrl": "https://my.host/v1"}}, base_env={}
         )
 
 

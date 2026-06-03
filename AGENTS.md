@@ -44,9 +44,14 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   overlaid (`SKILL.reasonix.md`) copy wins over the raw source; no `extra_args`. **Provider
   mode** (`_reasonix_env`) maps `model` → `--model <name>` on the `chat` / `run` subcommand
   and exports the token (reasonix reads it via the provider's `api_key_env`, e.g.
-  `DEEPSEEK_API_KEY`). `baseUrl` is rejected (no base-URL flag; a custom endpoint is a
-  `[[providers]]` block selected by name). `agedum --run` maps to `reasonix run "<text>"`;
-  `--prompt` is a fail-loud `ProviderError` (`chat` can't be pre-seeded).
+  `DEEPSEEK_API_KEY`). A `baseUrl` (no native flag/env on reasonix) makes agedum **generate a
+  `reasonix.toml`** `[[providers]]` block + `default_model` and inject it at the project root
+  via `Launch.config_files` (the launcher writes it; the key is referenced by env-var name,
+  never written); reasonix's merge replaces `[[providers]]` wholesale but keeps the user
+  config's scalars + plugins, so the custom provider wins without masking other settings. Here
+  `model` is the upstream model id; agedum names the provider `agedum` and runs `--model agedum`.
+  `agedum --run` maps to `reasonix run "<text>"`; `--prompt` is a fail-loud `ProviderError`
+  (`chat` can't be pre-seeded).
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
   `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md`) for the active harness — the instructions analogue of
