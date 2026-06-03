@@ -500,6 +500,71 @@ def test_opencode_provider_def_list_rejects_non_dict_entry():
         )
 
 
+# --- cline env/command mapping ---
+
+
+def test_cline_appends_flags_and_passes_key():
+    launch = build_launch(
+        {
+            "harness": "cline",
+            "secretEnv": "ANTHROPIC_API_KEY",
+            "config": {
+                "model": "claude-opus-4-8",
+                "provider": "anthropic",
+                "effortLevel": "high",
+                "plan": True,
+            },
+        },
+        base_env={"ANTHROPIC_API_KEY": "sk-cline-abc"},
+    )
+    # Cline takes provider/model/effort as flags and the token as `--key` (in argv).
+    assert launch.command == [
+        "cline",
+        "--model",
+        "claude-opus-4-8",
+        "--provider",
+        "anthropic",
+        "--thinking",
+        "high",
+        "--plan",
+        "--key",
+        "sk-cline-abc",
+    ]
+    # The token still rides the required-env export, so it is masked in --dry-run.
+    assert launch.env["ANTHROPIC_API_KEY"] == "sk-cline-abc"
+    assert "ANTHROPIC_API_KEY" in launch.secrets
+
+
+def test_cline_bare_runs_plain():
+    launch = build_launch({"harness": "cline", "config": {}}, base_env={})
+    assert launch.command == ["cline"]
+    assert launch.env == {}
+
+
+def test_cline_no_key_flag_without_secret_env():
+    # A provider that relies on Cline's own pre-configured auth (`cline auth`) carries no
+    # secretEnv, so no `--key` is appended.
+    launch = build_launch(
+        {"harness": "cline", "config": {"provider": "cline", "model": "x"}}, base_env={}
+    )
+    assert launch.command == ["cline", "--model", "x", "--provider", "cline"]
+    assert "--key" not in launch.command
+
+
+def test_cline_base_url_is_rejected():
+    # Cline has no base-URL flag; a baseUrl would launch against the wrong endpoint
+    # silently, so it is rejected rather than ignored.
+    with pytest.raises(ProviderError, match="cline has no base-URL flag"):
+        build_launch(
+            {
+                "harness": "cline",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://api.deepseek.com/anthropic", "model": "m"},
+            },
+            base_env={"DEEPSEEK_API_KEY": "tok"},
+        )
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
@@ -567,3 +632,10 @@ def test_with_prompt_preserves_passthrough_args():
 def test_with_prompt_unknown_harness_fails_loudly():
     with pytest.raises(ProviderError, match="no known prompt-seeding flags"):
         with_prompt(_launch("mystery", ["mystery"]), [], "hi", interactive=True)
+
+
+def test_with_prompt_cline_fails_loudly():
+    # cline is a provider harness, but its prompt-seeding invocation is not yet mapped, so
+    # agedum --prompt/--run fails loudly for it rather than guessing.
+    with pytest.raises(ProviderError, match="no known prompt-seeding flags"):
+        with_prompt(_launch("cline", ["cline"]), [], "hi", interactive=False)

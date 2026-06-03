@@ -84,7 +84,7 @@ flowchart LR
 | Claude | `--wrapper claude` | Implemented — project + global scope |
 | kimi   | `--wrapper kimi`   | Implemented — project + global scope |
 | opencode | `--wrapper opencode` | Implemented — project + global scope |
-| Cline  | `--wrapper cline`  | Implemented — project + global scope (wrapper mode only) |
+| Cline  | `--wrapper cline`  | Implemented — project + global scope; provider mode |
 
 [Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
 launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper

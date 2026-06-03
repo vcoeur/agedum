@@ -200,10 +200,10 @@ which is exactly the agent-neutral source, so the project instructions stay in p
   `$CLINE_DATA_DIR/skills/` (global, default `~/.cline/skills/`).
 - `extra_args`: **none** — Cline discovers everything from disk, like Claude and opencode.
 
-Cline is **wrapper-mode only** for now: it has no documented env-var interface for
-provider/model/token selection (keys live in its own settings store), so there is nothing
-for [provider mode](provider.md) to map. `agedum <provider>` does not accept a `cline`
-harness; drive Cline through `--wrapper cline`.
+Cline also works in [provider mode](provider.md#cline): `agedum <provider>` accepts a
+`cline` harness and maps the config to Cline's CLI flags (`--model` / `--provider` /
+`--thinking` / `--plan`), passing the token via `--key`. The one caveat is `agedum
+--prompt`/`--run`, which is not yet supported for cline (it fails loud rather than guess).
 
 ```bash
 agedum --wrapper cline -- cline task "review this change"

@@ -218,18 +218,17 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print()
     _print_environment(launch)
     extra_args = _print_plan_sections(launch.harness)
-    _print_command(command, extra_args)
+    _print_command(command, extra_args, _secret_values(launch))
 
 
-def _print_environment(launch) -> None:
-    """The resolved provider environment (secrets masked; opencode config pretty-printed)."""
-    if not launch.env and not launch.unset:
-        return
-    print("environment")
-    width = max((len(key) for key in launch.env), default=0)
-    # Values of the secret env vars, longest first — redacted from the pretty-printed
-    # opencode config so a key baked into it (e.g. providerDef.apiKey) is not exposed.
-    secret_values = sorted(
+def _secret_values(launch) -> list[str]:
+    """Secret env-var values to redact from ``--dry-run`` output, longest first so a
+    shorter secret that is a substring of a longer one cannot leave a fragment unmasked.
+
+    Used to scrub both the pretty-printed opencode config (a key baked into
+    ``OPENCODE_CONFIG_CONTENT`` — excluded here, redacted in place) and the launched
+    command (cline passes the token as a ``--key`` argv flag)."""
+    return sorted(
         (
             launch.env[name]
             for name in launch.secrets
@@ -238,6 +237,15 @@ def _print_environment(launch) -> None:
         key=len,
         reverse=True,
     )
+
+
+def _print_environment(launch) -> None:
+    """The resolved provider environment (secrets masked; opencode config pretty-printed)."""
+    if not launch.env and not launch.unset:
+        return
+    print("environment")
+    width = max((len(key) for key in launch.env), default=0)
+    secret_values = _secret_values(launch)
     for key, value in launch.env.items():
         if key == "OPENCODE_CONFIG_CONTENT":
             # The resolved opencode config — pretty-print the JSON instead of a one-liner.
@@ -251,11 +259,13 @@ def _print_environment(launch) -> None:
     print()
 
 
-def _print_command(command: list[str], extra_args: list[str]) -> None:
+def _print_command(
+    command: list[str], extra_args: list[str], secret_values: list[str] = ()
+) -> None:
     print("command")
-    print(f"  {' '.join(command)}")
+    print(f"  {_redact(' '.join(command), secret_values)}")
     if extra_args:
-        print(f"  + agedum appends: {' '.join(extra_args)}")
+        print(f"  + agedum appends: {_redact(' '.join(extra_args), secret_values)}")
 
 
 def _redact(text: str, secret_values: list[str]) -> str:

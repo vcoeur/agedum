@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode")
+HARNESSES = ("claude", "kimi", "opencode", "cline")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
@@ -175,7 +175,12 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
     # its token this way, and it harmlessly mirrors the old `export VAR=...` lines.
     env: dict[str, str] = {name: base_env[name] for name in required}
 
-    builders = {"claude": _claude_env, "kimi": _kimi_env, "opencode": _opencode_env}
+    builders = {
+        "claude": _claude_env,
+        "kimi": _kimi_env,
+        "opencode": _opencode_env,
+        "cline": _cline_env,
+    }
     extra, unset, command = builders[harness](block, secret_env, base_env)
     env.update(extra)
 
@@ -338,6 +343,39 @@ def _opencode_env(
     if document:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
     return env, [], ["opencode"]
+
+
+def _cline_env(
+    block: dict, secret_env: str, base_env: dict[str, str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    # Cline's provider/model knobs are appended CLI flags (like kimi). Unlike the other
+    # harnesses, Cline takes the token as a per-run flag (`--key`), so the secret lands in
+    # argv (visible in the process list while Cline runs) — its documented mechanism, not
+    # agedum's choice. build_launch still exports secret_env into the child env via the
+    # required-env path, so the value is in Launch.secrets and --dry-run masks it (the
+    # command print redacts secret values; Cline is the first harness to put one there).
+    if str(block.get("baseUrl") or "").strip():
+        raise ProviderError(
+            "cline has no base-URL flag; configure the endpoint in the named Cline "
+            "provider (`cline auth`) and select it with `provider`, not `baseUrl`"
+        )
+    command = ["cline"]
+    model = str(block.get("model") or "").strip()
+    if model:
+        command += ["--model", model]
+    provider = str(block.get("provider") or "").strip()
+    if provider:
+        command += ["--provider", provider]
+    effort = str(block.get("effortLevel") or "").strip()
+    if effort:
+        command += ["--thinking", effort]
+    if block.get("plan") is True:
+        command.append("--plan")
+    if secret_env:
+        token = base_env.get(secret_env, "")
+        if token:
+            command += ["--key", token]
+    return {}, [], command
 
 
 def _provider_defs(value: object) -> list[dict]:

@@ -51,8 +51,9 @@ agedum has two modes:
 > path-discovery. The project `AGENTS.md` is read natively (Cline reads it as a
 > cross-tool rules file); the global `AGENTS.md` binds to the cross-tool path
 > `~/.agents/AGENTS.md`; skills bind to `./.cline/skills/` (project) and
-> `~/.cline/skills/` (global, `$CLINE_DATA_DIR`-aware). No extra flags. Cline is
-> wrapper-mode only — it has no documented env interface for provider mode to drive.
+> `~/.cline/skills/` (global, `$CLINE_DATA_DIR`-aware). No extra flags. Cline also works
+> in **provider mode** — `agedum <provider>` maps the config to Cline's CLI flags
+> (`--model`/`--provider`/`--thinking`/`--plan`) and passes the token via `--key`.
 
 ## Usage
 

@@ -65,6 +65,7 @@ agedum maps the flag to the harness named in the config:
 | claude | positional prompt: `claude "<text>"` | `claude --print "<text>"` |
 | kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
+| cline | *(unsupported — fails loud)* | *(unsupported — fails loud)* |
 
 A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
 never guesses). Harness passthrough args are preserved, before the prompt text.
@@ -99,7 +100,7 @@ The config is the condash-style agent envelope:
 
 | Field | Meaning |
 |---|---|
-| `harness` | `claude`, `kimi`, or `opencode`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
+| `harness` | `claude`, `kimi`, `opencode`, or `cline`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
 | `secretEnv` | The env var holding the API token. For `claude` it is mapped to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; for `kimi` / `opencode` it is passed through under its own name. |
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so `kimi` / `opencode` (which read it from the environment) see it. |
 | `config` | The per-harness option block — see below. |
@@ -404,3 +405,30 @@ conflict:
 hatch you need for opencode: the modeled keys cover the common cases tersely and stay
 consistent with the other harnesses, and anything else is written in opencode's own
 format here.
+
+### cline
+
+Cline's knobs become **appended CLI flags**, like kimi:
+
+| `config` key | Appended |
+|---|---|
+| `model` | `--model <model>` |
+| `provider` | `--provider <id>` (Cline provider id; default `cline`) |
+| `effortLevel` | `--thinking <none\|low\|medium\|high\|xhigh>` |
+| `plan` | `--plan` (true) |
+| `secretEnv` value | `--key <token>` |
+
+Cline takes its API token as a per-run flag (`--key`), so — unlike every other harness —
+the secret lands in the launched **argv**, visible in the process list while Cline runs.
+That is Cline's documented mechanism, not agedum's choice; agedum masks the token in
+`--dry-run` (the `command` line shows `--key ***`), and it still rides the `requiredEnv`
+export so the `environment` block masks it too.
+
+**No `baseUrl`.** Cline has no base-URL flag, so a `baseUrl` in a cline config is a
+fail-loud `ProviderError`, not a silent no-op. Configure a custom endpoint once as a named
+Cline provider (`cline auth`, stored in `~/.cline/data/settings/providers.json`) and select
+it with `provider`.
+
+`agedum --prompt`/`--run` are **not** supported for cline — its prompt-seeding invocation
+is not yet mapped, so agedum fails loud rather than guess. A bare `agedum cline-<name>` or a
+passthrough task (`agedum cline-<name> "do X"`) works.
