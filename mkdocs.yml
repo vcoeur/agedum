@@ -88,6 +88,7 @@ nav:
     - kimi: harnesses/kimi.md
     - opencode: harnesses/opencode.md
     - Cline: harnesses/cline.md
+    - reasonix: harnesses/reasonix.md
   - CLI reference: cli.md
   - Internals: internals.md
   - Legal: legal.md

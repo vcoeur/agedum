@@ -87,6 +87,17 @@ def test_wrapper_cline_is_registered(monkeypatch):
     assert captured["command"] == ["cline", "task"]
 
 
+def test_wrapper_reasonix_is_registered(monkeypatch):
+    # reasonix is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "reasonix", "--", "reasonix", "chat"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "chat"]
+
+
 def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
     # The `--claude`/`--kimi`/`--opencode` aliases were removed; the bare flag is no
     # longer wrapper mode and is rejected as an unknown provider option.
@@ -682,4 +693,52 @@ def test_run_flag_cline_bare_positional(monkeypatch, tmp_path):
         cli.app()
     assert exc.value.code == 0
     assert captured["command"] == ["cline", "ship it"]
+    assert captured["close_stdin"] is True
+
+
+# --- reasonix provider mode ---
+
+
+def test_provider_reasonix_launches_chat(monkeypatch, tmp_path):
+    # `agedum <provider>` accepts a reasonix harness and builds its `chat` subcommand.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path,
+        "rx",
+        {"harness": "reasonix", "config": {"model": "deepseek-pro"}},
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "rx"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "chat", "--model", "deepseek-pro"]
+    assert captured["close_stdin"] is False
+
+
+def test_prompt_flag_reasonix_fails_loudly(monkeypatch, tmp_path, capsys):
+    # reasonix can't pre-seed `chat`, so --prompt is a fail-loud error (exit 1), no launch.
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    _write_provider(tmp_path, "rx", {"harness": "reasonix", "config": {"model": "x"}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "rx", "--prompt", "fix the bug"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+    assert "no interactive prompt-seeding" in capsys.readouterr().err
+
+
+def test_run_flag_reasonix_uses_run_subcommand(monkeypatch, tmp_path):
+    # --run swaps `chat` for `run`, keeps --model, text last; /dev/null stdin so it can't block.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path, "rx", {"harness": "reasonix", "config": {"model": "deepseek-pro"}}, monkeypatch
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "rx", "--run", "ship it"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "run", "--model", "deepseek-pro", "ship it"]
     assert captured["close_stdin"] is True
