@@ -123,6 +123,51 @@ masked all of it. The bind goes through the normal launcher path, so it is **ref
 git-tracked `reasonix.toml`** (an injected provider must not be committable); keep `reasonix.toml`
 gitignored in repos you drive this way.
 
+### Two-model routing + multiple providers { #two-model }
+
+reasonix can run a strong **executor** alongside a fast model for subagent skills or planning. Those
+knobs live in the generated toml's `[agent]` section (reasonix has no flags for them), and a config
+that sets any of them — or `providerDef` — also gets a generated `reasonix.toml`:
+
+| `config` key | reasonix.toml |
+|---|---|
+| `subagentModel` | `[agent] subagent_model` — default model for `runAs=subagent` skills |
+| `plannerModel` | `[agent] planner_model` — planner/executor two-model collaboration |
+| `autoPlan` | `[agent] auto_plan` (`off` \| `ask` \| `on`) |
+| `providerDef` | one or more `[[providers]]` blocks (`{id, kind, baseUrl, model, apiKeyEnv}`; `kind` default `openai`). A single object or a **list** |
+
+`model` / `subagentModel` / `plannerModel` reference providers **by name** — a built-in
+(`deepseek-pro`, `deepseek-flash`, `mimo-pro`, …), a `providerDef` `id`, or one in the user's
+`reasonix.toml`. When every referenced provider is a built-in, **omit `providerDef`** — the toml then
+carries only `default_model` + `[agent]`, no `[[providers]]`, so reasonix's built-ins survive the
+merge:
+
+```json
+{ "harness": "reasonix", "slug": "reasonix-deepseek-flash", "secretEnv": "DEEPSEEK_API_KEY",
+  "config": { "model": "deepseek-pro", "subagentModel": "deepseek-flash" } }
+```
+
+For providers reasonix doesn't ship, define them inline with `providerDef` (each `apiKeyEnv` is
+auto-added to `requiredEnv` and exported; the keys are referenced by name, never written). E.g. a Kimi
+executor (Anthropic-style endpoint) with DeepSeek-flash subagents:
+
+```json
+{ "harness": "reasonix", "slug": "reasonix-kimi-flash",
+  "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+  "config": {
+    "model": "kimi", "subagentModel": "deepseek-flash",
+    "providerDef": [
+      { "id": "kimi", "kind": "anthropic", "baseUrl": "https://api.kimi.com/coding", "model": "k2p6", "apiKeyEnv": "KIMI_API_KEY" },
+      { "id": "deepseek-flash", "kind": "openai", "baseUrl": "https://api.deepseek.com", "model": "deepseek-v4-flash", "apiKeyEnv": "DEEPSEEK_API_KEY" }
+    ] } }
+```
+
+→ `default_model = "kimi"`, `[agent] subagent_model = "deepseek-flash"`, and two `[[providers]]`
+blocks. (`kind = "anthropic"` speaks the Messages API: reasonix POSTs to `base_url + /v1/messages`, so
+a coding endpoint mounted at `…/coding/v1/messages` uses `base_url = "…/coding"`.) `baseUrl` and
+`providerDef` are mutually exclusive — `baseUrl` is the single-inline shorthand, `providerDef` the
+explicit form.
+
 **`--prompt`/`--run`.** reasonix's `run` subcommand takes the task as a positional argument and
 exits, but `chat` cannot be pre-seeded. So `agedum reasonix-<name> --run "<text>"` maps to
 `reasonix run "<text>"` (the base `chat` subcommand becomes `run`, `--model` preserved), while

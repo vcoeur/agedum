@@ -50,6 +50,10 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   never written); reasonix's merge replaces `[[providers]]` wholesale but keeps the user
   config's scalars + plugins, so the custom provider wins without masking other settings. Here
   `model` is the upstream model id; agedum names the provider `agedum` and runs `--model agedum`.
+  The same generated-toml path also carries **two-model routing** — `subagentModel` /
+  `plannerModel` / `autoPlan` → an `[agent]` section — and a **`providerDef`** list (one or more
+  `{id, kind, baseUrl, model, apiKeyEnv}` → `[[providers]]` blocks, each `apiKeyEnv` auto-required);
+  when every referenced model is a built-in, no `[[providers]]` is emitted so the built-ins survive.
   `agedum --run` maps to `reasonix run "<text>"`; `--prompt` is a fail-loud `ProviderError`
   (`chat` can't be pre-seeded).
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
