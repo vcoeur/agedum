@@ -147,6 +147,6 @@ use distinct codes:
 
 ## Behaviour when no source is found
 
-In wrapper mode, if neither the project nor the global [scope](scopes.md) has any
+In wrapper mode, if neither the project nor the global [scope](source-shape.md#scopes) has any
 `AGENTS.md` or skills, agedum prints a warning to stderr and still runs your command —
 just with nothing injected. It never blocks the launch on an empty source.

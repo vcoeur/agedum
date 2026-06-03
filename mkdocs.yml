@@ -79,8 +79,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Install: install.md
-  - Source shape: source-shape.md
-  - Scopes: scopes.md
+  - Source & scopes: source-shape.md
   - Wrapper mode: wrapper.md
   - Provider mode: provider.md
   - Harnesses:

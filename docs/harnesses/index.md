@@ -22,8 +22,8 @@ A **harness** is an agent CLI agedum drives. Each has its own page documenting t
 
 Skills, in every harness, are binds at the harness's own skills dir, compiled with the
 matching `SKILL.<harness>.md` overlay. The shared mechanics — scopes, overlays, the
-namespace launch — live in [Wrapper mode](../wrapper.md), [Scopes](../scopes.md), and
-[Source shape](../source-shape.md).
+namespace launch — live in [Wrapper mode](../wrapper.md) and
+[Source & scopes](../source-shape.md).
 
 ## Adding a harness
 

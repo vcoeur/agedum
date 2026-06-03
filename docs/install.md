@@ -46,7 +46,7 @@ agedum needs no configuration file. On launch it looks for an agent-neutral
   `~/.agents/skills/`.
 
 If neither scope has any `AGENTS.md` or skills, agedum prints a warning and runs your
-command with nothing injected. See [Scopes](scopes.md) for the full resolution rules.
+command with nothing injected. See [Source & scopes](source-shape.md#scopes) for the full resolution rules.
 
 !!! warning "Injected paths must be gitignored"
     The mount namespace shares your **real** `.git`. agedum refuses to overlay a

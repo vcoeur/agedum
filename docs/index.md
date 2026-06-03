@@ -48,8 +48,8 @@ copy-pasting into each one's bespoke layout. `agedum` is the translation layer:
 - **Author once.** `AGENTS.md` + `.agents/skills/` is the [emerging cross-agent
   convention](https://agents.md). Keep your sources in it; let agedum do the per-harness
   rendering.
-- **Two scopes, kept distinct.** A [global](scopes.md) source (`~/.config/agents/`)
-  travels with you; a [project](scopes.md) source lives in the repo. agedum lands each
+- **Two scopes, kept distinct.** A [global](source-shape.md#scopes) source (`~/.config/agents/`)
+  travels with you; a [project](source-shape.md#scopes) source lives in the repo. agedum lands each
   at its own native location so the harness still sees them as user-scope vs
   project-scope — they are never silently merged.
 - **No footprint.** The compiled `CLAUDE.md` / skills exist only inside the launched
@@ -97,8 +97,7 @@ launch.
 ## Learn more
 
 - [Install](install.md) — install, prerequisites, dev mode
-- [Source shape](source-shape.md) — the structure of `AGENTS.md` and `.agents/skills/`
-- [Scopes](scopes.md) — project vs global (user) scope, and where each lands
+- [Source & scopes](source-shape.md) — the `AGENTS.md` + `.agents/skills/` layout, and the project vs global scopes
 - [Wrapper mode](wrapper.md) — run a command in the injected context; how each harness resolves
 - [Provider mode](provider.md) — launch a harness from a provider config JSON
 - [Harnesses](harnesses/index.md) — one page per harness: wrapper resolution + provider config

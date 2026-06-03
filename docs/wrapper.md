@@ -41,7 +41,7 @@ So the flag chooses what context the process sees, and everything after `--` is 
 ## How a harness resolves the source
 
 Each `--wrapper <harness>` selects a **compiler**. A compiler renders the project and
-global [scopes](scopes.md) into the harness's native layout and produces a *plan*: a set
+global [scopes](source-shape.md#scopes) into the harness's native layout and produces a *plan*: a set
 of `(compiled-file → mount-target)` binds, plus any extra arguments to append to your
 command. The [launcher](internals.md) injects the binds into the namespace and runs the
 command. Every harness disposes of each source in one of three ways:
@@ -56,7 +56,7 @@ Two rules hold for every harness:
 
 - **Each scope lands at its own native location** — the project and global sources are
   never concatenated into one file. The harness reads both and applies its own precedence,
-  exactly as if you had authored them by hand. See [Scopes](scopes.md).
+  exactly as if you had authored them by hand. See [Scopes](source-shape.md#scopes).
 - **Per-harness overlays are applied** — for skills, the base `SKILL.md` is merged with an
   optional [`SKILL.<harness>.md`](source-shape.md#skillharnessmd-per-harness-overlay); for
   the **global** `AGENTS.md`, an optional sibling
@@ -94,6 +94,6 @@ git-tracked path. Wrapper mode is **Linux-only** and needs `bwrap`
 
 ## Behaviour when no source is found
 
-If neither the project nor the global [scope](scopes.md) has any `AGENTS.md` or skills,
+If neither the project nor the global [scope](source-shape.md#scopes) has any `AGENTS.md` or skills,
 agedum prints a warning to stderr and still runs your command — just with nothing
 injected. It never blocks the launch on an empty source.
