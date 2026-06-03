@@ -83,8 +83,13 @@ agedum --wrapper cline -- cline task "review this"  # drive Cline with the same 
 agedum --wrapper reasonix -- reasonix chat          # drive reasonix with the same source
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
+agedum --providers                                # list the provider configs (name, harness, model)
 agedum --version
 ```
+
+`agedum --providers` lists every `*.json` config in `$AGENTS_PROVIDERS_DIR` (default
+`~/.config/agents/providers`) as `name  harness  model` — the names you pass to
+`agedum <name>`.
 
 `agedum <name>` is the normal way to launch. Wrapper mode is the lower-level entry it
 uses: everything after `--` is the command, run verbatim, and `--wrapper <harness>`

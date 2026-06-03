@@ -106,6 +106,54 @@ def load_config(path: Path) -> dict:
     return config
 
 
+@dataclass(frozen=True)
+class ProviderSummary:
+    """One row of ``agedum --providers``: a provider config reduced to its listing fields.
+
+    ``name`` is the bare name passed to ``agedum <name>`` (the file stem). ``harness`` and
+    ``model`` are parsed from the config (``None`` when absent). ``error`` is set instead
+    when the file could not be read or parsed, so a single bad config never aborts the
+    listing.
+    """
+
+    name: str
+    path: Path
+    harness: str | None = None
+    model: str | None = None
+    error: str | None = None
+
+
+def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
+    """Summarise every ``*.json`` provider config in ``directory`` (default:
+    :func:`providers_dir`), sorted by name.
+
+    Each entry carries the launch ``name`` plus the parsed ``harness`` / ``model``; an
+    unreadable or invalid config yields a summary with ``error`` set and the parsed fields
+    ``None`` rather than raising. A missing directory yields an empty list.
+    """
+    target = directory or providers_dir()
+    summaries: list[ProviderSummary] = []
+    for path in sorted(target.glob("*.json")):
+        name = path.stem
+        try:
+            config = load_config(path)
+        except ProviderError as exc:
+            summaries.append(ProviderSummary(name, path, error=str(exc)))
+            continue
+        harness = config.get("harness")
+        block = config.get("config")
+        model = str(block.get("model") or "").strip() if isinstance(block, dict) else ""
+        summaries.append(
+            ProviderSummary(
+                name,
+                path,
+                harness=harness if isinstance(harness, str) else None,
+                model=model or None,
+            )
+        )
+    return summaries
+
+
 def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a simple ``KEY=VALUE`` ``.env`` (no variable expansion).
 

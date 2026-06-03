@@ -41,7 +41,8 @@ The single positional argument is **a name or a path**:
 - **path** — it contains `/` or ends in `.json`. Absolute as-is, otherwise relative to the
   current directory.
 - **name** — anything else. Resolved to
-  `${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json`.
+  `${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json`. Run
+  [`agedum --providers`](cli.md#listing-providers) to list the names available there.
 
 Any token after the provider that isn't an agedum flag is passed to the harness verbatim
 (`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env` and `--dry-run` are
