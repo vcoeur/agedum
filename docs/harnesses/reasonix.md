@@ -46,7 +46,10 @@ agedum --wrapper reasonix --dry-run -- reasonix    # show what would be injected
 ## Provider config { #provider-config }
 
 reasonix is **DeepSeek-native**: its provider/model selection is a flag on the `chat`/`run`
-subcommand, and the API token reaches it through the selected provider's `api_key_env`:
+subcommand, and the API token reaches it through the selected provider's `api_key_env`. There are
+two shapes, depending on whether you target a provider reasonix already knows or a custom endpoint.
+
+### Built-in / pre-configured provider (no `baseUrl`)
 
 ```json
 {
@@ -61,18 +64,64 @@ subcommand, and the API token reaches it through the selected provider's `api_ke
 
 | `config` key | Effect |
 |---|---|
-| `model` | `--model <name>` — selects a reasonix provider by name (a built-in like `deepseek-flash` / `deepseek-pro` / `mimo-pro`, or one configured in `reasonix.toml`) |
+| `model` | `--model <name>` — selects a reasonix provider **by name** (a built-in like `deepseek-flash` / `deepseek-pro` / `mimo-pro`, or one configured in `reasonix.toml`) |
 | `secretEnv` value | exported into the child (`requiredEnv`); reasonix reads it via the selected provider's `api_key_env` |
 
-The config above launches `reasonix chat --model deepseek-pro` (interactive) with
-`DEEPSEEK_API_KEY` in the environment. A config with no `model` runs bare `reasonix chat`, using
-the config's `default_model`. The token is masked in `--dry-run`.
+This launches `reasonix chat --model deepseek-pro` (interactive) with `DEEPSEEK_API_KEY` in the
+environment. A config with no `model` runs bare `reasonix chat`, using the config's
+`default_model`. The token is masked in `--dry-run`.
 
-**No `baseUrl`.** reasonix has no base-URL flag or environment variable — a custom endpoint is a
-`[[providers]]` block in `reasonix.toml` / `~/.config/reasonix/config.toml`, selected by name. So
-a `baseUrl` in a reasonix config is a fail-loud `ProviderError`, not a silent no-op; `model` must
-name a provider reasonix already knows (a built-in, or one you add to its TOML, whose
-`api_key_env` your `secretEnv` supplies).
+### Custom endpoint (`baseUrl`) { #custom-endpoint }
+
+reasonix has no base-URL flag or environment variable — a custom endpoint is a `[[providers]]`
+block in a `reasonix.toml`. So when a config sets `baseUrl`, agedum **generates a minimal
+`reasonix.toml`** and injects it at the project root (reasonix's highest-priority TOML source):
+
+```json
+{
+  "harness": "reasonix",
+  "slug": "reasonix-openrouter",
+  "secretEnv": "OPENROUTER_API_KEY",
+  "config": {
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "model": "deepseek/deepseek-chat",
+    "kind": "openai"
+  }
+}
+```
+
+| `config` key | Effect |
+|---|---|
+| `baseUrl` | the endpoint → the provider's `base_url`; its presence switches on toml generation |
+| `model` | the **upstream model id** at that endpoint → the provider's `model` (here it is *not* a provider name). Required when `baseUrl` is set |
+| `kind` | the reasonix provider kind → `kind` (default `openai`) |
+| `secretEnv` | the provider's `api_key_env` (omitted for a keyless endpoint) |
+
+The generated file (shown by `--dry-run`) is:
+
+```toml
+default_model = "agedum"
+
+[[providers]]
+name = "agedum"
+kind = "openai"
+base_url = "https://openrouter.ai/api/v1"
+model = "deepseek/deepseek-chat"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+agedum names the provider `agedum` and selects it with `--model agedum`, so the launch is
+`reasonix chat --model agedum`. **The key never lands on disk** — the toml references it by
+env-var *name* (`api_key_env`); reasonix reads the value from the exported environment at runtime.
+
+**Why the project root, and what it preserves.** reasonix merges config sources defaults →
+`~/.config/reasonix/config.toml` → `./reasonix.toml`. `[[providers]]` is replaced wholesale by the
+highest-priority source, but **scalars (theme, language, …) and `[[plugins]]`/MCP from the user
+config survive the merge**. Binding at `./reasonix.toml` therefore swaps in agedum's provider for
+the session while leaving the user's other settings intact — binding the *user* config would have
+masked all of it. The bind goes through the normal launcher path, so it is **refused over a
+git-tracked `reasonix.toml`** (an injected provider must not be committable); keep `reasonix.toml`
+gitignored in repos you drive this way.
 
 **`--prompt`/`--run`.** reasonix's `run` subcommand takes the task as a positional argument and
 exits, but `chat` cannot be pre-seeded. So `agedum reasonix-<name> --run "<text>"` maps to
