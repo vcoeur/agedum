@@ -150,7 +150,7 @@ project scope · ~/src/foo
 
 global scope
   ~/.config/agents/AGENTS.md   → kimi agent file (passed via --agent-file)
-  ~/.agents/skills/            → ~/.kimi/skills/
+  ~/.config/agents/skills/     → ~/.kimi/skills/
 
 command
   kimi
@@ -173,7 +173,7 @@ project scope · ~
 
 global scope
   ~/.config/agents/AGENTS.md   → ~/.config/opencode/AGENTS.md
-  ~/.agents/skills/            → ~/.config/opencode/skills/
+  ~/.config/agents/skills/     → ~/.config/opencode/skills/
 ```
 
 This is the same view [wrapper mode](wrapper.md#dry-run) shows — how

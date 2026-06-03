@@ -364,7 +364,7 @@ def _print_plan_sections(mode: str) -> list[str]:
         global_,
         plan,
         dir_targets,
-        empty="(no ~/.config/agents/AGENTS.md or ~/.agents/skills)",
+        empty="(no ~/.config/agents/AGENTS.md or ~/.config/agents/skills)",
         display=_abs_display,
     )
     return plan.extra_args

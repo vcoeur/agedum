@@ -129,7 +129,7 @@ given repo. agedum preserves that distinction rather than flattening it.
 | Scope | Instructions source | Skills source |
 |---|---|---|
 | **Project** | `<root>/AGENTS.md` | `<root>/.agents/skills/` |
-| **Global** (user) | `~/.config/agents/AGENTS.md` | `~/.agents/skills/` |
+| **Global** (user) | `~/.config/agents/AGENTS.md` | `~/.config/agents/skills/` |
 
 ### Locating the source { #locating-the-source }
 
@@ -138,9 +138,9 @@ agedum does not require you to point at the source — it discovers it:
 - **Project root** is the nearest ancestor of the current directory (including it) that
   contains `AGENTS.md`, a `.agents/` directory, or `.git`. Within that root, `AGENTS.md`
   and `.agents/skills/` are picked up if present.
-- **Global source** is `~/.config/agents/AGENTS.md` (honouring `$XDG_CONFIG_HOME` — if set,
-  agedum reads `$XDG_CONFIG_HOME/agents/AGENTS.md`) for instructions, and `~/.agents/skills/`
-  (always) for skills.
+- **Global source** is `~/.config/agents/AGENTS.md` for instructions and
+  `~/.config/agents/skills/` for skills — both honouring `$XDG_CONFIG_HOME` (if set, agedum
+  reads `$XDG_CONFIG_HOME/agents/AGENTS.md` and `$XDG_CONFIG_HOME/agents/skills/`).
 
 ### Where each scope lands
 
@@ -159,7 +159,7 @@ flowchart LR
   pAg["project AGENTS.md"] --> pCl["./CLAUDE.md"]
   pSk["project .agents/skills/"] --> pClSk["./.claude/skills/"]
   gAg["~/.config/agents/AGENTS.md"] --> gCl["~/.claude/CLAUDE.md"]
-  gSk["~/.agents/skills/"] --> gClSk["~/.claude/skills/"]
+  gSk["~/.config/agents/skills/"] --> gClSk["~/.claude/skills/"]
 ```
 
 The targets differ per harness — kimi reads the project `AGENTS.md` natively and injects
@@ -186,9 +186,9 @@ You do not need both scopes. Common setups:
 
 - **Project only** — a repo with its own `AGENTS.md` + `.agents/skills/`, no global
   source. Useful for shipping agent context with the code.
-- **Global only** — personal instructions and skills under `~/.config/agents/` +
-  `~/.agents/skills/` that you want in every project, run from a directory with no project
-  source.
+- **Global only** — personal instructions and skills both under `~/.config/agents/`
+  (`AGENTS.md` + `skills/`) that you want in every project, run from a directory with no
+  project source.
 - **Both** — the global layer travels with you; the project layer adds repo-specific
   context on top. The harness sees them as user-scope and project-scope respectively.
 

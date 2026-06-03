@@ -29,15 +29,27 @@ def test_missing_source_resolves_to_none(tmp_path):
     assert src.skills_dir is None
 
 
-def test_load_global_source_uses_config_and_home(tmp_path, monkeypatch):
+def test_load_global_source_uses_xdg_config(tmp_path, monkeypatch):
     home = tmp_path / "home"
     xdg = tmp_path / "xdg"
     (xdg / "agents").mkdir(parents=True)
     (xdg / "agents" / "AGENTS.md").write_text("global instructions\n")
-    (home / ".agents" / "skills" / "g").mkdir(parents=True)
+    (xdg / "agents" / "skills" / "g").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
     src = load_global_source()
     assert src.agents_md == xdg / "agents" / "AGENTS.md"
-    assert src.skills_dir == home / ".agents" / "skills"
+    assert src.skills_dir == xdg / "agents" / "skills"
+
+
+def test_load_global_source_defaults_to_config_agents(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".config" / "agents" / "skills" / "g").mkdir(parents=True)
+    (home / ".config" / "agents" / "AGENTS.md").write_text("global instructions\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    src = load_global_source()
+    assert src.agents_md == home / ".config" / "agents" / "AGENTS.md"
+    assert src.skills_dir == home / ".config" / "agents" / "skills"

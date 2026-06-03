@@ -18,7 +18,7 @@ harness: pure binds, each [scope](../source-shape.md#scopes) at its own native l
 | project `AGENTS.md` | `<root>/CLAUDE.md` |
 | project `.agents/skills/` | `<root>/.claude/skills/` |
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.claude.md` overlay) | `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`) |
-| global `~/.agents/skills/` | `$CLAUDE_CONFIG_DIR/skills/` (default `~/.claude/skills/`) |
+| global `~/.config/agents/skills/` | `$CLAUDE_CONFIG_DIR/skills/` (default `~/.claude/skills/`) |
 
 - Each scope lands at **its own** location — never concatenated. The project `CLAUDE.md`
   carries only project instructions; the user `CLAUDE.md` only the global ones. Claude

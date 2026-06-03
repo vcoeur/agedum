@@ -19,7 +19,7 @@ instructions stay in place.
 | project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
 | project `.agents/skills/` | `<root>/.reasonix/skills/` |
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.reasonix.md` overlay) | `~/.config/reasonix/AGENTS.md` |
-| global `~/.agents/skills/` | `~/.reasonix/skills/` |
+| global `~/.config/agents/skills/` | `~/.reasonix/skills/` |
 
 - **Project instructions** — reasonix discovers memory docs (`REASONIX.md` / `AGENTS.md` /
   `CLAUDE.md`) up the project tree and folds them into its cache-stable system prompt. The

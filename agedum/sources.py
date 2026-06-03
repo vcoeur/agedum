@@ -36,10 +36,11 @@ def find_project_root(start: Path | None = None) -> Path:
 def load_source(root: Path | None = None) -> Source:
     """Resolve the project root and the agent-neutral source files under it."""
     root = find_project_root(root)
-    # $HOME is where the *global* source lives (``~/.agents/skills``, ``~/.config/agents``),
-    # so ``find_project_root`` always matches it via ``.agents`` — but home is not a project.
-    # Treating it as one would re-inject the global skills as project scope (a duplicate
-    # bind). Yield an empty project source so only the global scope applies there.
+    # $HOME can match ``find_project_root`` — it may hold ``~/.agents/`` (cline's global
+    # ``AGENTS.md`` sink, or a legacy pre-XDG ``~/.agents/skills``) or be a git repo — but
+    # home is never a project. Treating it as one would re-inject home-level files as
+    # project scope (a duplicate bind). Yield an empty project source so only the global
+    # scope (``~/.config/agents``) applies there.
     if root == Path.home().resolve():
         return Source(root=root, agents_md=None, skills_dir=None)
     agents = root / AGENTS_MD
@@ -52,13 +53,14 @@ def load_source(root: Path | None = None) -> Source:
 
 
 def load_global_source() -> Source:
-    """The global-scope source: `~/.config/agents/AGENTS.md` (XDG-aware) for
-    instructions and `~/.agents/skills/` for skills. `root` is the home dir and is
-    unused for mounting — global content is folded into the project injection."""
+    """The global-scope source: `~/.config/agents/AGENTS.md` for instructions and
+    `~/.config/agents/skills/` for skills (both XDG-aware, honouring `$XDG_CONFIG_HOME`).
+    `root` is the home dir and is unused for mounting — global content is folded into the
+    project injection."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
     config_agents = (Path(xdg) if xdg else Path.home() / ".config") / "agents"
     agents = config_agents / AGENTS_MD
-    skills = Path.home() / ".agents" / "skills"
+    skills = config_agents / "skills"
     return Source(
         root=Path.home(),
         agents_md=agents if agents.is_file() else None,

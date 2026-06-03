@@ -47,7 +47,7 @@ This coexists with native discovery: the default agent's system prompt fills
 
 | Source | Injected at |
 |---|---|
-| global `~/.agents/skills/` | `~/.kimi/skills/` |
+| global `~/.config/agents/skills/` | `~/.kimi/skills/` |
 | project `.agents/skills/` | `<root>/.kimi/skills/` |
 
 - Skills use the `SKILL.kimi.md` overlay where present; assets are copied verbatim.

@@ -17,7 +17,7 @@ instructions stay in place.
 | project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
 | project `.agents/skills/` | `<root>/.cline/skills/` |
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.cline.md` overlay) | `~/.agents/AGENTS.md` |
-| global `~/.agents/skills/` | `$CLINE_DATA_DIR/skills/` (default `~/.cline/skills/`) |
+| global `~/.config/agents/skills/` | `$CLINE_DATA_DIR/skills/` (default `~/.cline/skills/`) |
 
 - **Project instructions** — Cline reads the project-root `AGENTS.md` as a cross-tool rules
   file. That is the agent-neutral source, already in place, so **agedum injects nothing**

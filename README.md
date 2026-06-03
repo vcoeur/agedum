@@ -29,7 +29,7 @@ agedum has two modes:
 
 > **Status:** Claude harness, **project + global scope**, implemented. Each scope
 > lands at its *own* Claude location — project → `./CLAUDE.md` + `./.claude/skills/`,
-> global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) → `~/.claude/CLAUDE.md`
+> global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) → `~/.claude/CLAUDE.md`
 > + `~/.claude/skills/` (honours `$CLAUDE_CONFIG_DIR`). They're never merged; Claude
 > reads both. Only those two `~/.claude` paths are overlaid for the child — your
 > `~/.claude.json` auth and other settings are untouched.
