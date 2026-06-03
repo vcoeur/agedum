@@ -77,6 +77,16 @@ Cline provider (`cline auth`, stored in `~/.cline/data/settings/providers.json`)
 it with `provider`. So the provider `id` in the config must match a provider Cline already
 knows — a built-in (e.g. `deepseek`) or one you set up via `cline auth`.
 
+**No subagent-model tiering.** Cline runs a single model per session, so there is no
+agedum equivalent of opencode's `agentOptions[]` or reasonix's `subagentModel`, and a
+tiered `cline-*-flash` (strong main model + cheap-flash subagents) config is not
+expressible. Cline's subagents are fixed read-only *research* agents — their tools are
+limited to `read_file`, `list_files`, `search_files`, `list_code_definition_names`,
+read-only `execute_command`, and `use_skill`; they can't write, browse, reach MCP, or
+nest, and they inherit the session model. `cline --help` (v3.0.15) confirms a single
+`-m/--model` with no `--subagent-model`, so the only meaningful flash config is the flat
+`cline-flash` (flash as the whole-session `model`).
+
 **`--prompt`/`--run`.** Cline's prompt is a positional argument; `--tui` opens the
 interactive TUI seeded with it, and a bare positional runs the task once in act mode and
 exits. So `agedum cline-<name> --prompt "<text>"` maps to `cline --tui "<text>"` and
