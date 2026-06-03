@@ -213,6 +213,9 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
       makes that invocation non-interactive (``kimi --prompt "<text>" [--print]``).
     * **opencode** — top-level ``--prompt`` seeds the TUI; the ``run`` subcommand runs and
       exits (``opencode --prompt "<text>"`` vs ``opencode run "<text>"``).
+    * **cline** — a positional prompt is the seed either way; ``--tui`` is what opens the
+      interactive TUI (seeded via Cline's ``initialPrompt``), while a bare positional runs
+      once in act mode and exits (``cline --tui "<text>"`` vs ``cline "<text>"``).
 
     A harness with no known prompt-seeding convention raises :class:`ProviderError` —
     agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
@@ -231,6 +234,12 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
             return [binary, *base_flags, *rest, "--prompt", text]
         # The `run` subcommand must lead, before any passthrough args or the message.
         return [binary, "run", *base_flags, *rest, text]
+    if harness == "cline":
+        # The prompt is Cline's positional argument; --tui flips it to the interactive TUI
+        # (seeded), its absence runs the task once and exits. Text stays last so commander
+        # reads it as the positional.
+        mode_flags = ["--tui"] if interactive else []
+        return [binary, *base_flags, *rest, *mode_flags, text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"

@@ -657,3 +657,29 @@ def test_provider_cline_dry_run_masks_key(monkeypatch, tmp_path, capsys):
     assert "cline" in out and "--key" in out  # the command line is shown
     assert "sk-cline-supersecret" not in out  # token masked in the argv
     assert "***" in out
+
+
+def test_prompt_flag_cline_uses_tui(monkeypatch, tmp_path):
+    # --prompt seeds cline's TUI: --tui before the positional, stdin kept for the session.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "cline", lambda project, global_, dest: cli.Plan())
+    _write_provider(tmp_path, "cl", {"harness": "cline", "config": {"model": "x"}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "cl", "--prompt", "fix the bug"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["cline", "--model", "x", "--tui", "fix the bug"]
+    assert captured["close_stdin"] is False
+
+
+def test_run_flag_cline_bare_positional(monkeypatch, tmp_path):
+    # --run is cline's bare positional (act mode, runs once); /dev/null stdin so it can't block.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "cline", lambda project, global_, dest: cli.Plan())
+    _write_provider(tmp_path, "cl", {"harness": "cline", "config": {}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "cl", "--run", "ship it"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["cline", "ship it"]
+    assert captured["close_stdin"] is True
