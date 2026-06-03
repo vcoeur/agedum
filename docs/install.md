@@ -42,8 +42,8 @@ agedum needs no configuration file. On launch it looks for an agent-neutral
 
 - **Project** — the nearest ancestor of the current directory holding `AGENTS.md`,
   `.agents/`, or `.git`.
-- **Global** — `~/.config/agents/AGENTS.md` (honours `$XDG_CONFIG_HOME`) and
-  `~/.agents/skills/`.
+- **Global** — `~/.config/agents/AGENTS.md` and `~/.config/agents/skills/` (both honour
+  `$XDG_CONFIG_HOME`).
 
 If neither scope has any `AGENTS.md` or skills, agedum prints a warning and runs your
 command with nothing injected. See [Source & scopes](source-shape.md#scopes) for the full resolution rules.

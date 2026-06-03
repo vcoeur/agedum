@@ -17,7 +17,7 @@ difference is that the project instructions are read in place rather than reloca
 | project `AGENTS.md` | *(not injected — read natively at `./AGENTS.md`)* |
 | project `.agents/skills/` | `<root>/.opencode/skills/` |
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.opencode.md` overlay) | `$XDG_CONFIG_HOME/opencode/AGENTS.md` (default `~/.config/opencode/AGENTS.md`) |
-| global `~/.agents/skills/` | `$XDG_CONFIG_HOME/opencode/skills/` (default `~/.config/opencode/skills/`) |
+| global `~/.config/agents/skills/` | `$XDG_CONFIG_HOME/opencode/skills/` (default `~/.config/opencode/skills/`) |
 
 - **Project instructions** — opencode reads the root `AGENTS.md` (traversing up from the
   work dir) as its project rules file. That is exactly the agent-neutral source, already in
@@ -29,8 +29,9 @@ difference is that the project instructions are read in place rather than reloca
   [overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope).
 - **Skills** — compiled with the `SKILL.opencode.md` overlay and bound to
   `./.opencode/skills/` (project) and `~/.config/opencode/skills/` (global). opencode
-  searches those directories **before** `.agents/skills/` / `~/.agents/skills/` (which it
-  would otherwise read directly), so the overlaid copy wins over the raw source.
+  searches those directories **before** the project's raw `.agents/skills/` (which it would
+  otherwise read directly), so the overlaid copy wins. The global skills source is
+  `~/.config/agents/skills/`, delivered only via the bind above.
 - `extra_args`: **none** — opencode discovers everything from disk, like Claude.
 
 ```bash

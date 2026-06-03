@@ -6,7 +6,7 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
 **Cline** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
-  `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
+  `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
   `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
   (only those two `~/.claude` paths overlaid; `~/.claude.json` auth untouched).
 - **kimi** — project `AGENTS.md` is read natively (kimi merges `AGENTS.md` from the
@@ -20,8 +20,8 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   `./AGENTS.md`, so agedum leaves it in place. Global `AGENTS.md` → `<config>/AGENTS.md`;
   skills → `./.opencode/skills/` (project) + `<config>/skills/` (global), where
   `<config>` is `$XDG_CONFIG_HOME/opencode` (default `~/.config/opencode`). opencode
-  searches those skills dirs before `.agents/skills/` / `~/.agents/skills/`, so the
-  overlaid (`SKILL.opencode.md`) copy wins over the raw source. Matches condash's
+  searches those skills dirs before the project's raw `.agents/skills/`, so the
+  overlaid (`SKILL.opencode.md`) copy wins. Matches condash's
   opencode layout; uniform with the Claude harness, no `extra_args`.
 - **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
   is read natively at `./AGENTS.md` (Cline reads it as a cross-tool rules file), so agedum

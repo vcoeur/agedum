@@ -62,9 +62,10 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
 
 
 def test_load_source_excludes_home_as_project_root(tmp_path, monkeypatch):
-    # $HOME holds the *global* source (~/.agents/skills), so find_project_root always
-    # matches it via .agents — but home is not a project. load_source must yield an empty
-    # project source there, or the global skills get re-injected as project scope.
+    # $HOME can match find_project_root — it may hold ~/.agents/ (cline's global AGENTS.md
+    # sink, or a legacy pre-XDG ~/.agents/skills) — but home is not a project. load_source
+    # must yield an empty project source there, or home-level files get re-injected as
+    # project scope.
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     (tmp_path / ".agents" / "skills" / "demo").mkdir(parents=True)
     (tmp_path / "AGENTS.md").write_text("# would-be project instructions\n")
@@ -94,7 +95,7 @@ def test_global_scope_lands_at_claude_config_dir_separately(tmp_path, monkeypatc
     gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)
     (gconf / "AGENTS.md").write_text("GLOBAL-INSTRUCTIONS\n")
-    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
     (gskills / "gskill").mkdir(parents=True)
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
 
@@ -133,7 +134,7 @@ def test_compile_kimi(tmp_path, monkeypatch):
     gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)
     (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
-    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
     (gskills / "gskill").mkdir(parents=True)
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
 
@@ -199,7 +200,7 @@ def test_compile_opencode(tmp_path, monkeypatch):
     gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)
     (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
-    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
     (gskills / "gskill").mkdir(parents=True)
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
 
@@ -345,7 +346,7 @@ def test_compile_cline(tmp_path, monkeypatch):
     gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)
     (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
-    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
     (gskills / "gskill").mkdir(parents=True)
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
 

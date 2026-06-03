@@ -6,7 +6,7 @@ location — they are never merged:
 * **project** ``AGENTS.md`` → ``./CLAUDE.md``;
   ``.agents/skills/<n>/`` → ``./.claude/skills/<n>/``
 * **global**  ``~/.config/agents/AGENTS.md`` → ``~/.claude/CLAUDE.md``;
-  ``~/.agents/skills/<n>/`` → ``~/.claude/skills/<n>/``
+  ``~/.config/agents/skills/<n>/`` → ``~/.claude/skills/<n>/``
 
 Claude reads both scopes natively (user-scope `~/.claude/` + project-scope `./`), so
 keeping them separate preserves the scope distinction. The compiled tree lives in a
@@ -419,10 +419,11 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an
       optional ``AGENTS.opencode.md`` overlay) → ``<config>/AGENTS.md``, which opencode
       reads as its user-scope rules file;
-    * **project skills** → ``./.opencode/skills/``; **global skills** →
-      ``<config>/skills/``. opencode searches these *before* ``.agents/skills/`` /
-      ``~/.agents/skills/``, so the overlaid copy (``SKILL.opencode.md`` merged in)
-      wins over the raw source it would otherwise discover there.
+    * **project skills** → ``./.opencode/skills/``; **global skills**
+      (``~/.config/agents/skills/``) → ``<config>/skills/``. opencode searches its config
+      dir and ``./.opencode/skills/`` *before* the raw ``.agents/skills/`` /
+      ``~/.agents/skills/`` it would otherwise discover, so the overlaid copy
+      (``SKILL.opencode.md`` merged in) wins over any raw source.
 
     ``<config>`` is :func:`opencode_config_dir`. No ``extra_args`` — opencode discovers
     everything from disk.
