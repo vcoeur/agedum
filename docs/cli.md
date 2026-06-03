@@ -65,6 +65,7 @@ agedum translates the flag to each harness's native invocation (verify it with `
 | claude | `claude "<text>"` | `claude --print "<text>"` |
 | kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
+| cline | `cline --tui "<text>"` | `cline "<text>"` |
 
 If a harness has no known prompt-seeding convention, agedum **fails loudly** with a clear
 error rather than launching the wrong way. Any harness passthrough args you add are kept,

@@ -77,6 +77,8 @@ Cline provider (`cline auth`, stored in `~/.cline/data/settings/providers.json`)
 it with `provider`. So the provider `id` in the config must match a provider Cline already
 knows — a built-in (e.g. `deepseek`) or one you set up via `cline auth`.
 
-**`--prompt`/`--run` are not supported for cline.** Its prompt-seeding invocation is not
-yet mapped, so agedum fails loud rather than guess. A bare `agedum cline-<name>` or a
-passthrough task (`agedum cline-<name> "do X"`) works.
+**`--prompt`/`--run`.** Cline's prompt is a positional argument; `--tui` opens the
+interactive TUI seeded with it, and a bare positional runs the task once in act mode and
+exits. So `agedum cline-<name> --prompt "<text>"` maps to `cline --tui "<text>"` and
+`--run "<text>"` maps to `cline "<text>"` — see the
+[prompt-seeding table](../provider.md#prompt-seeding).

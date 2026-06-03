@@ -634,8 +634,16 @@ def test_with_prompt_unknown_harness_fails_loudly():
         with_prompt(_launch("mystery", ["mystery"]), [], "hi", interactive=True)
 
 
-def test_with_prompt_cline_fails_loudly():
-    # cline is a provider harness, but its prompt-seeding invocation is not yet mapped, so
-    # agedum --prompt/--run fails loudly for it rather than guessing.
-    with pytest.raises(ProviderError, match="no known prompt-seeding flags"):
-        with_prompt(_launch("cline", ["cline"]), [], "hi", interactive=False)
+def test_with_prompt_cline_interactive_uses_tui_flag():
+    # cline: --tui opens the interactive TUI seeded with the positional prompt; base flags
+    # from _cline_env (here --model) are preserved and the seed text stays last.
+    cmd = with_prompt(_launch("cline", ["cline", "--model", "x"]), [], "hi", interactive=True)
+    assert cmd == ["cline", "--model", "x", "--tui", "hi"]
+
+
+def test_with_prompt_cline_run_uses_bare_positional():
+    # cline: a bare positional prompt runs once in act mode and exits (no --tui).
+    assert with_prompt(_launch("cline", ["cline"]), [], "hi", interactive=False) == [
+        "cline",
+        "hi",
+    ]

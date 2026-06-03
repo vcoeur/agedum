@@ -104,7 +104,11 @@ agedum maps the flag to the harness named in the config:
 | claude | positional prompt: `claude "<text>"` | `claude --print "<text>"` |
 | kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
-| cline | *(unsupported — fails loud)* | *(unsupported — fails loud)* |
+| cline | `cline --tui "<text>"` | `cline "<text>"` |
+
+For cline the prompt is a positional argument either way; `--tui` is what opens the
+interactive TUI (seeded with the prompt), and a bare positional runs the task once in act
+mode and exits.
 
 A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
 never guesses). Harness passthrough args are preserved, before the prompt text.

@@ -32,7 +32,8 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   config to Cline CLI flags (`--model` / `--provider` / `--thinking` / `--plan`) and passes
   the token via `--key` — so the secret lands in argv (Cline's documented mechanism), which
   the dry-run masks. `baseUrl` is rejected (Cline has no base-URL flag). `agedum
-  --prompt`/`--run` is not mapped for cline (fails loud).
+  --prompt`/`--run` map to `cline --tui "<text>"` (interactive TUI, seeded) and
+  `cline "<text>"` (positional, run-once act mode).
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
   `AGENTS.opencode.md` / `AGENTS.cline.md`) for the active harness — the instructions analogue of
@@ -40,8 +41,7 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).
 
-Follow-ups: `--<harness>-variant` composition; cline `--prompt`/`--run` prompt-seeding
-(its interactive-vs-batch task invocation is not yet confidently mapped).
+Follow-ups: `--<harness>-variant` composition.
 
 ## Stack
 
