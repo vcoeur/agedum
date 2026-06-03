@@ -73,7 +73,7 @@ flowchart LR
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
-2. [Compile per harness](harnesses.md) — render to the harness's native shape.
+2. [Compile per harness](wrapper.md) — render to the harness's native shape.
 3. [Inject + run](internals.md) — bind the compiled files into a private namespace and
    exec your command.
 
@@ -99,8 +99,9 @@ launch.
 - [Install](install.md) — install, prerequisites, dev mode
 - [Source shape](source-shape.md) — the structure of `AGENTS.md` and `.agents/skills/`
 - [Scopes](scopes.md) — project vs global (user) scope, and where each lands
-- [Harnesses](harnesses.md) — exactly what agedum does for each `--wrapper <harness>`
-- [CLI reference](cli.md) — flags and invocation contract
+- [Wrapper mode](wrapper.md) — run a command in the injected context; how each harness resolves
 - [Provider mode](provider.md) — launch a harness from a provider config JSON
+- [Harnesses](harnesses/index.md) — one page per harness: wrapper resolution + provider config
+- [CLI reference](cli.md) — flags and invocation contract
 - [Internals](internals.md) — the mount-namespace launch and its safety rules
 - [Source on GitHub](https://github.com/vcoeur/agedum) · [`agedum` on PyPI](https://pypi.org/project/agedum/)

@@ -62,7 +62,7 @@ global `AGENTS.md` binds to `~/.config/opencode/AGENTS.md`, and skills bind to
 `./.opencode/skills/` and `~/.config/opencode/skills/`. Cline is the same shape as
 opencode: project `AGENTS.md` stays in place, global `AGENTS.md` binds to the cross-tool
 `~/.agents/AGENTS.md`, and skills bind to `./.cline/skills/` and `~/.cline/skills/`. See
-[Harnesses](harnesses.md) for the full per-harness mapping.
+the [harness pages](harnesses/index.md) for the full per-harness mapping.
 
 ## Only the two scope paths are touched
 

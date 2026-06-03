@@ -86,8 +86,9 @@ Full docs at **[agedum.vcoeur.com](https://agedum.vcoeur.com)**:
 
 - [Source shape](https://agedum.vcoeur.com/source-shape/) — the structure of `AGENTS.md` and `.agents/skills/`
 - [Scopes](https://agedum.vcoeur.com/scopes/) — project vs global (user) scope, and where each lands
-- [Harnesses](https://agedum.vcoeur.com/harnesses/) — exactly what agedum does for each `--wrapper <harness>`
+- [Wrapper mode](https://agedum.vcoeur.com/wrapper/) — run a command in the injected context; how each harness resolves
 - [Provider mode](https://agedum.vcoeur.com/provider/) — launch a harness from a provider config JSON
+- [Harnesses](https://agedum.vcoeur.com/harnesses/) — one page per harness: wrapper resolution + provider config
 - [CLI reference](https://agedum.vcoeur.com/cli/) and [Internals](https://agedum.vcoeur.com/internals/) — the mount-namespace launch and its safety rules
 
 ## Install

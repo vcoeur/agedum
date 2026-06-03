@@ -81,8 +81,14 @@ nav:
   - Install: install.md
   - Source shape: source-shape.md
   - Scopes: scopes.md
-  - Harnesses: harnesses.md
+  - Wrapper mode: wrapper.md
   - Provider mode: provider.md
+  - Harnesses:
+    - Overview: harnesses/index.md
+    - Claude: harnesses/claude.md
+    - kimi: harnesses/kimi.md
+    - opencode: harnesses/opencode.md
+    - Cline: harnesses/cline.md
   - CLI reference: cli.md
   - Internals: internals.md
   - Legal: legal.md

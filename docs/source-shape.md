@@ -45,7 +45,7 @@ be merged with a per-harness overlay — see below):
 - **Cline** → the project `AGENTS.md` is read natively at its source location; the global
   `AGENTS.md` is relocated to the cross-tool path `~/.agents/AGENTS.md`.
 
-See [Harnesses](harnesses.md) for exactly where it lands per harness, and
+See the [harness pages](harnesses/index.md) for exactly where it lands per harness, and
 [Scopes](scopes.md) for the project vs global copies.
 
 There is no front-matter contract on `AGENTS.md` — it is opaque markdown. Keep config
