@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode", "cline")
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
@@ -180,6 +180,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         "kimi": _kimi_env,
         "opencode": _opencode_env,
         "cline": _cline_env,
+        "reasonix": _reasonix_env,
     }
     extra, unset, command = builders[harness](block, secret_env, base_env)
     env.update(extra)
@@ -216,6 +217,11 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
     * **cline** — a positional prompt is the seed either way; ``--tui`` is what opens the
       interactive TUI (seeded via Cline's ``initialPrompt``), while a bare positional runs
       once in act mode and exits (``cline --tui "<text>"`` vs ``cline "<text>"``).
+    * **reasonix** — only the ``run`` subcommand seeds a prompt (it takes the task as a
+      positional and exits); ``chat`` has no way to pre-seed an interactive session. So
+      ``--run`` swaps the base ``chat`` subcommand for ``run`` (``reasonix run "<text>"``),
+      and ``--prompt`` (which must stay interactive) raises :class:`ProviderError` rather
+      than guess — condash then falls back to spawn-and-type for that harness.
 
     A harness with no known prompt-seeding convention raises :class:`ProviderError` —
     agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
@@ -240,6 +246,18 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
         # reads it as the positional.
         mode_flags = ["--tui"] if interactive else []
         return [binary, *base_flags, *rest, *mode_flags, text]
+    if harness == "reasonix":
+        # reasonix can't pre-seed an interactive `chat` — only `run` takes a task and exits.
+        # So --prompt (interactive) has no target and fails loudly. base_flags starts with the
+        # `chat` subcommand from _reasonix_env; --run swaps it for `run`, keeping --model.
+        if interactive:
+            raise ProviderError(
+                "reasonix has no interactive prompt-seeding (`chat` cannot be pre-seeded); "
+                "use --run for a one-shot task, or launch without --prompt for an "
+                "interactive session"
+            )
+        sub_flags = base_flags[1:] if base_flags and base_flags[0] == "chat" else base_flags
+        return [binary, "run", *sub_flags, *rest, text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"
@@ -384,6 +402,32 @@ def _cline_env(
         token = base_env.get(secret_env, "")
         if token:
             command += ["--key", token]
+    return {}, [], command
+
+
+def _reasonix_env(
+    block: dict, secret_env: str, base_env: dict[str, str]
+) -> tuple[dict[str, str], list[str], list[str]]:
+    # reasonix is DeepSeek-native: its provider/model selection is a CLI flag on the
+    # `chat`/`run` subcommand, and the API token reaches the child via the required-env
+    # export — reasonix reads it through the selected provider's `api_key_env` (e.g.
+    # DEEPSEEK_API_KEY), like kimi. reasonix has no base-URL flag or env: a custom endpoint
+    # is a [[providers]] block in reasonix.toml selected by name, so a `baseUrl` here would
+    # silently launch against the wrong endpoint — reject it loudly (mirrors cline).
+    if str(block.get("baseUrl") or "").strip():
+        raise ProviderError(
+            "reasonix has no base-URL flag or env; define the endpoint as a providers entry "
+            "in reasonix.toml / ~/.config/reasonix/config.toml and select it with `model`, "
+            "not `baseUrl`"
+        )
+    # `chat` is the interactive subcommand (a bare `reasonix` only shows a welcome screen);
+    # with_prompt swaps it for `run` on --run. `--model` (a reasonix provider name — a
+    # built-in like `deepseek-pro` or one configured in reasonix.toml) attaches to the
+    # subcommand, so it follows it here. Both `chat` and `run` accept `--model`.
+    command = ["reasonix", "chat"]
+    model = str(block.get("model") or "").strip()
+    if model:
+        command += ["--model", model]
     return {}, [], command
 
 

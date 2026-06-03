@@ -2,8 +2,8 @@
 
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
-private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**, and
-**Cline** harnesses at **project + global scope**.
+private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**,
+**Cline**, and **reasonix** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.agents/skills/`) →
@@ -34,9 +34,22 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   the dry-run masks. `baseUrl` is rejected (Cline has no base-URL flag). `agedum
   --prompt`/`--run` map to `cline --tui "<text>"` (interactive TUI, seeded) and
   `cline "<text>"` (positional, run-once act mode).
+- **reasonix** — pure path-discovery (no flags), same shape as opencode/cline.
+  [DeepSeek-Reasonix](https://github.com/esengine/DeepSeek-Reasonix) reads the project
+  `AGENTS.md` natively (one of its memory docs `REASONIX.md` / `AGENTS.md` / `CLAUDE.md`),
+  so agedum leaves it in place. Global `AGENTS.md` → `~/.config/reasonix/AGENTS.md` (its
+  user-scope memory dir); skills → `./.reasonix/skills/` (project) + `~/.reasonix/skills/`
+  (global). reasonix scans `.reasonix` / `.agents` / `.agent` / `.claude` (each `/skills`)
+  under the project and home dirs, highest-priority first, and `.reasonix` leads, so the
+  overlaid (`SKILL.reasonix.md`) copy wins over the raw source; no `extra_args`. **Provider
+  mode** (`_reasonix_env`) maps `model` → `--model <name>` on the `chat` / `run` subcommand
+  and exports the token (reasonix reads it via the provider's `api_key_env`, e.g.
+  `DEEPSEEK_API_KEY`). `baseUrl` is rejected (no base-URL flag; a custom endpoint is a
+  `[[providers]]` block selected by name). `agedum --run` maps to `reasonix run "<text>"`;
+  `--prompt` is a fail-loud `ProviderError` (`chat` can't be pre-seeded).
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
-  `AGENTS.opencode.md` / `AGENTS.cline.md`) for the active harness — the instructions analogue of
+  `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md`) for the active harness — the instructions analogue of
   `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).
@@ -97,13 +110,13 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   did). This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--dry-run] -- <command...>`. The low-level
   entry provider mode builds on. The flag before `--` chooses the virtual-file context
-  (`claude` / `kimi` / `opencode` / `cline`); everything after `--` is the child argv (some
-  harnesses get extra flags appended — kimi's `--agent-file`; Claude, opencode, and cline are
-  pure binds). `--dry-run` prints the injected virtual files without running. Context and
-  command are decoupled.
+  (`claude` / `kimi` / `opencode` / `cline` / `reasonix`); everything after `--` is the child
+  argv (some harnesses get extra flags appended — kimi's `--agent-file`; Claude, opencode,
+  cline, and reasonix are pure binds). `--dry-run` prints the injected virtual files without
+  running. Context and command are decoupled.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
-`compile_kimi` / `compile_opencode` / `compile_cline` → a `Plan` of absolute binds **+ `extra_args`** for
+`compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;

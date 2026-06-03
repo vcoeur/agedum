@@ -31,7 +31,7 @@ agedum --wrapper cline    -- cline task "…"    # render for Cline, run cline
 The invocation has two halves split by a literal `--`:
 
 - **before `--`** — `--wrapper <harness>` picks the **format** to compile to
-  (`claude` / `kimi` / `opencode` / `cline`), plus the optional `--dry-run`.
+  (`claude` / `kimi` / `opencode` / `cline` / `reasonix`), plus the optional `--dry-run`.
 - **after `--`** — the **command**, run verbatim, including its own binary and flags.
   agedum does not parse or rewrite it (a harness may get extra flags *appended* — see its
   page). `--wrapper=claude` is also accepted; an unknown harness or option is an error.
@@ -49,7 +49,7 @@ command. Every harness disposes of each source in one of three ways:
 | Disposition | Meaning |
 |---|---|
 | **injected** (`→ <dest>`) | agedum writes a compiled copy and binds it at the path the harness reads (e.g. Claude's `CLAUDE.md`, every harness's skills dir). |
-| **read in place** | the harness reads the file natively at its source location, so agedum injects nothing — and *cannot*, since the root `AGENTS.md` is git-tracked. kimi, opencode, and cline all read the **project** `AGENTS.md` this way. |
+| **read in place** | the harness reads the file natively at its source location, so agedum injects nothing — and *cannot*, since the root `AGENTS.md` is git-tracked. kimi, opencode, cline, and reasonix all read the **project** `AGENTS.md` this way. |
 | **appended flag** | the context is passed as an extra argument, not a bind — only kimi's `--agent-file` for global instructions. |
 
 Two rules hold for every harness:

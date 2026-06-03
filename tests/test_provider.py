@@ -565,6 +565,46 @@ def test_cline_base_url_is_rejected():
         )
 
 
+# --- reasonix env/command mapping ---
+
+
+def test_reasonix_chat_subcommand_and_model_flag():
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-pro"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-rx-abc"},
+    )
+    # `chat` is the interactive subcommand; --model selects a reasonix provider by name.
+    assert launch.command == ["reasonix", "chat", "--model", "deepseek-pro"]
+    # The token rides the required-env export (reasonix reads it via api_key_env) and is masked.
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-rx-abc"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+
+
+def test_reasonix_bare_runs_chat():
+    # No model: bare `reasonix chat` (uses the config default_model). No env beyond the key.
+    launch = build_launch({"harness": "reasonix", "config": {}}, base_env={})
+    assert launch.command == ["reasonix", "chat"]
+    assert launch.env == {}
+
+
+def test_reasonix_base_url_is_rejected():
+    # reasonix has no base-URL flag/env; a custom endpoint is a [[providers]] block selected
+    # by name, so a baseUrl would silently miss — reject it rather than launch wrong.
+    with pytest.raises(ProviderError, match="reasonix has no base-URL flag"):
+        build_launch(
+            {
+                "harness": "reasonix",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"baseUrl": "https://api.deepseek.com", "model": "deepseek-pro"},
+            },
+            base_env={"DEEPSEEK_API_KEY": "tok"},
+        )
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
@@ -647,3 +687,28 @@ def test_with_prompt_cline_run_uses_bare_positional():
         "cline",
         "hi",
     ]
+
+
+def test_with_prompt_reasonix_run_swaps_chat_for_run():
+    # reasonix --run: the base `chat` subcommand becomes `run`, --model preserved, text last.
+    cmd = with_prompt(
+        _launch("reasonix", ["reasonix", "chat", "--model", "deepseek-pro"]),
+        [],
+        "fix the bug",
+        interactive=False,
+    )
+    assert cmd == ["reasonix", "run", "--model", "deepseek-pro", "fix the bug"]
+
+
+def test_with_prompt_reasonix_run_without_model():
+    assert with_prompt(_launch("reasonix", ["reasonix", "chat"]), [], "go", interactive=False) == [
+        "reasonix",
+        "run",
+        "go",
+    ]
+
+
+def test_with_prompt_reasonix_interactive_fails_loudly():
+    # reasonix `chat` can't be pre-seeded, so --prompt (interactive) is a fail-loud error.
+    with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
+        with_prompt(_launch("reasonix", ["reasonix", "chat"]), [], "hi", interactive=True)

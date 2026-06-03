@@ -542,3 +542,93 @@ def compile_cline(project: Source, global_: Source | None, dest: Path) -> Plan:
             plan.origins[target] = str(global_.skills_dir)
 
     return plan
+
+
+# ---------------------------------------------------------------------------
+# reasonix harness (DeepSeek-Reasonix)
+# ---------------------------------------------------------------------------
+
+
+def reasonix_user_config_dir() -> Path:
+    """reasonix's user-scope memory/config dir — ``$XDG_CONFIG_HOME/reasonix`` or
+    ``~/.config/reasonix`` (reasonix's Go derives it from ``os.UserConfigDir()/reasonix``).
+
+    reasonix loads its user-global memory doc (``REASONIX.md`` / ``AGENTS.md`` /
+    ``CLAUDE.md``, in that order) from here at boot — see :func:`compile_reasonix`.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "reasonix"
+
+
+def reasonix_home_skills_dir() -> Path:
+    """reasonix's highest-priority *global* skills root — ``~/.reasonix/skills``.
+
+    reasonix scans ``<home>/{.reasonix,.agents,.agent,.claude}/skills`` (and the same four
+    under the project root) for skills, highest-priority first, with ``.reasonix`` leading.
+    Injecting global skills here makes the overlaid copy win over the raw ``~/.agents/skills``
+    reasonix also reads.
+    """
+    return Path.home() / ".reasonix" / "skills"
+
+
+def compile_reasonix(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for reasonix (DeepSeek-Reasonix). Like opencode/cline, reasonix is
+    pure path-discovery (no appended flags), so every scope is a bind or a native read:
+
+    * **project instructions** — reasonix reads the project-root ``./AGENTS.md`` natively
+      (one of its memory docs ``REASONIX.md`` / ``AGENTS.md`` / ``CLAUDE.md``, loaded at
+      project scope and folded into the cache-stable system prompt), and that is exactly the
+      agent-neutral source file, so agedum injects nothing for it (and could not — it is
+      git-tracked);
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an optional
+      ``AGENTS.reasonix.md`` overlay) → ``<userdir>/AGENTS.md`` where ``<userdir>`` is
+      ``~/.config/reasonix`` (:func:`reasonix_user_config_dir`), the user-scope memory dir
+      reasonix reads at boot;
+    * **project skills** → ``./.reasonix/skills/``; **global skills** → ``~/.reasonix/skills/``
+      (:func:`reasonix_home_skills_dir`). reasonix scans the four convention dirs
+      (``.reasonix`` / ``.agents`` / ``.agent`` / ``.claude``, each ``/skills``) under both
+      the project and home dirs, highest-priority first, and ``.reasonix`` leads — so the
+      overlaid copy (``SKILL.reasonix.md`` merged in) injected there wins over the raw
+      ``.agents/skills`` reasonix would also discover. Each skill is a ``SKILL.md`` folder,
+      the shape reasonix expects.
+
+    No ``extra_args`` — reasonix discovers everything from disk.
+    """
+    plan = Plan()
+
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
+    # Global instructions (base + AGENTS.reasonix.md overlay) -> <userdir>/AGENTS.md
+    # (project ./AGENTS.md is read natively).
+    global_instructions = _instructions(global_, "reasonix") if global_ is not None else None
+    if global_instructions is not None:
+        out = dest / "global" / "AGENTS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(global_instructions)
+        target = reasonix_user_config_dir() / "AGENTS.md"
+        plan.binds.append((out, target))
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[target] = str(global_.agents_md)
+
+    # Project skills -> ./.reasonix/skills (highest-priority project skill root, so the
+    # overlaid copy wins over the raw .agents/skills reasonix also reads natively).
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.reasonix.md")
+        if out is not None:
+            target = project.root / ".reasonix" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
+
+    # Global skills -> ~/.reasonix/skills (highest-priority global skill root).
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.reasonix.md")
+        if out is not None:
+            target = reasonix_home_skills_dir()
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
+
+    return plan

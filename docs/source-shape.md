@@ -52,13 +52,13 @@ When agedum compiles the global source for harness `H`, it merges
 sibling exists:
 
 - `AGENTS.claude.md` is applied for the claude harness, `AGENTS.kimi.md` for kimi,
-  `AGENTS.opencode.md` for opencode, `AGENTS.cline.md` for Cline. An overlay for a
-  *different* harness is ignored.
+  `AGENTS.opencode.md` for opencode, `AGENTS.cline.md` for Cline, `AGENTS.reasonix.md` for
+  reasonix. An overlay for a *different* harness is ignored.
 - Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
   concatenation: the base, a blank line, then the overlay body.
 - This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
-  kimi, opencode, and cline the project `AGENTS.md` is read natively and never injected, so
-  a project overlay would have nowhere to land.
+  kimi, opencode, cline, and reasonix the project `AGENTS.md` is read natively and never
+  injected, so a project overlay would have nowhere to land.
 
 ## Skills
 
@@ -91,8 +91,9 @@ When a skill needs something only one harness understands — e.g. Claude's
 - `SKILL.kimi.md` is applied when compiling for the kimi harness.
 - `SKILL.opencode.md` is applied when compiling for the opencode harness.
 - `SKILL.cline.md` is applied when compiling for the Cline harness.
+- `SKILL.reasonix.md` is applied when compiling for the reasonix harness.
 - An overlay for a *different* harness is ignored (a `SKILL.kimi.md` is skipped when
-  compiling for Claude, opencode, or Cline, and so on).
+  compiling for Claude, opencode, Cline, or reasonix, and so on).
 
 The overlay is **merged** onto the base, not substituted:
 
@@ -162,8 +163,8 @@ flowchart LR
 ```
 
 The targets differ per harness — kimi reads the project `AGENTS.md` natively and injects
-the global one via a `--agent-file`; opencode and cline read the project `AGENTS.md`
-natively and bind the global one to their own config path. See the
+the global one via a `--agent-file`; opencode, cline, and reasonix read the project
+`AGENTS.md` natively and bind the global one to their own config path. See the
 [harness pages](harnesses/index.md) for each harness's full mapping.
 
 ### Only the two scope paths are touched
