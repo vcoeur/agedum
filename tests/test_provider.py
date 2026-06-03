@@ -565,6 +565,204 @@ def test_cline_base_url_is_rejected():
         )
 
 
+# --- reasonix env/command mapping ---
+
+
+def test_reasonix_chat_subcommand_and_model_flag():
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-pro"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-rx-abc"},
+    )
+    # `chat` is the interactive subcommand; --model selects a reasonix provider by name.
+    assert launch.command == ["reasonix", "chat", "--model", "deepseek-pro"]
+    # No baseUrl → no generated config file (uses reasonix's built-in/configured providers).
+    assert launch.config_files == ()
+    # The token rides the required-env export (reasonix reads it via api_key_env) and is masked.
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-rx-abc"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+
+
+def test_reasonix_bare_runs_chat():
+    # No model: bare `reasonix chat` (uses the config default_model). No env beyond the key.
+    launch = build_launch({"harness": "reasonix", "config": {}}, base_env={})
+    assert launch.command == ["reasonix", "chat"]
+    assert launch.env == {}
+    assert launch.config_files == ()
+
+
+def test_reasonix_custom_endpoint_generates_toml():
+    # A baseUrl makes agedum generate a ./reasonix.toml [[providers]] block + default_model
+    # and select it by the fixed agedum provider name; `model` is the upstream model id.
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "slug": "reasonix-myhost",
+            "secretEnv": "MY_API_KEY",
+            "config": {"baseUrl": "https://my.host/v1", "model": "deepseek-v4-pro"},
+        },
+        base_env={"MY_API_KEY": "sk-secret-xyz"},
+    )
+    assert launch.command == ["reasonix", "chat", "--model", "agedum"]
+    assert [target for target, _ in launch.config_files] == ["reasonix.toml"]
+    toml = launch.config_files[0][1]
+    assert 'default_model = "agedum"' in toml
+    assert "[[providers]]" in toml
+    assert 'name = "agedum"' in toml
+    assert 'kind = "openai"' in toml
+    assert 'base_url = "https://my.host/v1"' in toml
+    assert 'model = "deepseek-v4-pro"' in toml
+    assert 'api_key_env = "MY_API_KEY"' in toml
+    # The toml references the key by env-var NAME — never its value (no secret on disk).
+    assert "sk-secret-xyz" not in toml
+    # The token still rides the required-env export so reasonix resolves api_key_env.
+    assert launch.env["MY_API_KEY"] == "sk-secret-xyz"
+    assert "MY_API_KEY" in launch.secrets
+
+
+def test_reasonix_custom_endpoint_kind_override():
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "config": {"baseUrl": "https://h/v1", "model": "m", "kind": "anthropic"},
+        },
+        base_env={},
+    )
+    assert 'kind = "anthropic"' in launch.config_files[0][1]
+
+
+def test_reasonix_keyless_endpoint_omits_api_key_env():
+    # No secretEnv (a local keyless endpoint): no api_key_env line, and no required env.
+    launch = build_launch(
+        {"harness": "reasonix", "config": {"baseUrl": "http://localhost:1234/v1", "model": "m"}},
+        base_env={},
+    )
+    assert "api_key_env" not in launch.config_files[0][1]
+    assert launch.command == ["reasonix", "chat", "--model", "agedum"]
+
+
+def test_reasonix_base_url_requires_model():
+    # Generating a toml needs an executor: baseUrl without model is a fail-loud error.
+    with pytest.raises(ProviderError, match="reasonix needs `model`"):
+        build_launch(
+            {"harness": "reasonix", "config": {"baseUrl": "https://my.host/v1"}}, base_env={}
+        )
+
+
+# --- reasonix two-model routing (subagent / planner) + multi-provider ---
+
+
+def test_reasonix_subagent_model_builtin_tier():
+    # subagentModel with built-in executor/subagent: a reasonix.toml with default_model +
+    # [agent] subagent_model and NO [[providers]] (so reasonix's built-ins survive the merge).
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-pro", "subagentModel": "deepseek-flash"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.command == ["reasonix", "chat", "--model", "deepseek-pro"]
+    toml = launch.config_files[0][1]
+    assert 'default_model = "deepseek-pro"' in toml
+    assert "[agent]" in toml
+    assert 'subagent_model = "deepseek-flash"' in toml
+    assert "[[providers]]" not in toml  # both are built-ins; no provider block needed
+
+
+def test_reasonix_provider_def_list_two_providers():
+    # providerDef list (kimi executor + deepseek-flash subagents): two [[providers]] blocks +
+    # [agent] subagent_model; both keys are auto-added to requiredEnv and exported (masked).
+    config = {
+        "harness": "reasonix",
+        "slug": "reasonix-kimi-flash",
+        "config": {
+            "model": "kimi",
+            "subagentModel": "deepseek-flash",
+            "providerDef": [
+                {
+                    "id": "kimi",
+                    "kind": "anthropic",
+                    "baseUrl": "https://api.kimi.com/coding",
+                    "model": "k2p6",
+                    "apiKeyEnv": "KIMI_API_KEY",
+                },
+                {
+                    "id": "deepseek-flash",
+                    "kind": "openai",
+                    "baseUrl": "https://api.deepseek.com",
+                    "model": "deepseek-v4-flash",
+                    "apiKeyEnv": "DEEPSEEK_API_KEY",
+                },
+            ],
+        },
+    }
+    assert required_env(config) == ["KIMI_API_KEY", "DEEPSEEK_API_KEY"]
+    launch = build_launch(config, base_env={"KIMI_API_KEY": "sk-kimi", "DEEPSEEK_API_KEY": "sk-ds"})
+    assert launch.command == ["reasonix", "chat", "--model", "kimi"]
+    toml = launch.config_files[0][1]
+    assert 'default_model = "kimi"' in toml
+    assert 'subagent_model = "deepseek-flash"' in toml
+    assert toml.count("[[providers]]") == 2
+    assert 'name = "kimi"' in toml and 'kind = "anthropic"' in toml
+    assert 'base_url = "https://api.kimi.com/coding"' in toml
+    assert 'api_key_env = "KIMI_API_KEY"' in toml and 'api_key_env = "DEEPSEEK_API_KEY"' in toml
+    # Keys are referenced by name, never value.
+    assert "sk-kimi" not in toml and "sk-ds" not in toml
+    assert {"KIMI_API_KEY", "DEEPSEEK_API_KEY"} <= launch.secrets
+
+
+def test_reasonix_planner_and_auto_plan():
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-pro", "plannerModel": "mimo-pro", "autoPlan": "on"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "t"},
+    )
+    toml = launch.config_files[0][1]
+    assert 'planner_model = "mimo-pro"' in toml
+    assert 'auto_plan = "on"' in toml
+
+
+def test_reasonix_auto_plan_rejects_unknown_value():
+    with pytest.raises(ProviderError, match="autoPlan` must be one of"):
+        build_launch(
+            {"harness": "reasonix", "config": {"model": "x", "autoPlan": "sometimes"}}, base_env={}
+        )
+
+
+def test_reasonix_base_url_and_provider_def_are_mutually_exclusive():
+    with pytest.raises(ProviderError, match="both `baseUrl` and `providerDef`"):
+        build_launch(
+            {
+                "harness": "reasonix",
+                "config": {
+                    "model": "x",
+                    "baseUrl": "https://h/v1",
+                    "providerDef": {"id": "p", "baseUrl": "https://h2/v1", "model": "m"},
+                },
+            },
+            base_env={},
+        )
+
+
+def test_reasonix_provider_def_missing_field_fails_loudly():
+    with pytest.raises(ProviderError, match="providerDef is missing required field"):
+        build_launch(
+            {
+                "harness": "reasonix",
+                "config": {"model": "p", "providerDef": {"id": "p", "baseUrl": "https://h/v1"}},
+            },
+            base_env={},
+        )
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
@@ -647,3 +845,28 @@ def test_with_prompt_cline_run_uses_bare_positional():
         "cline",
         "hi",
     ]
+
+
+def test_with_prompt_reasonix_run_swaps_chat_for_run():
+    # reasonix --run: the base `chat` subcommand becomes `run`, --model preserved, text last.
+    cmd = with_prompt(
+        _launch("reasonix", ["reasonix", "chat", "--model", "deepseek-pro"]),
+        [],
+        "fix the bug",
+        interactive=False,
+    )
+    assert cmd == ["reasonix", "run", "--model", "deepseek-pro", "fix the bug"]
+
+
+def test_with_prompt_reasonix_run_without_model():
+    assert with_prompt(_launch("reasonix", ["reasonix", "chat"]), [], "go", interactive=False) == [
+        "reasonix",
+        "run",
+        "go",
+    ]
+
+
+def test_with_prompt_reasonix_interactive_fails_loudly():
+    # reasonix `chat` can't be pre-seeded, so --prompt (interactive) is a fail-loud error.
+    with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
+        with_prompt(_launch("reasonix", ["reasonix", "chat"]), [], "hi", interactive=True)

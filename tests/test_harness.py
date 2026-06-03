@@ -10,8 +10,11 @@ from agedum.harness import (
     compile_cline,
     compile_kimi,
     compile_opencode,
+    compile_reasonix,
     kimi_config_dir,
     opencode_config_dir,
+    reasonix_home_skills_dir,
+    reasonix_user_config_dir,
 )
 from agedum.sources import Source, load_source
 
@@ -423,6 +426,99 @@ def test_compile_cline_global_agents_harness_overlay_merged(tmp_path, monkeypatc
     merged = _src_for(plan, cline_global_agents_md()).read_text()
     assert "GLOBAL-BASE" in merged
     assert "CLINE-EXTRA" in merged
+    assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_compile_reasonix(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.reasonix.md").write_text("---\nlicense: MIT\n---\nreasonix note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    assert reasonix_user_config_dir() == xdg / "reasonix"
+    assert reasonix_home_skills_dir() == home / ".reasonix" / "skills"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_reasonix(project, global_, dest)
+
+    targets = _targets(plan)
+    # reasonix is pure path-discovery — no extra args.
+    assert plan.extra_args == []
+
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded.
+    assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
+
+    # Global instructions -> <userdir>/AGENTS.md (~/.config/reasonix, the user memory dir).
+    assert xdg / "reasonix" / "AGENTS.md" in targets
+    assert _src_for(plan, xdg / "reasonix" / "AGENTS.md").read_text() == "GLOBAL-INSTR\n"
+
+    # Project skills -> ./.reasonix/skills (highest-priority root), overlay merged.
+    assert proj / ".reasonix" / "skills" in targets
+    pskill_md = (_src_for(plan, proj / ".reasonix" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "license: MIT" in pskill_md
+    assert "reasonix note" in pskill_md
+
+    # Global skills -> ~/.reasonix/skills.
+    assert home / ".reasonix" / "skills" in targets
+    assert (_src_for(plan, home / ".reasonix" / "skills") / "gskill" / "SKILL.md").exists()
+
+
+def test_compile_reasonix_project_only_injects_skills_not_instructions(tmp_path):
+    # No global scope: project AGENTS.md is native (no bind), only project skills bind.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_reasonix(project, None, dest)
+
+    assert plan.extra_args == []
+    assert _targets(plan) == [proj / ".reasonix" / "skills"]
+
+
+def test_compile_reasonix_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.reasonix.md").write_text("REASONIX-EXTRA\n")
+    (gconf / "AGENTS.opencode.md").write_text("OPENCODE-EXTRA\n")
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_reasonix(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, reasonix_user_config_dir() / "AGENTS.md").read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "REASONIX-EXTRA" in merged
     assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
 
 

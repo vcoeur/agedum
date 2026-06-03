@@ -32,6 +32,7 @@ the config envelope, prompt-seeding, and `--dry-run`. The **`config` block is pe
 | kimi | [recipe + mapping](harnesses/kimi.md#provider-config) |
 | opencode | [recipe + mapping](harnesses/opencode.md#provider-config) |
 | Cline | [recipe + mapping](harnesses/cline.md#provider-config) |
+| reasonix | [recipe + mapping](harnesses/reasonix.md#provider-config) |
 
 ## Resolving the provider
 
@@ -77,8 +78,8 @@ The config is the condash-style agent envelope:
 
 | Field | Meaning |
 |---|---|
-| `harness` | `claude`, `kimi`, `opencode`, or `cline`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
-| `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` pass it through under its own name; `cline` passes it as `--key`. |
+| `harness` | `claude`, `kimi`, `opencode`, `cline`, or `reasonix`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
+| `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` / `reasonix` pass it through under its own name (reasonix reads it via the provider's `api_key_env`); `cline` passes it as `--key`. |
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so a harness that reads it from the environment sees it. |
 | `config` | The per-harness option block — see the harness page table above. |
 | `name` / `slug` | Labels; `slug` (else `name`, else the harness) names the provider in error and `--dry-run` messages. |
@@ -105,10 +106,13 @@ agedum maps the flag to the harness named in the config:
 | kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
 | cline | `cline --tui "<text>"` | `cline "<text>"` |
+| reasonix | *(unsupported — fail-loud)* | `reasonix run "<text>"` |
 
 For cline the prompt is a positional argument either way; `--tui` is what opens the
 interactive TUI (seeded with the prompt), and a bare positional runs the task once in act
-mode and exits.
+mode and exits. For reasonix only `--run` is supported — its `run` subcommand takes the task
+as a positional and exits, but `chat` cannot be pre-seeded, so `--prompt` is a fail-loud
+`ProviderError` (condash then falls back to spawn-and-type for an interactive seed).
 
 A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
 never guesses). Harness passthrough args are preserved, before the prompt text.

@@ -54,6 +54,17 @@ agedum has two modes:
 > `~/.cline/skills/` (global, `$CLINE_DATA_DIR`-aware). No extra flags. Cline also works
 > in **provider mode** — `agedum <provider>` maps the config to Cline's CLI flags
 > (`--model`/`--provider`/`--thinking`/`--plan`) and passes the token via `--key`.
+>
+> **reasonix** (`--wrapper reasonix`) is supported as well — the DeepSeek-native
+> [reasonix](https://github.com/esengine/DeepSeek-Reasonix) agent, pure path-discovery like
+> opencode/Cline. The project `AGENTS.md` is read natively (one of its memory docs); the
+> global `AGENTS.md` binds to `~/.config/reasonix/AGENTS.md`; skills bind to
+> `./.reasonix/skills/` (project) and `~/.reasonix/skills/` (global), both outranking
+> `.agents/skills/` so the overlaid copy wins. No extra flags. reasonix also works in
+> **provider mode** — `agedum <provider>` maps `model` to `--model <name>` on the `chat`/`run`
+> subcommand and exports the token (reasonix reads it via the provider's `api_key_env`);
+> `--run` maps to `reasonix run "<text>"`, while `--prompt` is unsupported (`chat` can't be
+> pre-seeded).
 
 ## Usage
 
@@ -69,6 +80,7 @@ agedum claude-deepseek-auto --dry-run             # print resolved env, virtual 
 # Wrapper mode (low-level; provider mode builds on it) — virtual files, no provider env:
 agedum --wrapper claude -- claude --model sonnet -p "review this"
 agedum --wrapper cline -- cline task "review this"  # drive Cline with the same source
+agedum --wrapper reasonix -- reasonix chat          # drive reasonix with the same source
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --version

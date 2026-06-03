@@ -87,6 +87,17 @@ def test_wrapper_cline_is_registered(monkeypatch):
     assert captured["command"] == ["cline", "task"]
 
 
+def test_wrapper_reasonix_is_registered(monkeypatch):
+    # reasonix is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "reasonix", "--", "reasonix", "chat"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "chat"]
+
+
 def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
     # The `--claude`/`--kimi`/`--opencode` aliases were removed; the bare flag is no
     # longer wrapper mode and is rejected as an unknown provider option.
@@ -683,3 +694,125 @@ def test_run_flag_cline_bare_positional(monkeypatch, tmp_path):
     assert exc.value.code == 0
     assert captured["command"] == ["cline", "ship it"]
     assert captured["close_stdin"] is True
+
+
+# --- reasonix provider mode ---
+
+
+def test_provider_reasonix_launches_chat(monkeypatch, tmp_path):
+    # `agedum <provider>` accepts a reasonix harness and builds its `chat` subcommand.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path,
+        "rx",
+        {"harness": "reasonix", "config": {"model": "deepseek-pro"}},
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "rx"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "chat", "--model", "deepseek-pro"]
+    assert captured["close_stdin"] is False
+
+
+def test_prompt_flag_reasonix_fails_loudly(monkeypatch, tmp_path, capsys):
+    # reasonix can't pre-seed `chat`, so --prompt is a fail-loud error (exit 1), no launch.
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    _write_provider(tmp_path, "rx", {"harness": "reasonix", "config": {"model": "x"}}, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "rx", "--prompt", "fix the bug"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+    assert "no interactive prompt-seeding" in capsys.readouterr().err
+
+
+def test_run_flag_reasonix_uses_run_subcommand(monkeypatch, tmp_path):
+    # --run swaps `chat` for `run`, keeps --model, text last; /dev/null stdin so it can't block.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path, "rx", {"harness": "reasonix", "config": {"model": "deepseek-pro"}}, monkeypatch
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "rx", "--run", "ship it"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["reasonix", "run", "--model", "deepseek-pro", "ship it"]
+    assert captured["close_stdin"] is True
+
+
+def test_provider_reasonix_custom_endpoint_binds_toml(monkeypatch, tmp_path):
+    # A baseUrl reasonix provider injects a generated reasonix.toml bound at the project root.
+    seen = {}
+
+    def fake_run(root, plan, command, *, close_stdin=False):
+        # Read bind sources here — _run rmtrees the temp dir once it returns.
+        seen["command"] = command
+        seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
+        return 0
+
+    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr(
+        cli, "load_source", lambda: cli.Source(root=Path("/proj"), agents_md=None, skills_dir=None)
+    )
+    monkeypatch.setattr(cli, "load_global_source", lambda: cli.Source(Path("/g"), None, None))
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "rxc.json").write_text(
+        json.dumps(
+            {
+                "harness": "reasonix",
+                "secretEnv": "MY_KEY",
+                "config": {"baseUrl": "https://my.host/v1", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("MY_KEY=sk-zzz\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "rxc"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert seen["command"] == ["reasonix", "chat", "--model", "agedum"]
+    assert "/proj/reasonix.toml" in seen["binds"]
+    assert 'base_url = "https://my.host/v1"' in seen["binds"]["/proj/reasonix.toml"]
+
+
+def test_provider_reasonix_custom_endpoint_dry_run_shows_toml(monkeypatch, tmp_path, capsys):
+    # --dry-run prints the generated reasonix.toml; the key is referenced by name, never value.
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "rxc.json").write_text(
+        json.dumps(
+            {
+                "harness": "reasonix",
+                "slug": "reasonix-myhost",
+                "secretEnv": "MY_KEY",
+                "config": {"baseUrl": "https://my.host/v1", "model": "deepseek-v4-pro"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("MY_KEY=sk-secret-zzz\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "reasonix", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "rxc"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "generated config files" in out
+    assert "reasonix.toml" in out
+    assert 'base_url = "https://my.host/v1"' in out
+    assert 'api_key_env = "MY_KEY"' in out
+    assert "--model agedum" in out
+    assert "sk-secret-zzz" not in out  # the key value is never written or printed

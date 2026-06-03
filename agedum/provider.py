@@ -22,11 +22,17 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode", "cline")
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
 OPENCODE_BUILTINS = frozenset({"build", "plan", "general", "explore", "scout"})
+
+# A per-harness env/command builder's result:
+#   (env_to_set, env_to_unset, base_command, config_files)
+# config_files is a tuple of (project-root-relative target, content) pairs the launcher
+# writes into the namespace — empty for every harness except a custom-endpoint reasonix.
+BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[tuple[str, str], ...]]
 
 
 class ProviderError(RuntimeError):
@@ -38,6 +44,10 @@ class Launch:
     """A resolved provider launch: env to set/unset plus the base command.
 
     ``secrets`` names the env vars whose values must be masked in ``--dry-run``.
+    ``config_files`` are agedum-generated config files a harness needs on disk
+    (``(project-root-relative target, content)`` pairs); the launcher writes each into
+    the namespace at the project root. reasonix uses it to inject a ``reasonix.toml``
+    that defines a custom-endpoint provider — the others leave it empty.
     """
 
     harness: str
@@ -46,6 +56,7 @@ class Launch:
     unset: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
     secrets: frozenset[str] = frozenset()
+    config_files: tuple[tuple[str, str], ...] = ()
 
 
 def default_env_file() -> Path:
@@ -180,8 +191,9 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         "kimi": _kimi_env,
         "opencode": _opencode_env,
         "cline": _cline_env,
+        "reasonix": _reasonix_env,
     }
-    extra, unset, command = builders[harness](block, secret_env, base_env)
+    extra, unset, command, config_files = builders[harness](block, secret_env, base_env)
     env.update(extra)
 
     secrets = set(required)
@@ -197,6 +209,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         unset=unset,
         command=command,
         secrets=frozenset(secrets),
+        config_files=tuple(config_files),
     )
 
 
@@ -216,6 +229,11 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
     * **cline** — a positional prompt is the seed either way; ``--tui`` is what opens the
       interactive TUI (seeded via Cline's ``initialPrompt``), while a bare positional runs
       once in act mode and exits (``cline --tui "<text>"`` vs ``cline "<text>"``).
+    * **reasonix** — only the ``run`` subcommand seeds a prompt (it takes the task as a
+      positional and exits); ``chat`` has no way to pre-seed an interactive session. So
+      ``--run`` swaps the base ``chat`` subcommand for ``run`` (``reasonix run "<text>"``),
+      and ``--prompt`` (which must stay interactive) raises :class:`ProviderError` rather
+      than guess — condash then falls back to spawn-and-type for that harness.
 
     A harness with no known prompt-seeding convention raises :class:`ProviderError` —
     agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
@@ -240,6 +258,18 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
         # reads it as the positional.
         mode_flags = ["--tui"] if interactive else []
         return [binary, *base_flags, *rest, *mode_flags, text]
+    if harness == "reasonix":
+        # reasonix can't pre-seed an interactive `chat` — only `run` takes a task and exits.
+        # So --prompt (interactive) has no target and fails loudly. base_flags starts with the
+        # `chat` subcommand from _reasonix_env; --run swaps it for `run`, keeping --model.
+        if interactive:
+            raise ProviderError(
+                "reasonix has no interactive prompt-seeding (`chat` cannot be pre-seeded); "
+                "use --run for a one-shot task, or launch without --prompt for an "
+                "interactive session"
+            )
+        sub_flags = base_flags[1:] if base_flags and base_flags[0] == "chat" else base_flags
+        return [binary, "run", *sub_flags, *rest, text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"
@@ -247,17 +277,15 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 
 
 # ---------------------------------------------------------------------------
-# per-harness env/command builders -> (env_to_set, env_to_unset, base_command)
+# per-harness env/command builders -> (env_to_set, env_to_unset, base_command, config_files)
 # ---------------------------------------------------------------------------
 
 
-def _claude_env(
-    block: dict, secret_env: str, base_env: dict[str, str]
-) -> tuple[dict[str, str], list[str], list[str]]:
+def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
     if not base_url:
         # Native Claude: no provider overrides (the all-empty config). Run bare.
-        return {}, [], ["claude"]
+        return {}, [], ["claude"], ()
     if not secret_env:
         raise ProviderError("claude config has a baseUrl but no secretEnv to supply the API token")
 
@@ -315,12 +343,10 @@ def _claude_env(
         "CLAUDE_CODE_USE_FOUNDRY",
         "CLAUDE_CODE_USE_MANTLE",
     ]
-    return env, unset, ["claude"]
+    return env, unset, ["claude"], ()
 
 
-def _kimi_env(
-    block: dict, secret_env: str, base_env: dict[str, str]
-) -> tuple[dict[str, str], list[str], list[str]]:
+def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # kimi's provider/model knobs are appended CLI flags, not env vars. The token
     # (secret_env) reaches the child via the required-env export in build_launch.
     command = ["kimi"]
@@ -337,12 +363,10 @@ def _kimi_env(
     config_inline = str(block.get("configInline") or "").strip()
     if config_inline:
         command += ["--config", config_inline]
-    return {}, [], command
+    return {}, [], command, ()
 
 
-def _opencode_env(
-    block: dict, secret_env: str, base_env: dict[str, str]
-) -> tuple[dict[str, str], list[str], list[str]]:
+def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     env: dict[str, str] = {}
     if block.get("disableExternalSkills") is True:
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
@@ -351,12 +375,10 @@ def _opencode_env(
         document = _apply_provider_def(document, provider_def, base_env)
     if document:
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
-    return env, [], ["opencode"]
+    return env, [], ["opencode"], ()
 
 
-def _cline_env(
-    block: dict, secret_env: str, base_env: dict[str, str]
-) -> tuple[dict[str, str], list[str], list[str]]:
+def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # Cline's provider/model knobs are appended CLI flags (like kimi). Unlike the other
     # harnesses, Cline takes the token as a per-run flag (`--key`), so the secret lands in
     # argv (visible in the process list while Cline runs) — its documented mechanism, not
@@ -384,7 +406,151 @@ def _cline_env(
         token = base_env.get(secret_env, "")
         if token:
             command += ["--key", token]
-    return {}, [], command
+    return {}, [], command, ()
+
+
+# The provider name agedum assigns to a generated custom-endpoint reasonix provider.
+# Fixed + always a valid identifier; the user never types it (agedum selects it via
+# --model), and each launch gets its own reasonix.toml so there is no cross-launch clash.
+REASONIX_PROVIDER_NAME = "agedum"
+
+
+def _reasonix_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
+    # reasonix is DeepSeek-native: its provider/model selection is a CLI flag on the
+    # `chat`/`run` subcommand, and the API token reaches the child via the required-env
+    # export — reasonix reads it through the selected provider's `api_key_env` (e.g.
+    # DEEPSEEK_API_KEY), like kimi.
+    base_url = str(block.get("baseUrl") or "").strip()
+    model = str(block.get("model") or "").strip()
+    provider_defs = _provider_defs(block.get("providerDef"))
+    agent_lines = _reasonix_agent_lines(block)
+
+    # A reasonix.toml is generated whenever reasonix needs on-disk-only config it has no flag
+    # for: a custom endpoint (`baseUrl` / `providerDef`) or the `[agent]` two-model routing
+    # (`subagentModel` / `plannerModel` / `autoPlan`). Otherwise `model` just selects a
+    # provider reasonix already knows by name (a built-in like `deepseek-pro`, or one in the
+    # user's reasonix.toml) via --model, and nothing is injected. `chat` is the interactive
+    # subcommand (a bare `reasonix` only shows a welcome screen); with_prompt swaps it for
+    # `run` on --run. Both `chat` and `run` accept `--model`.
+    if not (base_url or provider_defs or agent_lines):
+        command = ["reasonix", "chat"]
+        if model:
+            command += ["--model", model]
+        return {}, [], command, ()
+
+    if base_url and provider_defs:
+        raise ProviderError(
+            "reasonix config sets both `baseUrl` and `providerDef`; use one — `baseUrl` for a "
+            "single inline endpoint, `providerDef` for one or more named providers"
+        )
+    if not model:
+        raise ProviderError(
+            "reasonix needs `model` (the executor) to set as default_model — a built-in / "
+            "providerDef provider name, or (with baseUrl) the upstream model id at that endpoint"
+        )
+
+    # The generated ./reasonix.toml is bound at the project root (reasonix's highest-priority
+    # TOML source). `[[providers]]` replaces the providers list wholesale while the user
+    # config's scalars + plugins survive the merge — so a config with NO providers block (only
+    # default_model + [agent], referencing built-ins) keeps reasonix's built-in providers.
+    # `baseUrl` is the single-inline shorthand (one provider named `agedum`, `model` = its
+    # upstream id); `providerDef` is the explicit multi-provider form whose entries `model` /
+    # `subagentModel` / `plannerModel` reference by id.
+    if base_url:
+        default_model = REASONIX_PROVIDER_NAME
+        provider_blocks = [
+            _reasonix_provider_block(
+                name=REASONIX_PROVIDER_NAME,
+                kind=str(block.get("kind") or "openai").strip() or "openai",
+                base_url=base_url,
+                model=model,
+                api_key_env=secret_env,
+            )
+        ]
+    else:
+        default_model = model
+        provider_blocks = [_reasonix_provider_block_from_def(pd) for pd in provider_defs]
+
+    toml = _reasonix_toml(default_model, agent_lines, provider_blocks)
+    command = ["reasonix", "chat", "--model", default_model]
+    return {}, [], command, (("reasonix.toml", toml),)
+
+
+def _reasonix_agent_lines(block: dict) -> list[str]:
+    """The ``[agent]`` body lines for reasonix two-model routing, or ``[]`` when none are set.
+
+    ``subagentModel`` → ``subagent_model`` (default model for runAs=subagent skills),
+    ``plannerModel`` → ``planner_model`` (planner/executor two-model collaboration),
+    ``autoPlan`` → ``auto_plan`` (``off`` | ``ask`` | ``on``). Each references a provider name
+    reasonix knows (a built-in or a ``providerDef`` id).
+    """
+    lines: list[str] = []
+    subagent = str(block.get("subagentModel") or "").strip()
+    if subagent:
+        lines.append(f'subagent_model = "{_toml_escape(subagent)}"')
+    planner = str(block.get("plannerModel") or "").strip()
+    if planner:
+        lines.append(f'planner_model = "{_toml_escape(planner)}"')
+    auto_plan = str(block.get("autoPlan") or "").strip()
+    if auto_plan:
+        if auto_plan not in ("off", "ask", "on"):
+            raise ProviderError("reasonix `autoPlan` must be one of: off, ask, on")
+        lines.append(f'auto_plan = "{_toml_escape(auto_plan)}"')
+    return lines
+
+
+def _toml_escape(value: str) -> str:
+    """Escape a string for a TOML double-quoted basic string (backslash, then quote)."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _reasonix_provider_block_from_def(provider_def: dict) -> str:
+    """Render one ``[[providers]]`` block from a reasonix ``providerDef`` entry.
+
+    Fields: ``id`` → name, ``baseUrl`` → base_url, ``model`` → model, ``apiKeyEnv`` →
+    api_key_env (optional; omitted for a keyless endpoint), ``kind`` (default ``openai``).
+    ``id`` / ``baseUrl`` / ``model`` are required.
+    """
+    fields = {key: str(provider_def.get(key) or "").strip() for key in ("id", "baseUrl", "model")}
+    missing = [key for key, value in fields.items() if not value]
+    if missing:
+        raise ProviderError(
+            f"reasonix providerDef is missing required field(s): {', '.join(missing)}"
+        )
+    return _reasonix_provider_block(
+        name=fields["id"],
+        kind=str(provider_def.get("kind") or "openai").strip() or "openai",
+        base_url=fields["baseUrl"],
+        model=fields["model"],
+        api_key_env=str(provider_def.get("apiKeyEnv") or "").strip(),
+    )
+
+
+def _reasonix_provider_block(
+    *, name: str, kind: str, base_url: str, model: str, api_key_env: str
+) -> str:
+    """Render one reasonix ``[[providers]]`` block. The key is referenced by env-var name
+    (``api_key_env``), never its value; ``api_key_env`` is omitted when empty (keyless)."""
+    lines = [
+        "[[providers]]",
+        f'name = "{_toml_escape(name)}"',
+        f'kind = "{_toml_escape(kind)}"',
+        f'base_url = "{_toml_escape(base_url)}"',
+        f'model = "{_toml_escape(model)}"',
+    ]
+    if api_key_env:
+        lines.append(f'api_key_env = "{_toml_escape(api_key_env)}"')
+    return "\n".join(lines)
+
+
+def _reasonix_toml(default_model: str, agent_lines: list[str], provider_blocks: list[str]) -> str:
+    """Assemble a reasonix.toml: ``default_model``, an optional ``[agent]`` section, then the
+    ``[[providers]]`` blocks. Carries no secret (keys are referenced by env-var name)."""
+    parts = [f'default_model = "{_toml_escape(default_model)}"']
+    if agent_lines:
+        parts.append("[agent]\n" + "\n".join(agent_lines))
+    parts.extend(provider_blocks)
+    return "\n\n".join(parts) + "\n"
 
 
 def _provider_defs(value: object) -> list[dict]:

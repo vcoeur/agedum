@@ -10,8 +10,9 @@ the virtual files that would be injected, and the final argv without launching. 
 :mod:`agedum.provider`.
 
 **wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
-``--`` chooses which virtual files to build (Claude / kimi / opencode / cline); everything after
-``--`` is the child argv, run inside a mount namespace where those files are injected at
+``--`` chooses which virtual files to build (Claude / kimi / opencode / cline /
+reasonix); everything after ``--`` is the child argv, run inside a mount namespace where
+those files are injected at
 the harness's expected paths. ``--dry-run`` prints the virtual files that would be
 injected without running the command. This is the low-level entry that provider mode
 builds on; users normally launch via ``agedum <name>``.
@@ -31,7 +32,14 @@ from pathlib import Path
 from rich.console import Console
 
 from agedum import __version__
-from agedum.harness import Plan, compile_claude, compile_cline, compile_kimi, compile_opencode
+from agedum.harness import (
+    Plan,
+    compile_claude,
+    compile_cline,
+    compile_kimi,
+    compile_opencode,
+    compile_reasonix,
+)
 from agedum.launcher import LauncherError, run_virtualfs
 from agedum.provider import (
     ProviderError,
@@ -52,12 +60,14 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "kimi": compile_kimi,
     "opencode": compile_opencode,
     "cline": compile_cline,
+    "reasonix": compile_reasonix,
 }
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
     "[--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode|cline> [--dry-run] -- <command> [args...]"
+    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix> [--dry-run] -- "
+    "<command> [args...]"
 )
 HELP = f"""{USAGE}
 
@@ -83,7 +93,7 @@ Wrapper mode (low-level; provider mode builds on it) — run any command inside 
 virtual-file context, with no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
-                        cline) then run the command after -- inside the namespace
+                        cline | reasonix) then run the command after -- inside the namespace
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
@@ -207,7 +217,9 @@ def _run_config(argv: list[str]) -> int:
     # `--run` is non-interactive: the prompt is in argv, so the harness must not inherit a
     # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
     non_interactive = prompt_text is not None and not prompt_interactive
-    return _run(launch.harness, command, close_stdin=non_interactive)
+    return _run(
+        launch.harness, command, close_stdin=non_interactive, config_files=launch.config_files
+    )
 
 
 def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
@@ -217,8 +229,25 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print(f"env file   {_abs_display(env_path)}")
     print()
     _print_environment(launch)
+    _print_config_files(launch)
     extra_args = _print_plan_sections(launch.harness)
     _print_command(command, extra_args, _secret_values(launch))
+
+
+def _print_config_files(launch) -> None:
+    """Show any agedum-generated config files (e.g. reasonix's ``reasonix.toml``).
+
+    Bound at the project root inside the namespace. The content carries no secret value —
+    it references the API key by env-var name — so it is printed verbatim.
+    """
+    if not launch.config_files:
+        return
+    print("generated config files (injected at the project root)")
+    for target, content in launch.config_files:
+        print(f"  {target}")
+        for line in content.splitlines():
+            print(f"    {line}")
+    print()
 
 
 def _secret_values(launch) -> list[str]:
@@ -399,7 +428,7 @@ def _run_wrapper(argv: list[str]) -> int:
             else:
                 index += 1
                 if index >= len(flags):
-                    _die("--wrapper requires a harness: claude, kimi, opencode, or cline")
+                    _die("--wrapper requires a harness: claude, kimi, opencode, cline, or reasonix")
                 value = flags[index]
             if value not in _COMPILERS:
                 _die(f"unknown harness for --wrapper: {value}")
@@ -411,7 +440,7 @@ def _run_wrapper(argv: list[str]) -> int:
         index += 1
 
     if mode is None:
-        _die("a harness is required: --wrapper claude|kimi|opencode|cline")
+        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix")
 
     if dry_run:
         print(f"harness    {mode}")
@@ -423,10 +452,19 @@ def _run_wrapper(argv: list[str]) -> int:
     return _run(mode, command)
 
 
-def _run(mode: str, command: list[str], *, close_stdin: bool = False) -> int:
+def _run(
+    mode: str,
+    command: list[str],
+    *,
+    close_stdin: bool = False,
+    config_files: tuple[tuple[str, str], ...] = (),
+) -> int:
     project = load_source()
     global_ = load_global_source()
-    if not any((project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)):
+    has_context = any(
+        (project.agents_md, project.skills_dir, global_.agents_md, global_.skills_dir)
+    )
+    if not has_context and not config_files:
         _err.print(
             "[yellow]agedum:[/] no AGENTS.md or .agents/skills/ (project or global) — "
             "running the command with no injected context."
@@ -434,6 +472,7 @@ def _run(mode: str, command: list[str], *, close_stdin: bool = False) -> int:
     dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-"))
     try:
         plan = _COMPILERS[mode](project, global_, dest)
+        _inject_config_files(plan, project.root, dest, config_files)
         with _maybe_fold_proxy(mode):
             return run_virtualfs(project.root, plan, command, close_stdin=close_stdin)
     except LauncherError as exc:
@@ -441,6 +480,25 @@ def _run(mode: str, command: list[str], *, close_stdin: bool = False) -> int:
         return 1
     finally:
         shutil.rmtree(dest, ignore_errors=True)
+
+
+def _inject_config_files(
+    plan: Plan, project_root: Path, dest: Path, config_files: tuple[tuple[str, str], ...]
+) -> None:
+    """Write each agedum-generated config file into ``dest`` and bind it at the project root.
+
+    ``config_files`` are ``(project-root-relative target, content)`` pairs (reasonix's
+    ``reasonix.toml``). The bind goes through the same launcher path as every other bind, so
+    ``assert_safe`` still refuses a git-tracked target — a provider config dropped over a
+    tracked file would otherwise be committable.
+    """
+    for rel_target, content in config_files:
+        out = dest / "config-files" / rel_target
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(content)
+        target = project_root / rel_target
+        plan.binds.append((out, target))
+        plan.origins[target] = f"<agedum-generated {rel_target}>"
 
 
 @contextmanager
