@@ -83,6 +83,25 @@ agedum claude-deepseek-auto --run "summarise the diff"      # run once, then exi
 agedum opencode-deepseek --run "explain this code"
 ```
 
+### Listing providers
+
+`agedum --providers` prints every `*.json` config in the providers directory
+(`$AGENTS_PROVIDERS_DIR`, default `~/.config/agents/providers`) as aligned
+`name  harness  model` rows — the `name` column is exactly what you pass to
+`agedum <name>`. A config with no `config.model` shows `-`; one that won't parse is
+listed with an `[unreadable: …]` note rather than aborting the listing. A missing or
+empty directory is stated explicitly.
+
+```text
+$ agedum --providers
+providers in ~/.config/agents/providers
+
+  claude-deepseek-auto   claude     deepseek-v4-pro
+  claude                 claude     -
+  opencode-deepseek      opencode   deepseek/deepseek-v4-pro
+  reasonix-deepseek      reasonix   deepseek-pro
+```
+
 ## Wrapper mode
 
 ```text
@@ -127,6 +146,7 @@ agedum --wrapper cline -- cline task "review this change"
 
 | Flag | Effect |
 |---|---|
+| `--providers` | List the provider configs in `$AGENTS_PROVIDERS_DIR` (default `~/.config/agents/providers`) as `name  harness  model`, then exit. See [Listing providers](#listing-providers). |
 | `--version`, `-V` | Print `agedum <version>` and exit. |
 | `-h`, `--help` | Print usage and exit. |
 

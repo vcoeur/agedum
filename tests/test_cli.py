@@ -816,3 +816,52 @@ def test_provider_reasonix_custom_endpoint_dry_run_shows_toml(monkeypatch, tmp_p
     assert 'api_key_env = "MY_KEY"' in out
     assert "--model agedum" in out
     assert "sk-secret-zzz" not in out  # the key value is never written or printed
+
+
+# --- --providers listing ---
+
+
+def test_providers_lists_name_harness_model(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "claude-ds.json").write_text(
+        json.dumps({"harness": "claude", "config": {"model": "deepseek-v4-pro"}})
+    )
+    (providers / "kimi.json").write_text(json.dumps({"harness": "kimi"}))
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--providers"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert str(providers) in out
+    assert "claude-ds" in out and "claude" in out and "deepseek-v4-pro" in out
+    assert "kimi" in out
+
+
+def test_providers_missing_dir_notes_absence(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(tmp_path / "absent"))
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--providers"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "no providers directory" in captured.err
+
+
+def test_providers_invalid_config_is_listed_not_fatal(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "good.json").write_text(json.dumps({"harness": "kimi"}))
+    (providers / "broken.json").write_text("{ not json")
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--providers"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "good" in out and "kimi" in out
+    assert "broken" in out and "unreadable" in out

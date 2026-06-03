@@ -124,14 +124,20 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   cline, and reasonix are pure binds). `--dry-run` prints the injected virtual files without
   running. Context and command are decoupled.
 
+Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch, like
+`--version`): **`--providers`** prints every `*.json` config in `providers_dir()` as
+`name  harness  model` (via `provider.list_providers` → `_run_list_providers`), honouring
+`$AGENTS_PROVIDERS_DIR`; a config that won't parse is listed with its error, never fatal.
+
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
 `compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
-per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the
-`foldSystemMessages` reverse proxy), `cli/main.py` (parse + `_COMPILERS` dispatch +
-`_run_config` / `_run_wrapper`).
+`list_providers` → `ProviderSummary` rows for `--providers`; per-harness env mapping
+mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` reverse proxy),
+`cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config` / `_run_wrapper` /
+`_run_list_providers`).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 

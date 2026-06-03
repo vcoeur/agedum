@@ -7,6 +7,7 @@ from agedum.provider import (
     ProviderError,
     build_launch,
     default_env_file,
+    list_providers,
     load_config,
     parse_env_file,
     providers_dir,
@@ -78,6 +79,45 @@ def test_load_config_invalid_json(tmp_path):
     bad.write_text("{ not json")
     with pytest.raises(ProviderError, match="invalid JSON"):
         load_config(bad)
+
+
+# --- provider listing ---
+
+
+def test_list_providers_summarises_name_harness_model(tmp_path):
+    (tmp_path / "claude-ds.json").write_text(
+        json.dumps({"harness": "claude", "config": {"model": "deepseek-v4-pro"}})
+    )
+    (tmp_path / "kimi.json").write_text(json.dumps({"harness": "kimi"}))
+    summaries = list_providers(tmp_path)
+    assert [(s.name, s.harness, s.model) for s in summaries] == [
+        ("claude-ds", "claude", "deepseek-v4-pro"),
+        ("kimi", "kimi", None),
+    ]
+
+
+def test_list_providers_sorted_by_name(tmp_path):
+    for name in ("zeta", "alpha", "mid"):
+        (tmp_path / f"{name}.json").write_text(json.dumps({"harness": "kimi"}))
+    assert [s.name for s in list_providers(tmp_path)] == ["alpha", "mid", "zeta"]
+
+
+def test_list_providers_invalid_config_carries_error_not_raise(tmp_path):
+    (tmp_path / "broken.json").write_text("{ not json")
+    (summary,) = list_providers(tmp_path)
+    assert summary.name == "broken"
+    assert summary.harness is None and summary.model is None
+    assert summary.error is not None
+
+
+def test_list_providers_missing_dir_is_empty(tmp_path):
+    assert list_providers(tmp_path / "absent") == []
+
+
+def test_list_providers_defaults_to_providers_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(tmp_path))
+    (tmp_path / "x.json").write_text(json.dumps({"harness": "opencode", "config": {"model": "m"}}))
+    assert [(s.name, s.harness, s.model) for s in list_providers()] == [("x", "opencode", "m")]
 
 
 # --- required-env validation ---

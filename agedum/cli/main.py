@@ -45,8 +45,10 @@ from agedum.provider import (
     ProviderError,
     build_launch,
     default_env_file,
+    list_providers,
     load_config,
     parse_env_file,
+    providers_dir,
     resolve_config_path,
     with_prompt,
 )
@@ -97,6 +99,8 @@ virtual-file context, with no provider env:
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
+  --providers           list the provider configs in $AGENTS_PROVIDERS_DIR
+                        (default ~/.config/agents/providers) and exit
   --version, -V         print the version and exit
   -h, --help            show this help
 """
@@ -115,6 +119,8 @@ def app() -> None:
     if argv and argv[0] in ("--version", "-V"):
         print(f"agedum {__version__}")
         return
+    if argv and argv[0] == "--providers":
+        raise SystemExit(_run_list_providers())
     if not argv or argv[0] in ("-h", "--help"):
         print(HELP)
         return
@@ -124,6 +130,34 @@ def app() -> None:
     if is_wrapper:
         raise SystemExit(_run_wrapper(argv))
     raise SystemExit(_run_config(argv))
+
+
+def _run_list_providers() -> int:
+    """Print every provider config in the providers dir as ``name  harness  model``, then exit.
+
+    Honours ``$AGENTS_PROVIDERS_DIR`` (default ``~/.config/agents/providers``). A missing or
+    empty directory is stated rather than left as a bare header; a config that won't parse is
+    listed with its error so it stays visible instead of being silently dropped.
+    """
+    directory = providers_dir()
+    summaries = list_providers(directory)
+    print(f"providers in {_abs_display(directory)}")
+    if not directory.is_dir():
+        _err.print("[yellow]agedum:[/] no providers directory there")
+        return 0
+    if not summaries:
+        print("  (none)")
+        return 0
+    print()
+    name_width = max(len(summary.name) for summary in summaries)
+    harness_width = max(len(summary.harness or "?") for summary in summaries)
+    for summary in summaries:
+        if summary.error is not None:
+            print(f"  {summary.name.ljust(name_width)}   [unreadable: {summary.error}]")
+            continue
+        harness = (summary.harness or "?").ljust(harness_width)
+        print(f"  {summary.name.ljust(name_width)}   {harness}   {summary.model or '-'}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
