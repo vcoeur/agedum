@@ -98,17 +98,17 @@ The invocation has two halves split by a literal `--`:
   (`claude` / `kimi` / `opencode` / `cline`), plus the optional `--dry-run`.
 - **After `--`** — the command to run, **verbatim**, including its own binary and
   flags. agedum does not parse or rewrite it (some harnesses get extra flags
-  *appended* — see [Harnesses](harnesses.md)).
+  *appended* — see [Wrapper mode](wrapper.md)).
 
 Decoupling the context from the command keeps the flag space open for additional
 modes without touching how commands are passed.
 
 | Flag | Effect |
 |---|---|
-| `--wrapper claude` | Render the source in Claude format ([details](harnesses.md#claude)). |
-| `--wrapper kimi` | Render the source in kimi-cli format ([details](harnesses.md#kimi)). |
-| `--wrapper opencode` | Render the source in opencode format ([details](harnesses.md#opencode)). |
-| `--wrapper cline` | Render the source in Cline format ([details](harnesses.md#cline)). |
+| `--wrapper claude` | Render the source in Claude format ([details](harnesses/claude.md#wrapper-resolution)). |
+| `--wrapper kimi` | Render the source in kimi-cli format ([details](harnesses/kimi.md#wrapper-resolution)). |
+| `--wrapper opencode` | Render the source in opencode format ([details](harnesses/opencode.md#wrapper-resolution)). |
+| `--wrapper cline` | Render the source in Cline format ([details](harnesses/cline.md#wrapper-resolution)). |
 | `--dry-run` | Print the virtual files that would be injected (and any appended args), then exit without running the command. |
 
 `--wrapper claude` and `--wrapper=claude` are both accepted. A harness is required; an
