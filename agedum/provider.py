@@ -422,37 +422,81 @@ def _reasonix_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Bui
     # DEEPSEEK_API_KEY), like kimi.
     base_url = str(block.get("baseUrl") or "").strip()
     model = str(block.get("model") or "").strip()
-    if base_url:
-        # Custom endpoint: reasonix has no base-URL flag or env, so agedum generates a
-        # ./reasonix.toml that defines a one-off `[[providers]]` block + default_model and
-        # binds it at the project root (the launcher writes it — see Launch.config_files).
-        # The project file is reasonix's highest-priority TOML source, and `[[providers]]`
-        # replaces the providers list wholesale while the user config's scalars and plugins
-        # survive the merge — so the custom provider is selected without masking the user's
-        # other settings. Here `model` is the *upstream* model id at that endpoint, not a
-        # reasonix provider name.
-        if not model:
-            raise ProviderError(
-                "reasonix `baseUrl` requires `model` — the upstream model id served at that "
-                "endpoint (e.g. 'deepseek-v4-pro')"
-            )
-        toml = _reasonix_provider_toml(
-            name=REASONIX_PROVIDER_NAME,
-            kind=str(block.get("kind") or "openai").strip() or "openai",
-            base_url=base_url,
-            model=model,
-            api_key_env=secret_env,
-        )
-        command = ["reasonix", "chat", "--model", REASONIX_PROVIDER_NAME]
-        return {}, [], command, (("reasonix.toml", toml),)
-    # No baseUrl: select a provider reasonix already knows by name (a built-in like
-    # `deepseek-pro`, or one configured in reasonix.toml). `chat` is the interactive
+    provider_defs = _provider_defs(block.get("providerDef"))
+    agent_lines = _reasonix_agent_lines(block)
+
+    # A reasonix.toml is generated whenever reasonix needs on-disk-only config it has no flag
+    # for: a custom endpoint (`baseUrl` / `providerDef`) or the `[agent]` two-model routing
+    # (`subagentModel` / `plannerModel` / `autoPlan`). Otherwise `model` just selects a
+    # provider reasonix already knows by name (a built-in like `deepseek-pro`, or one in the
+    # user's reasonix.toml) via --model, and nothing is injected. `chat` is the interactive
     # subcommand (a bare `reasonix` only shows a welcome screen); with_prompt swaps it for
     # `run` on --run. Both `chat` and `run` accept `--model`.
-    command = ["reasonix", "chat"]
-    if model:
-        command += ["--model", model]
-    return {}, [], command, ()
+    if not (base_url or provider_defs or agent_lines):
+        command = ["reasonix", "chat"]
+        if model:
+            command += ["--model", model]
+        return {}, [], command, ()
+
+    if base_url and provider_defs:
+        raise ProviderError(
+            "reasonix config sets both `baseUrl` and `providerDef`; use one — `baseUrl` for a "
+            "single inline endpoint, `providerDef` for one or more named providers"
+        )
+    if not model:
+        raise ProviderError(
+            "reasonix needs `model` (the executor) to set as default_model — a built-in / "
+            "providerDef provider name, or (with baseUrl) the upstream model id at that endpoint"
+        )
+
+    # The generated ./reasonix.toml is bound at the project root (reasonix's highest-priority
+    # TOML source). `[[providers]]` replaces the providers list wholesale while the user
+    # config's scalars + plugins survive the merge — so a config with NO providers block (only
+    # default_model + [agent], referencing built-ins) keeps reasonix's built-in providers.
+    # `baseUrl` is the single-inline shorthand (one provider named `agedum`, `model` = its
+    # upstream id); `providerDef` is the explicit multi-provider form whose entries `model` /
+    # `subagentModel` / `plannerModel` reference by id.
+    if base_url:
+        default_model = REASONIX_PROVIDER_NAME
+        provider_blocks = [
+            _reasonix_provider_block(
+                name=REASONIX_PROVIDER_NAME,
+                kind=str(block.get("kind") or "openai").strip() or "openai",
+                base_url=base_url,
+                model=model,
+                api_key_env=secret_env,
+            )
+        ]
+    else:
+        default_model = model
+        provider_blocks = [_reasonix_provider_block_from_def(pd) for pd in provider_defs]
+
+    toml = _reasonix_toml(default_model, agent_lines, provider_blocks)
+    command = ["reasonix", "chat", "--model", default_model]
+    return {}, [], command, (("reasonix.toml", toml),)
+
+
+def _reasonix_agent_lines(block: dict) -> list[str]:
+    """The ``[agent]`` body lines for reasonix two-model routing, or ``[]`` when none are set.
+
+    ``subagentModel`` → ``subagent_model`` (default model for runAs=subagent skills),
+    ``plannerModel`` → ``planner_model`` (planner/executor two-model collaboration),
+    ``autoPlan`` → ``auto_plan`` (``off`` | ``ask`` | ``on``). Each references a provider name
+    reasonix knows (a built-in or a ``providerDef`` id).
+    """
+    lines: list[str] = []
+    subagent = str(block.get("subagentModel") or "").strip()
+    if subagent:
+        lines.append(f'subagent_model = "{_toml_escape(subagent)}"')
+    planner = str(block.get("plannerModel") or "").strip()
+    if planner:
+        lines.append(f'planner_model = "{_toml_escape(planner)}"')
+    auto_plan = str(block.get("autoPlan") or "").strip()
+    if auto_plan:
+        if auto_plan not in ("off", "ask", "on"):
+            raise ProviderError("reasonix `autoPlan` must be one of: off, ask, on")
+        lines.append(f'auto_plan = "{_toml_escape(auto_plan)}"')
+    return lines
 
 
 def _toml_escape(value: str) -> str:
@@ -460,18 +504,34 @@ def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _reasonix_provider_toml(
+def _reasonix_provider_block_from_def(provider_def: dict) -> str:
+    """Render one ``[[providers]]`` block from a reasonix ``providerDef`` entry.
+
+    Fields: ``id`` → name, ``baseUrl`` → base_url, ``model`` → model, ``apiKeyEnv`` →
+    api_key_env (optional; omitted for a keyless endpoint), ``kind`` (default ``openai``).
+    ``id`` / ``baseUrl`` / ``model`` are required.
+    """
+    fields = {key: str(provider_def.get(key) or "").strip() for key in ("id", "baseUrl", "model")}
+    missing = [key for key, value in fields.items() if not value]
+    if missing:
+        raise ProviderError(
+            f"reasonix providerDef is missing required field(s): {', '.join(missing)}"
+        )
+    return _reasonix_provider_block(
+        name=fields["id"],
+        kind=str(provider_def.get("kind") or "openai").strip() or "openai",
+        base_url=fields["baseUrl"],
+        model=fields["model"],
+        api_key_env=str(provider_def.get("apiKeyEnv") or "").strip(),
+    )
+
+
+def _reasonix_provider_block(
     *, name: str, kind: str, base_url: str, model: str, api_key_env: str
 ) -> str:
-    """Render a minimal ``reasonix.toml`` defining one provider plus ``default_model``.
-
-    The API key is referenced by its env-var **name** (``api_key_env``), never its value,
-    so the generated file carries no secret. ``api_key_env`` is omitted for a keyless
-    endpoint (an empty ``secretEnv``).
-    """
+    """Render one reasonix ``[[providers]]`` block. The key is referenced by env-var name
+    (``api_key_env``), never its value; ``api_key_env`` is omitted when empty (keyless)."""
     lines = [
-        f'default_model = "{_toml_escape(name)}"',
-        "",
         "[[providers]]",
         f'name = "{_toml_escape(name)}"',
         f'kind = "{_toml_escape(kind)}"',
@@ -480,7 +540,17 @@ def _reasonix_provider_toml(
     ]
     if api_key_env:
         lines.append(f'api_key_env = "{_toml_escape(api_key_env)}"')
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines)
+
+
+def _reasonix_toml(default_model: str, agent_lines: list[str], provider_blocks: list[str]) -> str:
+    """Assemble a reasonix.toml: ``default_model``, an optional ``[agent]`` section, then the
+    ``[[providers]]`` blocks. Carries no secret (keys are referenced by env-var name)."""
+    parts = [f'default_model = "{_toml_escape(default_model)}"']
+    if agent_lines:
+        parts.append("[agent]\n" + "\n".join(agent_lines))
+    parts.extend(provider_blocks)
+    return "\n\n".join(parts) + "\n"
 
 
 def _provider_defs(value: object) -> list[dict]:
