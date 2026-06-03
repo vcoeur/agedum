@@ -604,3 +604,56 @@ def test_bare_launch_keeps_stdin(monkeypatch, tmp_path):
     assert exc.value.code == 0
     assert captured["command"] == ["claude"]
     assert captured["close_stdin"] is False
+
+
+# --- cline provider mode ---
+
+
+def test_provider_cline_launches(monkeypatch, tmp_path):
+    # `agedum <provider>` now accepts a cline harness and builds its flag command.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "cline", lambda project, global_, dest: cli.Plan())
+    _write_provider(
+        tmp_path,
+        "cl",
+        {"harness": "cline", "config": {"model": "claude-opus-4-8", "provider": "anthropic"}},
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "cl"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["cline", "--model", "claude-opus-4-8", "--provider", "anthropic"]
+    assert captured["close_stdin"] is False
+
+
+def test_provider_cline_dry_run_masks_key(monkeypatch, tmp_path, capsys):
+    # cline passes the token as a `--key` argv flag — the first harness to put a secret in
+    # the command, so the dry-run command line must mask it.
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "cl.json").write_text(
+        json.dumps(
+            {
+                "harness": "cline",
+                "slug": "cline-anthropic",
+                "secretEnv": "ANTHROPIC_API_KEY",
+                "config": {"model": "claude-opus-4-8", "provider": "anthropic"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-cline-supersecret\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "cline", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "cl"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "cline" in out and "--key" in out  # the command line is shown
+    assert "sk-cline-supersecret" not in out  # token masked in the argv
+    assert "***" in out
