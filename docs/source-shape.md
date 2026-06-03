@@ -1,9 +1,9 @@
 ---
-title: Source shape · agedum
-description: The agent-neutral source agedum reads — a root AGENTS.md for instructions and .agents/skills/<name>/ for skills, with per-harness SKILL.<harness>.md overlays.
+title: Source & scopes · agedum
+description: The agent-neutral source agedum reads — a root AGENTS.md for instructions and .agents/skills/<name>/ for skills, with per-harness overlays — and the two scopes (project + global) it reads that source at, each landing at its own native harness location.
 ---
 
-# Source shape
+# Source & scopes
 
 agedum reads a single **agent-neutral source** and renders it per harness at launch.
 The source is the [`AGENTS.md`](https://agents.md) convention plus a sibling skills
@@ -27,26 +27,18 @@ my-project/
 ```
 
 Nothing here is harness-specific except the optional `SKILL.<harness>.md` overlays —
-that is the whole point. You author once; agedum translates.
+that is the whole point. You author once; agedum translates. agedum reads this source at
+**two [scopes](#scopes)** — a project copy in the repo and a global copy under your home
+config — and lands each at its own native harness location.
 
 ## AGENTS.md
 
 A plain markdown file at the source root holding the standing instructions for the
 agent — house style, conventions, what to do and not do. agedum carries it to each
-harness's instruction location without rewriting its content (the user-scope copy may
-be merged with a per-harness overlay — see below):
-
-- **Claude** → `CLAUDE.md` (its content is **not** rewritten — only relocated).
-- **kimi** → the project `AGENTS.md` is read natively at its source location; the global
-  `AGENTS.md` is folded into a generated `--agent-file` as the agent's additional role
-  prompt.
-- **opencode** → the project `AGENTS.md` is read natively at its source location; the
-  global `AGENTS.md` is relocated to `~/.config/opencode/AGENTS.md`.
-- **Cline** → the project `AGENTS.md` is read natively at its source location; the global
-  `AGENTS.md` is relocated to the cross-tool path `~/.agents/AGENTS.md`.
-
-See the [harness pages](harnesses/index.md) for exactly where it lands per harness, and
-[Scopes](scopes.md) for the project vs global copies.
+harness's instruction location **without rewriting its content** — only relocating it (or
+leaving it in place for a harness that reads `AGENTS.md` natively). For exactly where it
+lands per harness, see the [harness pages](harnesses/index.md); for the project vs global
+copies, see [Scopes](#scopes) below.
 
 There is no front-matter contract on `AGENTS.md` — it is opaque markdown. Keep config
 out of it; agedum carries instructions, not settings.
@@ -65,8 +57,8 @@ sibling exists:
 - Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
   concatenation: the base, a blank line, then the overlay body.
 - This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
-  kimi and opencode the project `AGENTS.md` is read natively and never injected, so a
-  project overlay would have nowhere to land.
+  kimi, opencode, and cline the project `AGENTS.md` is read natively and never injected, so
+  a project overlay would have nowhere to land.
 
 ## Skills
 
@@ -126,17 +118,79 @@ every other `*.md` and every non-markdown file is carried through unchanged.
     out of the copy. A `README.md` or `checklist.md` inside a skill is a normal asset
     and is copied. Name your overlays exactly `SKILL.<harness>.md`.
 
-## Locating the source
+## Scopes { #scopes }
+
+agedum reads the agent-neutral source at **two scopes** and keeps them distinct all the
+way through. This mirrors how agent CLIs already think about context: a *user-scope* layer
+that travels with you across every project, and a *project-scope* layer that lives in a
+given repo. agedum preserves that distinction rather than flattening it.
+
+| Scope | Instructions source | Skills source |
+|---|---|---|
+| **Project** | `<root>/AGENTS.md` | `<root>/.agents/skills/` |
+| **Global** (user) | `~/.config/agents/AGENTS.md` | `~/.agents/skills/` |
+
+### Locating the source { #locating-the-source }
 
 agedum does not require you to point at the source — it discovers it:
 
-- **Project root** is the nearest ancestor of the current directory (including it)
-  that contains `AGENTS.md`, a `.agents/` directory, or `.git`. Within that root,
-  `AGENTS.md` and `.agents/skills/` are picked up if present.
-- **Global source** is `~/.config/agents/AGENTS.md` (honouring `$XDG_CONFIG_HOME`) for
-  instructions and `~/.agents/skills/` for skills.
+- **Project root** is the nearest ancestor of the current directory (including it) that
+  contains `AGENTS.md`, a `.agents/` directory, or `.git`. Within that root, `AGENTS.md`
+  and `.agents/skills/` are picked up if present.
+- **Global source** is `~/.config/agents/AGENTS.md` (honouring `$XDG_CONFIG_HOME` — if set,
+  agedum reads `$XDG_CONFIG_HOME/agents/AGENTS.md`) for instructions, and `~/.agents/skills/`
+  (always) for skills.
 
-Either scope's `AGENTS.md` or `skills/` may be absent — agedum just renders whatever it
-finds. If *nothing* is found in either scope, it warns and runs your command with no
-injected context. The two scopes are kept distinct rather than merged; see
-[Scopes](scopes.md).
+### Where each scope lands
+
+The key design choice: each scope is rendered to **its own native harness location**.
+agedum never concatenates the two into one file — the harness reads both natively and
+applies its own precedence, exactly as it would if you had authored them by hand. For the
+**Claude** harness:
+
+| Scope | Instructions target | Skills target |
+|---|---|---|
+| Project | `<root>/CLAUDE.md` | `<root>/.claude/skills/` |
+| Global | `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`) | `$CLAUDE_CONFIG_DIR/skills/` (default `~/.claude/skills/`) |
+
+```mermaid
+flowchart LR
+  pAg["project AGENTS.md"] --> pCl["./CLAUDE.md"]
+  pSk["project .agents/skills/"] --> pClSk["./.claude/skills/"]
+  gAg["~/.config/agents/AGENTS.md"] --> gCl["~/.claude/CLAUDE.md"]
+  gSk["~/.agents/skills/"] --> gClSk["~/.claude/skills/"]
+```
+
+The targets differ per harness — kimi reads the project `AGENTS.md` natively and injects
+the global one via a `--agent-file`; opencode and cline read the project `AGENTS.md`
+natively and bind the global one to their own config path. See the
+[harness pages](harnesses/index.md) for each harness's full mapping.
+
+### Only the two scope paths are touched
+
+For the global scope, agedum overlays **only** the harness's instruction file and skills
+directory under the user config dir — for Claude, just `~/.claude/CLAUDE.md` and
+`~/.claude/skills/`. Everything else in `~/.claude` is left exactly as it is: your
+`~/.claude.json` auth, settings, history, and any other state are never shadowed. The
+overlay is scoped as tightly as possible.
+
+The skills overlay is tighter still: agedum binds each skill folder it ships individually
+(`~/.claude/skills/<name>`), so a hand-authored skill you keep in that dir but agedum does
+not ship stays visible. Only same-named folders are replaced. See
+[the mount namespace](internals.md#the-mount-namespace).
+
+### Either scope may be empty
+
+You do not need both scopes. Common setups:
+
+- **Project only** — a repo with its own `AGENTS.md` + `.agents/skills/`, no global
+  source. Useful for shipping agent context with the code.
+- **Global only** — personal instructions and skills under `~/.config/agents/` +
+  `~/.agents/skills/` that you want in every project, run from a directory with no project
+  source.
+- **Both** — the global layer travels with you; the project layer adds repo-specific
+  context on top. The harness sees them as user-scope and project-scope respectively.
+
+If a given scope has no `AGENTS.md`, only its skills are rendered (and vice-versa). If
+*both* scopes are entirely empty, agedum prints a warning and runs your command with
+nothing injected — it never refuses to launch on that basis.

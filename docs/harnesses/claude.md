@@ -7,7 +7,7 @@ description: How agedum drives Claude Code — wrapper-mode resolution (AGENTS.m
 
 Claude Code discovers its context purely from the filesystem, so agedum injects files at
 the paths Claude already reads and appends nothing to your command. This is the reference
-harness: pure binds, each [scope](../scopes.md) at its own native location.
+harness: pure binds, each [scope](../source-shape.md#scopes) at its own native location.
 
 ## Wrapper resolution { #wrapper-resolution }
 
@@ -22,7 +22,7 @@ harness: pure binds, each [scope](../scopes.md) at its own native location.
 
 - Each scope lands at **its own** location — never concatenated. The project `CLAUDE.md`
   carries only project instructions; the user `CLAUDE.md` only the global ones. Claude
-  reads both and applies its own precedence. See [Scopes](../scopes.md).
+  reads both and applies its own precedence. See [Scopes](../source-shape.md#scopes).
 - The global `CLAUDE.md` is the base `~/.config/agents/AGENTS.md` with an optional
   `AGENTS.claude.md` overlay appended (user scope only; the project `CLAUDE.md` takes no
   overlay). See [per-harness overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope).
