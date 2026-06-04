@@ -1,6 +1,6 @@
 ---
 title: Harnesses · agedum
-description: One page per agent CLI agedum drives — Claude, kimi, opencode, Cline, reasonix, and aider. Each documents how wrapper mode resolves the agent-neutral source for it and how to write a provider config for it.
+description: One page per agent CLI agedum drives — Claude, kimi, opencode, Cline, reasonix, aider, and pi. Each documents how wrapper mode resolves the agent-neutral source for it and how to write a provider config for it.
 ---
 
 # Harnesses
@@ -21,6 +21,7 @@ A **harness** is an agent CLI agedum drives. Each has its own page documenting t
 | [Cline](cline.md) | read in place | `~/.agents/AGENTS.md` | none | `--key` argv flag |
 | [reasonix](reasonix.md) | read in place | `~/.config/reasonix/AGENTS.md` | none | env via `api_key_env` (`requiredEnv` export) |
 | [aider](aider.md) | injected → `--read` | a second `--read` | `--read` (×N) | env (litellm, `requiredEnv` export) |
+| [pi](pi.md) | read in place | `~/.pi/agent/AGENTS.md` | none | env by name (`requiredEnv` export) |
 
 Skills are binds at the harness's own skills dir, compiled with the matching
 `SKILL.<harness>.md` overlay — in every harness **except [aider](aider.md)**, which has no

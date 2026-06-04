@@ -67,13 +67,15 @@ flowchart LR
   agedum -->|"--wrapper cline"| cln["AGENTS.md (native) + .cline/skills/"]
   agedum -->|"--wrapper reasonix"| rx["AGENTS.md (native) + .reasonix/skills/"]
   agedum -->|"--wrapper aider"| ai["AGENTS.md via --read (no skills)"]
+  agedum -->|"--wrapper pi"| pi["AGENTS.md (native) + .pi/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   oc --> ns
   cln --> ns
   rx --> ns
   ai --> ns
-  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix / aider)"]
+  pi --> ns
+  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix / aider / pi)"]
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
@@ -91,6 +93,7 @@ flowchart LR
 | Cline  | `--wrapper cline`  | Implemented — project + global scope; provider mode |
 | reasonix | `--wrapper reasonix` | Implemented — project + global scope; provider mode |
 | aider  | `--wrapper aider`  | Implemented — instructions via `--read` (no skills); provider mode |
+| pi     | `--wrapper pi`     | Implemented — project + global scope; provider mode (custom endpoint + subagent routing) |
 
 [Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
 launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper

@@ -77,6 +77,19 @@ agedum has two modes:
 > to opt back in. `--run` maps to `aider --message "<text>"`; `--prompt` is unsupported
 > (`--message` runs once and exits).
 
+> [!NOTE]
+> **pi** (`--wrapper pi`) is supported as well — the earendil-works
+> [pi](https://pi.dev) agent, pure path-discovery like opencode/Cline/reasonix. The project
+> `AGENTS.md` is read natively (cwd→root walk); the global `AGENTS.md` binds to
+> `~/.pi/agent/AGENTS.md`; skills bind to `./.pi/skills/` (project) and `~/.pi/agent/skills/`
+> (global). No extra flags. In **provider mode** `model` / `provider` / `thinking` map to
+> CLI flags and the key rides the environment by name. pi has no base-URL flag, so a
+> `baseUrl` makes agedum generate `~/.pi/agent/models.json` (a provider named `agedum`, key
+> referenced by `$VAR`); a `subagentModel` generates `~/.pi/agent/settings.json` routing
+> every [pi-subagents](https://pi.dev/packages/pi-subagents) built-in agent — both merged
+> onto your existing files. `--prompt` seeds `pi "<text>"`; `--run` maps to `pi --print
+> "<text>"`.
+
 ## Usage
 
 ```bash
@@ -93,6 +106,7 @@ agedum --wrapper claude -- claude --model sonnet -p "review this"
 agedum --wrapper cline -- cline task "review this"  # drive Cline with the same source
 agedum --wrapper reasonix -- reasonix chat          # drive reasonix with the same source
 agedum --wrapper aider -- aider --no-git            # drive aider (pass --no-git in wrapper mode)
+agedum --wrapper pi -- pi                           # drive pi with the same source
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --providers                                # list the provider configs (name, harness, model)

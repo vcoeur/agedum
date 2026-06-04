@@ -686,3 +686,77 @@ def _aider_read(plan: Plan, instructions: str | None, dest: Path, source: Path |
     plan.extra_args += ["--read", str(out)]
     if source is not None:
         plan.origins[out] = str(source)
+
+
+# ---------------------------------------------------------------------------
+# pi harness (earendil-works pi-coding-agent)
+# ---------------------------------------------------------------------------
+
+
+def pi_agent_dir() -> Path:
+    """pi's user-scope agent dir — ``$PI_CODING_AGENT_DIR`` or ``~/.pi/agent``.
+
+    pi reads its user-global context file (``AGENTS.md`` / ``CLAUDE.md``), skills,
+    ``models.json``, and ``settings.json`` from here (pi's ``getAgentDir()``).
+    """
+    override = os.environ.get("PI_CODING_AGENT_DIR")
+    return Path(override) if override else Path.home() / ".pi" / "agent"
+
+
+def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for pi (earendil-works pi-coding-agent). Like opencode/cline/
+    reasonix, pi is pure path-discovery (no appended flags), so every scope is a bind or a
+    native read:
+
+    * **project instructions** — pi walks cwd→root collecting ``AGENTS.md``/``CLAUDE.md``
+      (``loadProjectContextFiles``), so the project-root ``./AGENTS.md`` is read **natively**
+      — that is exactly the agent-neutral source file, so agedum injects nothing for it (and
+      could not — it is git-tracked);
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an optional
+      ``AGENTS.pi.md`` overlay) → ``<agentdir>/AGENTS.md`` where ``<agentdir>`` is
+      ``~/.pi/agent`` (:func:`pi_agent_dir`), the highest-priority user-scope context file pi
+      reads (``loadContextFileFromDir(agentDir)``, with ``AGENTS.md`` the first candidate);
+    * **project skills** → ``./.pi/skills/``; **global skills** → ``~/.pi/agent/skills/``.
+      pi auto-discovers ``SKILL.md`` folders from both dirs; each skill carries
+      ``name``/``description`` frontmatter — the neutral source shape — with a ``SKILL.pi.md``
+      overlay merged in.
+
+    No ``extra_args`` — pi discovers everything from disk.
+    """
+    plan = Plan()
+    agent_dir = pi_agent_dir()
+
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
+    # Global instructions (base + AGENTS.pi.md overlay) -> <agentdir>/AGENTS.md
+    # (project ./AGENTS.md is read natively).
+    global_instructions = _instructions(global_, "pi") if global_ is not None else None
+    if global_instructions is not None:
+        out = dest / "global" / "AGENTS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(global_instructions)
+        target = agent_dir / "AGENTS.md"
+        plan.binds.append((out, target))
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[target] = str(global_.agents_md)
+
+    # Project skills -> ./.pi/skills.
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.pi.md")
+        if out is not None:
+            target = project.root / ".pi" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
+
+    # Global skills -> ~/.pi/agent/skills.
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.pi.md")
+        if out is not None:
+            target = agent_dir / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
+
+    return plan

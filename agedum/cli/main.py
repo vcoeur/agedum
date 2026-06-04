@@ -10,8 +10,8 @@ the virtual files that would be injected, and the final argv without launching. 
 :mod:`agedum.provider`.
 
 **wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
-``--`` chooses which virtual files to build (Claude / kimi / opencode / cline /
-reasonix); everything after ``--`` is the child argv, run inside a mount namespace where
+``--`` chooses which virtual files to build (Claude / kimi / opencode / cline / reasonix /
+aider / pi); everything after ``--`` is the child argv, run inside a mount namespace where
 those files are injected at
 the harness's expected paths. ``--dry-run`` prints the virtual files that would be
 injected without running the command. This is the low-level entry that provider mode
@@ -39,6 +39,7 @@ from agedum.harness import (
     compile_cline,
     compile_kimi,
     compile_opencode,
+    compile_pi,
     compile_reasonix,
 )
 from agedum.launcher import LauncherError, run_virtualfs
@@ -48,6 +49,7 @@ from agedum.provider import (
     default_env_file,
     list_providers,
     load_config,
+    merge_json_onto_file,
     parse_env_file,
     providers_dir,
     resolve_config_path,
@@ -65,12 +67,13 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "cline": compile_cline,
     "reasonix": compile_reasonix,
     "aider": compile_aider,
+    "pi": compile_pi,
 }
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
     "[--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider> [--dry-run] -- "
+    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi> [--dry-run] -- "
     "<command> [args...]"
 )
 HELP = f"""{USAGE}
@@ -97,8 +100,8 @@ Wrapper mode (low-level; provider mode builds on it) — run any command inside 
 virtual-file context, with no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
-                        cline | reasonix | aider) then run the command after -- inside the
-                        namespace
+                        cline | reasonix | aider | pi) then run the command after -- inside
+                        the namespace
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
@@ -272,16 +275,19 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
 
 
 def _print_config_files(launch) -> None:
-    """Show any agedum-generated config files (e.g. reasonix's ``reasonix.toml``).
+    """Show any agedum-generated config files (reasonix's ``reasonix.toml``, pi's user-scope
+    ``models.json`` / ``settings.json``).
 
-    Bound at the project root inside the namespace. The content carries no secret value —
-    it references the API key by env-var name — so it is printed verbatim.
+    Each is bound inside the namespace at its target (project-root-relative or absolute). The
+    content carries no secret value — keys are referenced by env-var name — so it is printed
+    verbatim; a merged file shows the agedum fragment with a note.
     """
     if not launch.config_files:
         return
-    print("generated config files (injected at the project root)")
-    for target, content in launch.config_files:
-        print(f"  {target}")
+    print("generated config files")
+    for target, content, merge_json in launch.config_files:
+        note = "   (merged onto any existing file)" if merge_json else ""
+        print(f"  {target}{note}")
         for line in content.splitlines():
             print(f"    {line}")
     print()
@@ -474,7 +480,7 @@ def _run_wrapper(argv: list[str]) -> int:
                 if index >= len(flags):
                     _die(
                         "--wrapper requires a harness: "
-                        "claude, kimi, opencode, cline, reasonix, or aider"
+                        "claude, kimi, opencode, cline, reasonix, aider, or pi"
                     )
                 value = flags[index]
             if value not in _COMPILERS:
@@ -487,7 +493,7 @@ def _run_wrapper(argv: list[str]) -> int:
         index += 1
 
     if mode is None:
-        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider")
+        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider|pi")
 
     if dry_run:
         print(f"harness    {mode}")
@@ -530,22 +536,31 @@ def _run(
 
 
 def _inject_config_files(
-    plan: Plan, project_root: Path, dest: Path, config_files: tuple[tuple[str, str], ...]
+    plan: Plan, project_root: Path, dest: Path, config_files: tuple[tuple[str, str, bool], ...]
 ) -> None:
-    """Write each agedum-generated config file into ``dest`` and bind it at the project root.
+    """Write each agedum-generated config file into ``dest`` and bind it at its target.
 
-    ``config_files`` are ``(project-root-relative target, content)`` pairs (reasonix's
-    ``reasonix.toml``). The bind goes through the same launcher path as every other bind, so
+    ``config_files`` are ``(target, content, merge_json)`` triples: ``target`` is
+    project-root-relative (reasonix's ``reasonix.toml``) or absolute (pi's user-scope
+    ``~/.pi/agent/models.json`` + ``settings.json``); ``merge_json`` deep-merges ``content``
+    onto any existing JSON at the target so an injected user-scope file augments rather than
+    masks the user's own. The bind goes through the same launcher path as every other bind, so
     ``assert_safe`` still refuses a git-tracked target — a provider config dropped over a
     tracked file would otherwise be committable.
     """
-    for rel_target, content in config_files:
-        out = dest / "config-files" / rel_target
+    for target_spec, content, merge_json in config_files:
+        spec = Path(target_spec)
+        if spec.is_absolute():
+            target = spec
+            staged = Path(*spec.parts[1:])  # strip the leading "/" for a writable stage path
+        else:
+            target = project_root / target_spec
+            staged = Path(target_spec)
+        out = dest / "config-files" / staged
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(content)
-        target = project_root / rel_target
+        out.write_text(merge_json_onto_file(target, content) if merge_json else content)
         plan.binds.append((out, target))
-        plan.origins[target] = f"<agedum-generated {rel_target}>"
+        plan.origins[target] = f"<agedum-generated {target_spec}>"
 
 
 @contextmanager

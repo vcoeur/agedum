@@ -3,7 +3,7 @@
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
 private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**,
-**Cline**, **reasonix**, and **aider** harnesses at **project + global scope**.
+**Cline**, **reasonix**, **aider**, and **pi** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
@@ -71,9 +71,28 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   (then `autoCommits: false` → `--no-auto-commits`). Wrapper mode runs the literal command and
   does **not** force `--no-git` (documented caveat). `agedum --run` maps to `aider --message
   "<text>"`; `--prompt` is a fail-loud `ProviderError` (`--message` runs once and exits).
+- **pi** — the earendil-works [pi](https://pi.dev) agent (`@earendil-works/pi-coding-agent`).
+  Pure path-discovery like opencode/cline/reasonix: `compile_pi` leaves the project `AGENTS.md`
+  in place (pi walks cwd→root for `AGENTS.md`/`CLAUDE.md`), binds the global `AGENTS.md`
+  (+ optional `AGENTS.pi.md` overlay) to `~/.pi/agent/AGENTS.md` (its `getAgentDir()`,
+  `$PI_CODING_AGENT_DIR`-aware), and binds skills (`SKILL.pi.md` overlay) to `./.pi/skills/`
+  (project) + `~/.pi/agent/skills/` (global). No `extra_args`. **Provider mode** (`_pi_env`)
+  maps `model` → `--model`, `provider` → `--provider`, `thinking` → `--thinking`; the key
+  reaches pi by its conventional env-var name via the `requiredEnv` export (never argv). pi has
+  **no base-URL flag**, so a `baseUrl` makes agedum generate `~/.pi/agent/models.json` (a
+  provider named `agedum`, `apiKey` referenced by `$VAR`, `api` default `openai-completions`,
+  model selected as `agedum/<id>`) — the reasonix.toml analog. A `subagentModel` generates
+  `~/.pi/agent/settings.json` `subagents.agentOverrides` routing every [pi-subagents] built-in
+  agent (scout/researcher/planner/worker/reviewer/context-builder/oracle/delegate) to one model
+  (the opencode-flash / reasonix-`subagentModel` analog). Both generated files are **merged**
+  onto any existing ones (not masked) via the user-scope `config_files` path. `agedum --prompt`
+  seeds `pi "<text>"` (interactive); `--run` maps to `pi --print "<text>"`.
+
+  [pi-subagents]: https://pi.dev/packages/pi-subagents
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
-  `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md` / `AGENTS.aider.md`) for the active harness — the instructions analogue of
+  `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md` / `AGENTS.aider.md` /
+  `AGENTS.pi.md`) for the active harness — the instructions analogue of
   `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).
@@ -134,10 +153,10 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   did). This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--dry-run] -- <command...>`. The low-level
   entry provider mode builds on. The flag before `--` chooses the virtual-file context
-  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider`); everything after `--` is
-  the child argv (some harnesses get extra flags appended — kimi's `--agent-file`, aider's
-  `--read` per scope; Claude, opencode, cline, and reasonix are pure binds). `--dry-run` prints
-  the injected virtual files without running. Context and command are decoupled.
+  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`); everything after
+  `--` is the child argv (some harnesses get extra flags appended — kimi's `--agent-file`,
+  aider's `--read` per scope; Claude, opencode, cline, reasonix, and pi are pure binds).
+  `--dry-run` prints the injected virtual files without running. Context and command are decoupled.
 
 Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch, like
 `--version`): **`--providers`** prints every `*.json` config in `providers_dir()` as
@@ -145,7 +164,7 @@ Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch,
 `$AGENTS_PROVIDERS_DIR`; a config that won't parse is listed with its error, never fatal.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
-`compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` → a `Plan` of absolute binds **+ `extra_args`** for
+`compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;

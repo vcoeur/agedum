@@ -109,6 +109,17 @@ def test_wrapper_aider_is_registered(monkeypatch):
     assert captured["command"] == ["aider", "--no-git"]
 
 
+def test_wrapper_pi_is_registered(monkeypatch):
+    # pi is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "pi", "--", "pi", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["pi", "hi"]
+
+
 def test_dry_run_aider_read_disposition(monkeypatch, capsys):
     # aider injects instructions via --read; --dry-run must label that disposition, not the
     # kimi --agent-file one (the shared extra_args path).
@@ -845,6 +856,143 @@ def test_provider_reasonix_custom_endpoint_dry_run_shows_toml(monkeypatch, tmp_p
     assert 'base_url = "https://my.host/v1"' in out
     assert 'api_key_env = "MY_KEY"' in out
     assert "--model agedum" in out
+    assert "sk-secret-zzz" not in out  # the key value is never written or printed
+
+
+def test_provider_pi_custom_endpoint_binds_models_and_settings(monkeypatch, tmp_path):
+    # A baseUrl + subagentModel pi provider injects ~/.pi/agent/models.json (custom endpoint)
+    # and ~/.pi/agent/settings.json (subagent routing), bound at their absolute user-scope paths.
+    seen = {}
+
+    def fake_run(root, plan, command, *, close_stdin=False):
+        seen["command"] = command
+        seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
+        return 0
+
+    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr(
+        cli, "load_source", lambda: cli.Source(root=Path("/proj"), agents_md=None, skills_dir=None)
+    )
+    monkeypatch.setattr(cli, "load_global_source", lambda: cli.Source(Path("/g"), None, None))
+    agent_dir = tmp_path / "pi-agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "pic.json").write_text(
+        json.dumps(
+            {
+                "harness": "pi",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {
+                    "baseUrl": "https://api.deepseek.com/v1",
+                    "model": "deepseek-chat",
+                    "subagentModel": "deepseek-flash",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-zzz\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "pic"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert seen["command"] == ["pi", "--model", "agedum/deepseek-chat"]
+    models_target = str(agent_dir / "models.json")
+    settings_target = str(agent_dir / "settings.json")
+    assert models_target in seen["binds"]
+    assert settings_target in seen["binds"]
+    assert "api.deepseek.com" in seen["binds"][models_target]
+    assert "$DEEPSEEK_API_KEY" in seen["binds"][models_target]
+    assert "agedum/deepseek-flash" in seen["binds"][settings_target]
+    assert "sk-zzz" not in seen["binds"][models_target]  # key referenced by name, not value
+
+
+def test_provider_pi_models_json_merges_existing_user_file(monkeypatch, tmp_path):
+    # A generated user-scope file augments rather than masks the user's own models.json.
+    seen = {}
+
+    def fake_run(root, plan, command, *, close_stdin=False):
+        seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
+        return 0
+
+    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr(
+        cli, "load_source", lambda: cli.Source(root=Path("/proj"), agents_md=None, skills_dir=None)
+    )
+    monkeypatch.setattr(cli, "load_global_source", lambda: cli.Source(Path("/g"), None, None))
+    agent_dir = tmp_path / "pi-agent"
+    agent_dir.mkdir()
+    (agent_dir / "models.json").write_text(
+        json.dumps({"providers": {"mine": {"baseUrl": "https://mine/v1"}}})
+    )
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "pic.json").write_text(
+        json.dumps(
+            {
+                "harness": "pi",
+                "secretEnv": "X",
+                "config": {"baseUrl": "https://h/v1", "model": "m"},
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("X=k\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "pic"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    merged = json.loads(seen["binds"][str(agent_dir / "models.json")])
+    assert merged["providers"]["mine"] == {"baseUrl": "https://mine/v1"}  # user provider survives
+    assert merged["providers"]["agedum"]["baseUrl"] == "https://h/v1"  # agedum provider added
+
+
+def test_provider_pi_dry_run_shows_generated_files(monkeypatch, tmp_path, capsys):
+    # --dry-run prints both generated files; the key is referenced by name, never value.
+    agent_dir = tmp_path / "pi-agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "pic.json").write_text(
+        json.dumps(
+            {
+                "harness": "pi",
+                "slug": "pi-deepseek",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {
+                    "baseUrl": "https://api.deepseek.com/v1",
+                    "model": "deepseek-chat",
+                    "subagentModel": "deepseek-flash",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-secret-zzz\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "pic"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "generated config files" in out
+    assert "models.json" in out
+    assert "settings.json" in out
+    assert "$DEEPSEEK_API_KEY" in out
+    assert "agentOverrides" in out
+    assert "--model agedum/deepseek-chat" in out
     assert "sk-secret-zzz" not in out  # the key value is never written or printed
 
 
