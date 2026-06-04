@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix")
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
@@ -240,6 +240,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         "opencode": _opencode_env,
         "cline": _cline_env,
         "reasonix": _reasonix_env,
+        "aider": _aider_env,
     }
     extra, unset, command, config_files = builders[harness](block, secret_env, base_env)
     env.update(extra)
@@ -282,6 +283,9 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
       ``--run`` swaps the base ``chat`` subcommand for ``run`` (``reasonix run "<text>"``),
       and ``--prompt`` (which must stay interactive) raises :class:`ProviderError` rather
       than guess — condash then falls back to spawn-and-type for that harness.
+    * **aider** — ``--message "<text>"`` runs one message and exits (it disables chat mode),
+      which is ``--run``. aider has no "seed then stay interactive" mode, so ``--prompt``
+      raises :class:`ProviderError` like reasonix.
 
     A harness with no known prompt-seeding convention raises :class:`ProviderError` —
     agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
@@ -318,6 +322,17 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
             )
         sub_flags = base_flags[1:] if base_flags and base_flags[0] == "chat" else base_flags
         return [binary, "run", *sub_flags, *rest, text]
+    if harness == "aider":
+        # aider's `--message`/-m runs a single message then exits (disables chat mode) — that
+        # is --run. There is no "seed then stay interactive" mode, so --prompt fails loudly
+        # (condash then falls back to spawn-and-type), mirroring reasonix.
+        if interactive:
+            raise ProviderError(
+                "aider has no interactive prompt-seeding (`--message` runs once and exits); "
+                "use --run for a one-shot task, or launch without --prompt for an "
+                "interactive session"
+            )
+        return [binary, *base_flags, *rest, "--message", text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"
@@ -455,6 +470,43 @@ def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
         if token:
             command += ["--key", token]
     return {}, [], command, ()
+
+
+def _aider_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
+    # aider drives models through litellm: the API token reaches it through the required-env
+    # export under its conventional name (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY
+    # / …, per the chosen model's provider), so no key flag is appended and no secret lands in
+    # argv. model / git / endpoint are CLI flags, which override any on-disk .aider.conf.yml.
+    env: dict[str, str] = {}
+    command = ["aider"]
+    for key, flag in (
+        ("model", "--model"),
+        ("weakModel", "--weak-model"),
+        ("editorModel", "--editor-model"),
+        ("reasoningEffort", "--reasoning-effort"),
+    ):
+        value = str(block.get(key) or "").strip()
+        if value:
+            command += [flag, value]
+
+    # A custom OpenAI-compatible endpoint: litellm reads its base URL from OPENAI_API_BASE
+    # (pair it with an `openai/<name>` model and OPENAI_API_KEY in secretEnv).
+    base_url = str(block.get("baseUrl") or "").strip()
+    if base_url:
+        env["OPENAI_API_BASE"] = base_url
+
+    # Git integration defaults OFF: agedum's launch namespace shares the real .git, so aider's
+    # default --auto-commits would write to the real repo. `git: true` opts back in (hazardous
+    # in the shared namespace); with git on, `autoCommits: false` still suppresses commits.
+    if block.get("git") is True:
+        if block.get("autoCommits") is False:
+            command.append("--no-auto-commits")
+    else:
+        command.append("--no-git")
+
+    if block.get("yesAlways") is True:
+        command.append("--yes-always")
+    return env, [], command, ()
 
 
 # The provider name agedum assigns to a generated custom-endpoint reasonix provider.

@@ -803,6 +803,99 @@ def test_reasonix_provider_def_missing_field_fails_loudly():
         )
 
 
+# --- aider env/command mapping ---
+
+
+def test_aider_git_disabled_by_default():
+    # The headline default: agedum's namespace shares the real .git, so aider's git
+    # integration is disabled unless the config opts in.
+    launch = build_launch(
+        {
+            "harness": "aider",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek/deepseek-chat"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-aider-abc"},
+    )
+    assert launch.command == ["aider", "--model", "deepseek/deepseek-chat", "--no-git"]
+    assert launch.config_files == ()
+    # The key rides the required-env export (litellm reads it by name) and is masked.
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-aider-abc"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+
+
+def test_aider_git_disabled_explicitly():
+    # `git: false` is the same as omitting it — both disable git integration.
+    launch = build_launch({"harness": "aider", "config": {"model": "m", "git": False}}, base_env={})
+    assert launch.command == ["aider", "--model", "m", "--no-git"]
+
+
+def test_aider_git_enabled_omits_no_git():
+    # `git: true` opts back into aider's git integration (no --no-git appended).
+    launch = build_launch({"harness": "aider", "config": {"model": "m", "git": True}}, base_env={})
+    assert launch.command == ["aider", "--model", "m"]
+    assert "--no-git" not in launch.command
+
+
+def test_aider_git_enabled_with_auto_commits_off():
+    # With git on, `autoCommits: false` still suppresses commits via --no-auto-commits.
+    launch = build_launch(
+        {"harness": "aider", "config": {"model": "m", "git": True, "autoCommits": False}},
+        base_env={},
+    )
+    assert launch.command == ["aider", "--model", "m", "--no-auto-commits"]
+
+
+def test_aider_full_model_mapping():
+    launch = build_launch(
+        {
+            "harness": "aider",
+            "config": {
+                "model": "openai/gpt-x",
+                "weakModel": "openai/gpt-mini",
+                "editorModel": "openai/gpt-edit",
+                "reasoningEffort": "high",
+                "yesAlways": True,
+            },
+        },
+        base_env={},
+    )
+    assert launch.command == [
+        "aider",
+        "--model",
+        "openai/gpt-x",
+        "--weak-model",
+        "openai/gpt-mini",
+        "--editor-model",
+        "openai/gpt-edit",
+        "--reasoning-effort",
+        "high",
+        "--no-git",
+        "--yes-always",
+    ]
+
+
+def test_aider_base_url_sets_openai_api_base():
+    # A custom OpenAI-compatible endpoint -> OPENAI_API_BASE (litellm reads it by name).
+    launch = build_launch(
+        {
+            "harness": "aider",
+            "secretEnv": "OPENAI_API_KEY",
+            "config": {"model": "openai/local", "baseUrl": "https://my.host/v1"},
+        },
+        base_env={"OPENAI_API_KEY": "sk-x"},
+    )
+    assert launch.env["OPENAI_API_BASE"] == "https://my.host/v1"
+    assert launch.command == ["aider", "--model", "openai/local", "--no-git"]
+
+
+def test_aider_bare_runs_with_no_git_only():
+    # No model: bare `aider`, still git-disabled by default.
+    launch = build_launch({"harness": "aider", "config": {}}, base_env={})
+    assert launch.command == ["aider", "--no-git"]
+    assert launch.config_files == ()
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
@@ -910,3 +1003,27 @@ def test_with_prompt_reasonix_interactive_fails_loudly():
     # reasonix `chat` can't be pre-seeded, so --prompt (interactive) is a fail-loud error.
     with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
         with_prompt(_launch("reasonix", ["reasonix", "chat"]), [], "hi", interactive=True)
+
+
+def test_with_prompt_aider_run_uses_message():
+    # aider --run: --message runs once and exits; base flags from _aider_env are preserved.
+    cmd = with_prompt(
+        _launch("aider", ["aider", "--model", "m", "--no-git"]),
+        [],
+        "fix the bug",
+        interactive=False,
+    )
+    assert cmd == ["aider", "--model", "m", "--no-git", "--message", "fix the bug"]
+
+
+def test_with_prompt_aider_run_preserves_passthrough():
+    cmd = with_prompt(
+        _launch("aider", ["aider"]), ["--map-tokens", "1024"], "go", interactive=False
+    )
+    assert cmd == ["aider", "--map-tokens", "1024", "--message", "go"]
+
+
+def test_with_prompt_aider_interactive_fails_loudly():
+    # aider's --message exits; there is no interactive prompt-seed, so --prompt fails loudly.
+    with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
+        with_prompt(_launch("aider", ["aider", "--no-git"]), [], "hi", interactive=True)

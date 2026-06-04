@@ -34,6 +34,7 @@ from rich.console import Console
 from agedum import __version__
 from agedum.harness import (
     Plan,
+    compile_aider,
     compile_claude,
     compile_cline,
     compile_kimi,
@@ -63,12 +64,13 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "opencode": compile_opencode,
     "cline": compile_cline,
     "reasonix": compile_reasonix,
+    "aider": compile_aider,
 }
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
     "[--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix> [--dry-run] -- "
+    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider> [--dry-run] -- "
     "<command> [args...]"
 )
 HELP = f"""{USAGE}
@@ -95,7 +97,8 @@ Wrapper mode (low-level; provider mode builds on it) — run any command inside 
 virtual-file context, with no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
-                        cline | reasonix) then run the command after -- inside the namespace
+                        cline | reasonix | aider) then run the command after -- inside the
+                        namespace
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
@@ -425,14 +428,21 @@ def _print_scope(
 
 
 def _disposition(source_path: Path, plan: Plan, dir_targets: set, display) -> str:
-    """How the harness consumes ``source_path``: injected, native, agent-file, or neither."""
+    """How the harness consumes ``source_path``: injected, native, an appended flag, or neither."""
     key = str(source_path)
     for _, target in plan.binds:
         if plan.origins.get(target) == key:
             return f"→ {display(target)}{'/' if target in dir_targets else ''}"
-    for token in plan.extra_args:
+    for index, token in enumerate(plan.extra_args):
         if plan.origins.get(Path(token)) == key:
-            return "→ kimi agent file (passed via --agent-file)"
+            # The flag preceding the matching token tells us how it is passed: kimi's
+            # --agent-file vs aider's --read.
+            flag = plan.extra_args[index - 1] if index > 0 else ""
+            if flag == "--agent-file":
+                return "→ kimi agent file (passed via --agent-file)"
+            if flag == "--read":
+                return "→ aider read-only context (passed via --read)"
+            return f"→ passed via {flag}" if flag else "→ (appended arg)"
     if source_path in plan.native_reads:
         return "read in place (read natively — not injected)"
     return "(not injected)"
@@ -462,7 +472,10 @@ def _run_wrapper(argv: list[str]) -> int:
             else:
                 index += 1
                 if index >= len(flags):
-                    _die("--wrapper requires a harness: claude, kimi, opencode, cline, or reasonix")
+                    _die(
+                        "--wrapper requires a harness: "
+                        "claude, kimi, opencode, cline, reasonix, or aider"
+                    )
                 value = flags[index]
             if value not in _COMPILERS:
                 _die(f"unknown harness for --wrapper: {value}")
@@ -474,7 +487,7 @@ def _run_wrapper(argv: list[str]) -> int:
         index += 1
 
     if mode is None:
-        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix")
+        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider")
 
     if dry_run:
         print(f"harness    {mode}")
