@@ -66,12 +66,14 @@ flowchart LR
   agedum -->|"--wrapper opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
   agedum -->|"--wrapper cline"| cln["AGENTS.md (native) + .cline/skills/"]
   agedum -->|"--wrapper reasonix"| rx["AGENTS.md (native) + .reasonix/skills/"]
+  agedum -->|"--wrapper aider"| ai["AGENTS.md via --read (no skills)"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   oc --> ns
   cln --> ns
   rx --> ns
-  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix)"]
+  ai --> ns
+  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix / aider)"]
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
@@ -88,6 +90,7 @@ flowchart LR
 | opencode | `--wrapper opencode` | Implemented — project + global scope |
 | Cline  | `--wrapper cline`  | Implemented — project + global scope; provider mode |
 | reasonix | `--wrapper reasonix` | Implemented — project + global scope; provider mode |
+| aider  | `--wrapper aider`  | Implemented — instructions via `--read` (no skills); provider mode |
 
 [Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
 launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper

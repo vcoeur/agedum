@@ -98,6 +98,36 @@ def test_wrapper_reasonix_is_registered(monkeypatch):
     assert captured["command"] == ["reasonix", "chat"]
 
 
+def test_wrapper_aider_is_registered(monkeypatch):
+    # aider is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "aider", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "aider", "--", "aider", "--no-git"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["aider", "--no-git"]
+
+
+def test_dry_run_aider_read_disposition(monkeypatch, capsys):
+    # aider injects instructions via --read; --dry-run must label that disposition, not the
+    # kimi --agent-file one (the shared extra_args path).
+    monkeypatch.setattr(cli, "load_source", lambda: cli.Source(Path("/proj"), None, None))
+    monkeypatch.setattr(
+        cli, "load_global_source", lambda: cli.Source(Path("/g"), Path("/g/AGENTS.md"), None)
+    )
+    _no_launch(monkeypatch)
+    read_path = Path("/tmp/agedum-aider-dry/global/AGENTS.md")
+    plan = cli.Plan(extra_args=["--read", str(read_path)], origins={read_path: "/g/AGENTS.md"})
+    monkeypatch.setitem(cli._COMPILERS, "aider", lambda p, g, d: plan)
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "aider", "--dry-run", "--", "aider"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "→ aider read-only context (passed via --read)" in out
+
+
 def test_removed_legacy_alias_is_not_wrapper_mode(monkeypatch):
     # The `--claude`/`--kimi`/`--opencode` aliases were removed; the bare flag is no
     # longer wrapper mode and is rejected as an unknown provider option.

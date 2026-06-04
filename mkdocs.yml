@@ -89,6 +89,7 @@ nav:
     - opencode: harnesses/opencode.md
     - Cline: harnesses/cline.md
     - reasonix: harnesses/reasonix.md
+    - aider: harnesses/aider.md
   - CLI reference: cli.md
   - Internals: internals.md
   - Legal: legal.md

@@ -633,3 +633,56 @@ def compile_reasonix(project: Source, global_: Source | None, dest: Path) -> Pla
             plan.origins[target] = str(global_.skills_dir)
 
     return plan
+
+
+# ---------------------------------------------------------------------------
+# aider harness
+# ---------------------------------------------------------------------------
+
+
+def compile_aider(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for aider.
+
+    aider has **no native instruction discovery** (it reads neither ``AGENTS.md`` nor a
+    ``CONVENTIONS.md`` on its own) and **no skills mechanism**. Its one channel for standing
+    context is the ``--read`` flag, which adds a read-only file to the chat — the documented
+    "conventions" mechanism. So agedum injects each scope's ``AGENTS.md`` as a ``--read``
+    argument, the instructions analogue of kimi's ``--agent-file``:
+
+    * **project instructions** — ``AGENTS.md`` → ``--read <compiled path>``;
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an optional
+      ``AGENTS.aider.md`` overlay) → a second ``--read <compiled path>``.
+
+    The compiled files live under the throwaway ``dest`` directory; the bwrap launch binds
+    the whole real filesystem (``--dev-bind / /``), so those absolute paths resolve inside the
+    namespace without a dedicated bind — ``Plan.binds`` stays empty (like kimi's agent file).
+
+    **Skills are not injected.** aider has no skills system, so there is nothing to render
+    them into (and no ``SKILL.aider.md`` overlay); a project ``.agents/skills/`` shows up in
+    ``--dry-run`` as ``(not injected)``.
+    """
+    plan = Plan()
+
+    # Project then global, each appended as its own --read. Project scope takes no overlay
+    # (user scope only); global merges an optional AGENTS.aider.md.
+    _aider_read(plan, _instructions(project, None), dest / "project", project.agents_md)
+    if global_ is not None:
+        _aider_read(plan, _instructions(global_, "aider"), dest / "global", global_.agents_md)
+
+    return plan
+
+
+def _aider_read(plan: Plan, instructions: str | None, dest: Path, source: Path | None) -> None:
+    """Write one scope's ``AGENTS.md`` under ``dest`` and append it as an aider ``--read`` arg.
+
+    A no-op when the scope has no ``AGENTS.md``. The compiled path is recorded in
+    ``plan.origins`` so ``--dry-run`` can map the ``--read`` token back to its source.
+    """
+    if instructions is None:
+        return
+    out = dest / "AGENTS.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(instructions)
+    plan.extra_args += ["--read", str(out)]
+    if source is not None:
+        plan.origins[out] = str(source)

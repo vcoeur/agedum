@@ -12,7 +12,7 @@ no provider env.
 
 ```text
 agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
-agedum --wrapper <claude|kimi|opencode|cline|reasonix> [--dry-run] -- <command> [args...]
+agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider> [--dry-run] -- <command> [args...]
 ```
 
 ## Provider mode
@@ -96,6 +96,7 @@ empty directory is stated explicitly.
 $ agedum --providers
 providers in ~/.config/agents/providers
 
+  aider-deepseek         aider      deepseek/deepseek-chat
   claude-deepseek-auto   claude     deepseek-v4-pro
   claude                 claude     -
   opencode-deepseek      opencode   deepseek/deepseek-v4-pro
@@ -115,7 +116,8 @@ Claude with your own login), or to inspect what gets injected with `--dry-run`.
 The invocation has two halves split by a literal `--`:
 
 - **Before `--`** — `--wrapper <harness>` selects the harness format
-  (`claude` / `kimi` / `opencode` / `cline` / `reasonix`), plus the optional `--dry-run`.
+  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider`), plus the optional
+  `--dry-run`.
 - **After `--`** — the command to run, **verbatim**, including its own binary and
   flags. agedum does not parse or rewrite it (some harnesses get extra flags
   *appended* — see [Wrapper mode](wrapper.md)).

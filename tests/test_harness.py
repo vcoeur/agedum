@@ -6,6 +6,7 @@ from agedum.harness import (
     claude_config_dir,
     cline_config_dir,
     cline_global_agents_md,
+    compile_aider,
     compile_claude,
     compile_cline,
     compile_kimi,
@@ -658,3 +659,103 @@ def test_claude_emitter_asset_is_shipped():
     from agedum.harness import _claude_emitter_path
 
     assert Path(_claude_emitter_path()).is_file()
+
+
+def _aider_reads(plan):
+    """Paths following each ``--read`` in the plan's extra_args."""
+    return [plan.extra_args[i + 1] for i, token in enumerate(plan.extra_args) if token == "--read"]
+
+
+def test_compile_aider(tmp_path):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_aider(project, global_, dest)
+
+    # aider has no native instruction discovery — both scopes' AGENTS.md ride a --read
+    # (project first, then global), the instructions analogue of kimi's --agent-file.
+    reads = _aider_reads(plan)
+    assert len(reads) == 2
+    assert Path(reads[0]).read_text() == "PROJECT-INSTR\n"
+    assert Path(reads[1]).read_text() == "GLOBAL-INSTR\n"
+
+    # No binds: the compiled files are read at their real dest path via --dev-bind / /.
+    assert plan.binds == []
+
+    # Skills are NOT injected — aider has no skills mechanism, so neither scope's skills
+    # appear anywhere in the plan.
+    assert all("skills" not in token for token in plan.extra_args)
+
+    # Provenance for --dry-run: each --read path maps back to its AGENTS.md source.
+    assert plan.origins[Path(reads[0])] == str(proj / "AGENTS.md")
+    assert plan.origins[Path(reads[1])] == str(gconf / "AGENTS.md")
+
+
+def test_compile_aider_project_only(tmp_path):
+    # A project with its own AGENTS.md but no global scope: one --read, no binds.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_aider(project, None, dest)
+
+    reads = _aider_reads(plan)
+    assert len(reads) == 1
+    assert Path(reads[0]).read_text() == "PROJECT-INSTR\n"
+    assert plan.binds == []
+
+
+def test_compile_aider_skills_only_is_empty(tmp_path):
+    # aider has no skills mechanism, so a project with only skills (no AGENTS.md) yields
+    # nothing to inject — no binds and no --read.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_aider(project, None, dest)
+
+    assert plan.binds == []
+    assert plan.extra_args == []
+
+
+def test_compile_aider_global_agents_harness_overlay_merged(tmp_path):
+    # Global AGENTS.md + AGENTS.aider.md sibling -> merged into the global --read; an
+    # AGENTS.opencode.md sibling is ignored when compiling for aider.
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.aider.md").write_text("AIDER-EXTRA\n")
+    (gconf / "AGENTS.opencode.md").write_text("OPENCODE-EXTRA\n")
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_aider(load_source(tmp_path / "noproj"), global_, dest)
+
+    reads = _aider_reads(plan)
+    assert len(reads) == 1
+    merged = Path(reads[0]).read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "AIDER-EXTRA" in merged
+    assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored

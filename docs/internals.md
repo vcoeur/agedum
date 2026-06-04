@@ -14,7 +14,7 @@ process. The real working tree and `$HOME` are never written to.
 
 ```mermaid
 flowchart TD
-  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix<br/>→ Plan(binds, extra_args)"]
+  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix / compile_aider<br/>→ Plan(binds, extra_args)"]
   b --> c["assert_safe(): refuse git-tracked targets"]
   c --> d["bwrap --dev-bind / / --ro-bind src target … -- command extra_args"]
   d --> e["child runs, sees injected files"]
@@ -26,7 +26,7 @@ Internally this is three modules:
 - **`sources.py`** — locates the project root and the project/global source files into
   a `Source` (`root`, `agents_md`, `skills_dir`).
 - **`harness.py`** — `compile_claude` / `compile_kimi` / `compile_opencode` / `compile_cline` /
-  `compile_reasonix` render a `Source` pair into a
+  `compile_reasonix` / `compile_aider` render a `Source` pair into a
   `Plan`: a list of absolute `(compiled-file → mount-target)` binds **plus**
   `extra_args` to append to the command.
 - **`launcher.py`** — `assert_safe`, `build_bwrap_argv`, and `run_virtualfs` validate,
@@ -104,6 +104,8 @@ clean working tree after the command, with the real repo untouched.
 A new harness is a single compiler function `compile_<harness>(project, global_, dest)
 -> Plan`. It renders the source however that harness expects and returns binds and/or
 `extra_args`. Register it in the CLI's `_COMPILERS` table under its `--wrapper <harness>`
-name (the reasonix harness is the most recent example — it mirrors opencode's and Cline's
-pure path-discovery shape). The launcher and safety rules are shared, so a new harness
-inherits the namespace, git-safety, and cleanup for free.
+name. The harness need not fit the pure path-discovery shape: the **aider** harness (the
+most recent example) injects instructions as `--read` flags rather than binds, and skips
+skills entirely — both expressed through the same `Plan(binds, extra_args)` return. The
+launcher and safety rules are shared, so a new harness inherits the namespace, git-safety,
+and cleanup for free.

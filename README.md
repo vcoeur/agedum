@@ -65,6 +65,17 @@ agedum has two modes:
 > subcommand and exports the token (reasonix reads it via the provider's `api_key_env`);
 > `--run` maps to `reasonix run "<text>"`, while `--prompt` is unsupported (`chat` can't be
 > pre-seeded).
+>
+> **aider** (`--wrapper aider`) is supported as well — but it differs from the others.
+> aider has **no native instruction discovery** and **no skills mechanism**, so agedum
+> injects each scope's `AGENTS.md` via aider's `--read` read-only-context flag (the
+> instructions analogue of kimi's `--agent-file`; no binds), and does not inject skills. In
+> **provider mode** the config maps to aider's CLI flags (`--model` / `--weak-model` /
+> `--editor-model` / `--reasoning-effort`), the key rides the environment (litellm), and a
+> `baseUrl` sets `OPENAI_API_BASE`. **Git integration is disabled by default** (`--no-git`),
+> because agedum's namespace shares the real `.git` and aider auto-commits — set `git: true`
+> to opt back in. `--run` maps to `aider --message "<text>"`; `--prompt` is unsupported
+> (`--message` runs once and exits).
 
 ## Usage
 
@@ -81,6 +92,7 @@ agedum claude-deepseek-auto --dry-run             # print resolved env, virtual 
 agedum --wrapper claude -- claude --model sonnet -p "review this"
 agedum --wrapper cline -- cline task "review this"  # drive Cline with the same source
 agedum --wrapper reasonix -- reasonix chat          # drive reasonix with the same source
+agedum --wrapper aider -- aider --no-git            # drive aider (pass --no-git in wrapper mode)
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --providers                                # list the provider configs (name, harness, model)
