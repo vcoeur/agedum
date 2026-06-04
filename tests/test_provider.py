@@ -647,7 +647,8 @@ def test_reasonix_custom_endpoint_generates_toml():
         base_env={"MY_API_KEY": "sk-secret-xyz"},
     )
     assert launch.command == ["reasonix", "chat", "--model", "agedum"]
-    assert [target for target, _ in launch.config_files] == ["reasonix.toml"]
+    assert [entry[0] for entry in launch.config_files] == ["reasonix.toml"]
+    assert launch.config_files[0][2] is False  # reasonix.toml is written verbatim, not merged
     toml = launch.config_files[0][1]
     assert 'default_model = "agedum"' in toml
     assert "[[providers]]" in toml
@@ -896,6 +897,192 @@ def test_aider_bare_runs_with_no_git_only():
     assert launch.config_files == ()
 
 
+# --- pi (earendil-works pi-coding-agent) ---
+
+
+def test_pi_basic_model_provider_thinking():
+    # model/provider/thinking are plain CLI flags; no on-disk config without baseUrl.
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "ANTHROPIC_API_KEY",
+            "config": {
+                "model": "anthropic/claude-sonnet-4",
+                "provider": "anthropic",
+                "thinking": "high",
+            },
+        },
+        base_env={"ANTHROPIC_API_KEY": "sk-x"},
+    )
+    assert launch.command == [
+        "pi",
+        "--model",
+        "anthropic/claude-sonnet-4",
+        "--provider",
+        "anthropic",
+        "--thinking",
+        "high",
+    ]
+    assert launch.config_files == ()
+
+
+def test_pi_bare_runs_pi():
+    launch = build_launch({"harness": "pi", "config": {}}, base_env={})
+    assert launch.command == ["pi"]
+    assert launch.config_files == ()
+
+
+def test_pi_key_via_env_export_not_argv():
+    # The key reaches pi via the required-env export (its conventional name), never argv.
+    launch = build_launch(
+        {"harness": "pi", "secretEnv": "DEEPSEEK_API_KEY", "config": {"model": "deepseek-chat"}},
+        base_env={"DEEPSEEK_API_KEY": "sk-secret"},
+    )
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-secret"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+    assert "sk-secret" not in " ".join(launch.command)
+    assert "--api-key" not in launch.command
+
+
+def test_pi_custom_endpoint_generates_models_json(monkeypatch, tmp_path):
+    # pi has no --base-url flag: baseUrl -> ~/.pi/agent/models.json provider `agedum`, key by
+    # $ENV name, and the model selection becomes `agedum/<model>`.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "slug": "pi-deepseek",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com/v1",
+                "model": "deepseek-chat",
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.command == ["pi", "--model", "agedum/deepseek-chat"]
+    target, content, merge_json = launch.config_files[0]
+    assert target == str(tmp_path / "pi-agent" / "models.json")
+    assert merge_json is True  # augments the user's models.json, never masks it
+    doc = json.loads(content)
+    provider = doc["providers"]["agedum"]
+    assert provider["baseUrl"] == "https://api.deepseek.com/v1"
+    assert provider["api"] == "openai-completions"  # default
+    assert provider["apiKey"] == "$DEEPSEEK_API_KEY"  # referenced by env-var name, not value
+    assert provider["models"] == [{"id": "deepseek-chat"}]
+    assert "sk-x" not in content
+
+
+def test_pi_custom_endpoint_requires_model():
+    with pytest.raises(ProviderError, match="pi config sets `baseUrl` but no `model`"):
+        build_launch(
+            {"harness": "pi", "secretEnv": "X", "config": {"baseUrl": "https://h/v1"}},
+            base_env={"X": "k"},
+        )
+
+
+def test_pi_custom_endpoint_api_override():
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "ANTHROPIC_API_KEY",
+            "config": {
+                "baseUrl": "https://my.host/anthropic",
+                "api": "anthropic-messages",
+                "model": "claude-x",
+            },
+        },
+        base_env={"ANTHROPIC_API_KEY": "sk-x"},
+    )
+    doc = json.loads(launch.config_files[0][1])
+    assert doc["providers"]["agedum"]["api"] == "anthropic-messages"
+
+
+def test_pi_keyless_endpoint_omits_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {"harness": "pi", "config": {"baseUrl": "http://localhost:1234/v1", "model": "local"}},
+        base_env={},
+    )
+    provider = json.loads(launch.config_files[0][1])["providers"]["agedum"]
+    assert "apiKey" not in provider
+
+
+def test_pi_subagent_model_generates_settings(monkeypatch, tmp_path):
+    # subagentModel routes every built-in pi-subagents agent via settings.json agentOverrides.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "ANTHROPIC_API_KEY",
+            "config": {
+                "model": "anthropic/claude-sonnet-4",
+                "subagentModel": "anthropic/claude-haiku-4-5",
+            },
+        },
+        base_env={"ANTHROPIC_API_KEY": "sk-x"},
+    )
+    assert launch.command == ["pi", "--model", "anthropic/claude-sonnet-4"]
+    target, content, merge_json = launch.config_files[0]
+    assert target == str(tmp_path / "pi-agent" / "settings.json")
+    assert merge_json is True
+    overrides = json.loads(content)["subagents"]["agentOverrides"]
+    for agent in (
+        "scout",
+        "researcher",
+        "planner",
+        "worker",
+        "reviewer",
+        "context-builder",
+        "oracle",
+        "delegate",
+    ):
+        assert overrides[agent] == {"model": "anthropic/claude-haiku-4-5"}
+
+
+def test_pi_subagent_model_with_custom_endpoint_routes_via_agedum(monkeypatch, tmp_path):
+    # Heavy primary + fast subagent on one custom endpoint: both ids land in the models.json
+    # `models` list, the subagent override routes to `agedum/<sub>`, the primary to its `<model>`.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com/v1",
+                "model": "deepseek-chat",
+                "subagentModel": "deepseek-flash",
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.command == ["pi", "--model", "agedum/deepseek-chat"]
+    models_doc = json.loads(launch.config_files[0][1])
+    assert models_doc["providers"]["agedum"]["models"] == [
+        {"id": "deepseek-chat"},
+        {"id": "deepseek-flash"},
+    ]
+    overrides = json.loads(launch.config_files[1][1])["subagents"]["agentOverrides"]
+    assert overrides["scout"] == {"model": "agedum/deepseek-flash"}
+
+
+def test_pi_models_list_adds_extra_ids():
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "X",
+            "config": {
+                "baseUrl": "https://h/v1",
+                "model": "m-pro",
+                "models": ["m-pro", "m-flash", "m-vision"],
+            },
+        },
+        base_env={"X": "k"},
+    )
+    ids = [m["id"] for m in json.loads(launch.config_files[0][1])["providers"]["agedum"]["models"]]
+    assert ids == ["m-pro", "m-flash", "m-vision"]  # de-duped, model first
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
@@ -1027,3 +1214,23 @@ def test_with_prompt_aider_interactive_fails_loudly():
     # aider's --message exits; there is no interactive prompt-seed, so --prompt fails loudly.
     with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
         with_prompt(_launch("aider", ["aider", "--no-git"]), [], "hi", interactive=True)
+
+
+def test_with_prompt_pi_interactive_is_positional():
+    # pi seeds an interactive TUI from a positional prompt; base flags preserved.
+    cmd = with_prompt(_launch("pi", ["pi", "--model", "m"]), [], "hello", interactive=True)
+    assert cmd == ["pi", "--model", "m", "hello"]
+
+
+def test_with_prompt_pi_run_uses_print():
+    # --print is pi's non-interactive (run-and-exit) mode; the prompt stays positional.
+    assert with_prompt(_launch("pi", ["pi"]), [], "hello", interactive=False) == [
+        "pi",
+        "--print",
+        "hello",
+    ]
+
+
+def test_with_prompt_pi_preserves_passthrough():
+    cmd = with_prompt(_launch("pi", ["pi"]), ["--no-skills"], "go", interactive=False)
+    assert cmd == ["pi", "--no-skills", "--print", "go"]

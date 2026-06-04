@@ -22,17 +22,35 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider")
+from agedum.harness import pi_agent_dir
+
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
 OPENCODE_BUILTINS = frozenset({"build", "plan", "general", "explore", "scout"})
 
+# pi-subagents' eight built-in agents — `subagentModel` routes all of them through
+# pi's settings.json `subagents.agentOverrides`.
+PI_SUBAGENT_BUILTINS = (
+    "scout",
+    "researcher",
+    "planner",
+    "worker",
+    "reviewer",
+    "context-builder",
+    "oracle",
+    "delegate",
+)
+
 # A per-harness env/command builder's result:
 #   (env_to_set, env_to_unset, base_command, config_files)
-# config_files is a tuple of (project-root-relative target, content) pairs the launcher
-# writes into the namespace — empty for every harness except a custom-endpoint reasonix.
-BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[tuple[str, str], ...]]
+# config_files is a tuple of (target, content, merge_json) triples the launcher writes into
+# the namespace: `target` is project-root-relative (reasonix's reasonix.toml) or absolute
+# (pi's user-scope ~/.pi/agent/models.json + settings.json); `merge_json` deep-merges the
+# content onto any existing JSON file at the target. Empty for every harness without a
+# generated on-disk config.
+BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[tuple[str, str, bool], ...]]
 
 
 class ProviderError(RuntimeError):
@@ -45,9 +63,12 @@ class Launch:
 
     ``secrets`` names the env vars whose values must be masked in ``--dry-run``.
     ``config_files`` are agedum-generated config files a harness needs on disk
-    (``(project-root-relative target, content)`` pairs); the launcher writes each into
-    the namespace at the project root. reasonix uses it to inject a ``reasonix.toml``
-    that defines a custom-endpoint provider — the others leave it empty.
+    (``(target, content, merge_json)`` triples); the launcher writes each into the
+    namespace. ``target`` is project-root-relative (reasonix's ``reasonix.toml``) or
+    absolute (pi's user-scope ``~/.pi/agent/models.json`` + ``settings.json``);
+    ``merge_json`` deep-merges ``content`` onto any existing JSON file at the target so an
+    injected user-scope config augments rather than masks the user's own. Empty for a
+    harness without a generated on-disk config.
     """
 
     harness: str
@@ -56,7 +77,7 @@ class Launch:
     unset: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
     secrets: frozenset[str] = frozenset()
-    config_files: tuple[tuple[str, str], ...] = ()
+    config_files: tuple[tuple[str, str, bool], ...] = ()
 
 
 def default_env_file() -> Path:
@@ -241,6 +262,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         "cline": _cline_env,
         "reasonix": _reasonix_env,
         "aider": _aider_env,
+        "pi": _pi_env,
     }
     extra, unset, command, config_files = builders[harness](block, secret_env, base_env)
     env.update(extra)
@@ -286,6 +308,10 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
     * **aider** — ``--message "<text>"`` runs one message and exits (it disables chat mode),
       which is ``--run``. aider has no "seed then stay interactive" mode, so ``--prompt``
       raises :class:`ProviderError` like reasonix.
+    * **pi** — the prompt is pi's positional argument either way; ``--print`` (``-p``) flips
+      it to non-interactive (process-and-exit). So a bare positional seeds the interactive
+      TUI and ``--print`` runs it once and exits (``pi "<text>"`` vs ``pi --print "<text>"``),
+      the claude shape exactly.
 
     A harness with no known prompt-seeding convention raises :class:`ProviderError` —
     agedum fails loudly rather than silently launching the wrong way. ``rest`` (harness
@@ -333,6 +359,11 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
                 "interactive session"
             )
         return [binary, *base_flags, *rest, "--message", text]
+    if harness == "pi":
+        # pi takes the prompt as a positional either way; --print/-p flips it to
+        # non-interactive (process-and-exit). Text stays last so pi reads it as the positional.
+        mode_flags = [] if interactive else ["--print"]
+        return [binary, *base_flags, *rest, *mode_flags, text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"
@@ -509,6 +540,114 @@ def _aider_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
     return env, [], command, ()
 
 
+# The provider name agedum assigns to a generated custom-endpoint pi provider in
+# ~/.pi/agent/models.json. The user never types it — agedum selects models as `agedum/<id>`.
+PI_PROVIDER_NAME = "agedum"
+
+
+def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
+    # pi reads its API key from a conventional env var (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+    # DEEPSEEK_API_KEY / GOOGLE_API_KEY / …) — exported via the required-env path in
+    # build_launch — so no key flag is appended and no secret lands in argv. provider / model /
+    # thinking are CLI flags; a custom endpoint and subagent routing have no flags, so they are
+    # generated on-disk config files (the reasonix.toml precedent), merged onto the user's own.
+    command = ["pi"]
+    model = str(block.get("model") or "").strip()
+    subagent_model = str(block.get("subagentModel") or "").strip()
+    base_url = str(block.get("baseUrl") or "").strip()
+    config_files: list[tuple[str, str, bool]] = []
+
+    if base_url:
+        # pi has no --base-url flag: a custom OpenAI-/Anthropic-compatible endpoint becomes a
+        # provider named `agedum` in ~/.pi/agent/models.json. The key is referenced by $ENV
+        # name (never written), and model selections become `agedum/<id>` so pi routes to it.
+        if not model:
+            raise ProviderError(
+                "pi config sets `baseUrl` but no `model`; set `model` to the upstream model "
+                "id served at that endpoint"
+            )
+        model_ids = _pi_model_ids(model, subagent_model, block.get("models"))
+        api = str(block.get("api") or "openai-completions").strip() or "openai-completions"
+        models_json = _pi_models_json(base_url, api, secret_env, model_ids)
+        config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
+        command += ["--model", f"{PI_PROVIDER_NAME}/{model}"]
+    elif model:
+        command += ["--model", model]
+
+    provider = str(block.get("provider") or "").strip()
+    if provider:
+        command += ["--provider", provider]
+    thinking = str(block.get("thinking") or "").strip()
+    if thinking:
+        command += ["--thinking", thinking]
+
+    if subagent_model:
+        # pi-subagents reads per-builtin model overrides from settings.json
+        # `subagents.agentOverrides`; route every built-in agent to subagentModel (the
+        # opencode-flash / reasonix-subagentModel analog). With a custom endpoint the model
+        # is `agedum/<id>` (already present in the models.json `models` list).
+        routed = f"{PI_PROVIDER_NAME}/{subagent_model}" if base_url else subagent_model
+        settings_json = _pi_subagent_settings_json(routed)
+        config_files.append((str(pi_agent_dir() / "settings.json"), settings_json, True))
+
+    return {}, [], command, tuple(config_files)
+
+
+def _pi_model_ids(model: str, subagent_model: str, extra: object) -> list[str]:
+    """The upstream model ids a custom-endpoint pi provider serves, de-duplicated in stable
+    order: the executor ``model``, the ``subagentModel``, then any explicit ``models`` list."""
+    ids: list[str] = []
+    for value in (model, subagent_model):
+        if value and value not in ids:
+            ids.append(value)
+    if extra is None:
+        return ids
+    if not isinstance(extra, list):
+        raise ProviderError("pi `models` must be a list of model-id strings")
+    for item in extra:
+        name = str(item or "").strip()
+        if name and name not in ids:
+            ids.append(name)
+    return ids
+
+
+def _pi_models_json(base_url: str, api: str, api_key_env: str, model_ids: list[str]) -> str:
+    """Render the ``~/.pi/agent/models.json`` fragment for the ``agedum`` custom-endpoint
+    provider. The API key is referenced by env-var name (``$VAR``), never its value; omitted
+    for a keyless endpoint."""
+    provider: dict = {"baseUrl": base_url, "api": api}
+    if api_key_env:
+        provider["apiKey"] = f"${api_key_env}"
+    provider["models"] = [{"id": model_id} for model_id in model_ids]
+    return json.dumps({"providers": {PI_PROVIDER_NAME: provider}}, indent=2) + "\n"
+
+
+def _pi_subagent_settings_json(model: str) -> str:
+    """Render the ``~/.pi/agent/settings.json`` fragment routing every built-in pi-subagents
+    agent to ``model`` via ``subagents.agentOverrides``."""
+    overrides = {name: {"model": model} for name in PI_SUBAGENT_BUILTINS}
+    return json.dumps({"subagents": {"agentOverrides": overrides}}, indent=2) + "\n"
+
+
+def merge_json_onto_file(target: Path, fragment: str) -> str:
+    """Deep-merge an agedum-generated JSON ``fragment`` onto the existing JSON at ``target``.
+
+    Returns the merged document as text (2-space indent). When ``target`` is absent,
+    unreadable, not JSON, or not a JSON object, the fragment is returned verbatim — a malformed
+    or missing user file never blocks the launch, and the agedum keys still land. This lets an
+    injected user-scope config (pi's ``models.json`` / ``settings.json``) augment rather than
+    mask the user's own.
+    """
+    new = json.loads(fragment)
+    try:
+        existing = json.loads(target.read_text())
+    except (OSError, ValueError):
+        existing = None
+    if isinstance(existing, dict) and isinstance(new, dict):
+        return json.dumps(_deep_merge(existing, new), indent=2) + "\n"
+    return fragment
+
+
 # The provider name agedum assigns to a generated custom-endpoint reasonix provider.
 # Fixed + always a valid identifier; the user never types it (agedum selects it via
 # --model), and each launch gets its own reasonix.toml so there is no cross-launch clash.
@@ -573,7 +712,7 @@ def _reasonix_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Bui
 
     toml = _reasonix_toml(default_model, agent_lines, provider_blocks)
     command = ["reasonix", "chat", "--model", default_model]
-    return {}, [], command, (("reasonix.toml", toml),)
+    return {}, [], command, (("reasonix.toml", toml, False),)
 
 
 def _reasonix_agent_lines(block: dict) -> list[str]:
