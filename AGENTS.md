@@ -93,7 +93,11 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   onto any existing ones (not masked) via the user-scope `config_files` path. **`piSettings`** is
   a generic escape hatch: a JSON object deep-merged into the generated `settings.json` (any
   settings-based extension; `subagentModel` is sugar composed into the same fragment, `piSettings`
-  winning on conflict). **`requireExtensions`** (+ implicit `pi-subagents` when `subagentModel`/
+  winning on conflict). **`piExtensionConfig`** ({relpath → object}) reaches an extension's **own
+  file** under `~/.pi/agent` (e.g. pi-subagents' `parallel`/`async` in
+  `extensions/subagent/config.json`) — each entry deep-merged onto that file; paths must stay
+  under `~/.pi/agent` (no `..`/absolute) and the agedum-managed `settings.json`/`models.json` are
+  rejected. **`requireExtensions`** (+ implicit `pi-subagents` when `subagentModel`/
   `piSettings.subagents` is set) warns at launch — via `Launch.warnings` — when a needed extension
   is absent from the host (`settings.json packages` / `~/.pi/agent/npm/node_modules`); `strict:
   true` makes it fail-loud. agedum never installs (a host action). `agedum --prompt` seeds
