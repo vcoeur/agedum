@@ -1083,6 +1083,107 @@ def test_pi_models_list_adds_extra_ids():
     assert ids == ["m-pro", "m-flash", "m-vision"]  # de-duped, model first
 
 
+def test_pi_provider_def_list_cross_provider(monkeypatch, tmp_path):
+    # Executor and fast subagents on DIFFERENT providers (Kimi executor + DeepSeek-flash
+    # subagents): providerDef list → one models.json provider block each; model/subagentModel
+    # are pi `provider/id` patterns passed through verbatim.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "slug": "pi-kimi-flash",
+            "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+            "config": {
+                "model": "kimi/k2p6",
+                "subagentModel": "deepseek/deepseek-v4-flash",
+                "providerDef": [
+                    {
+                        "id": "kimi",
+                        "api": "anthropic-messages",
+                        "baseUrl": "https://api.kimi.com/coding",
+                        "model": "k2p6",
+                        "apiKeyEnv": "KIMI_API_KEY",
+                    },
+                    {
+                        "id": "deepseek",
+                        "api": "openai-completions",
+                        "baseUrl": "https://api.deepseek.com",
+                        "model": "deepseek-v4-flash",
+                        "apiKeyEnv": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-kimi", "DEEPSEEK_API_KEY": "sk-ds"},
+    )
+    assert launch.command == ["pi", "--model", "kimi/k2p6"]
+    providers = json.loads(launch.config_files[0][1])["providers"]
+    assert providers["kimi"] == {
+        "baseUrl": "https://api.kimi.com/coding",
+        "api": "anthropic-messages",
+        "apiKey": "$KIMI_API_KEY",
+        "models": [{"id": "k2p6"}],
+    }
+    assert providers["deepseek"]["apiKey"] == "$DEEPSEEK_API_KEY"
+    assert providers["deepseek"]["models"] == [{"id": "deepseek-v4-flash"}]
+    overrides = json.loads(launch.config_files[1][1])["subagents"]["agentOverrides"]
+    assert overrides["worker"] == {"model": "deepseek/deepseek-v4-flash"}  # verbatim, not agedum/
+    # both providerDef keys are validated + exported (collected by required_env) and masked
+    assert {"KIMI_API_KEY", "DEEPSEEK_API_KEY"} <= launch.secrets
+    assert "sk-kimi" not in launch.config_files[0][1]
+
+
+def test_pi_provider_def_single_object(monkeypatch, tmp_path):
+    # A single providerDef object (not a list) is accepted too.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "config": {
+                "model": "ds/deepseek-v4-pro",
+                "providerDef": {
+                    "id": "ds",
+                    "baseUrl": "https://api.deepseek.com",
+                    "model": "deepseek-v4-pro",
+                    "apiKeyEnv": "DEEPSEEK_API_KEY",
+                },
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.command == ["pi", "--model", "ds/deepseek-v4-pro"]
+    providers = json.loads(launch.config_files[0][1])["providers"]
+    assert providers["ds"]["api"] == "openai-completions"  # default
+    assert providers["ds"]["models"] == [{"id": "deepseek-v4-pro"}]
+
+
+def test_pi_base_url_and_provider_def_mutually_exclusive():
+    with pytest.raises(ProviderError, match="both `baseUrl` and `providerDef`"):
+        build_launch(
+            {
+                "harness": "pi",
+                "secretEnv": "X",
+                "config": {
+                    "baseUrl": "https://h/v1",
+                    "model": "m",
+                    "providerDef": {"id": "p", "baseUrl": "https://h2/v1", "model": "m2"},
+                },
+            },
+            base_env={"X": "k"},
+        )
+
+
+def test_pi_provider_def_missing_field_fails_loudly():
+    with pytest.raises(ProviderError, match="pi providerDef is missing required field"):
+        build_launch(
+            {
+                "harness": "pi",
+                "config": {"model": "p/m", "providerDef": {"id": "p", "baseUrl": "https://h/v1"}},
+            },
+            base_env={},
+        )
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 

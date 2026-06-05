@@ -555,7 +555,18 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
     model = str(block.get("model") or "").strip()
     subagent_model = str(block.get("subagentModel") or "").strip()
     base_url = str(block.get("baseUrl") or "").strip()
+    provider_defs = _provider_defs(block.get("providerDef"))
     config_files: list[tuple[str, str, bool]] = []
+
+    if base_url and provider_defs:
+        raise ProviderError(
+            "pi config sets both `baseUrl` and `providerDef`; use one — `baseUrl` for a "
+            "single inline endpoint, `providerDef` for one or more named providers"
+        )
+
+    # The model `subagents.agentOverrides` points every builtin at: the `agedum/<id>` form
+    # under a single `baseUrl`, else the verbatim `provider/id` pattern (providerDef / built-in).
+    routed_subagent = subagent_model
 
     if base_url:
         # pi has no --base-url flag: a custom OpenAI-/Anthropic-compatible endpoint becomes a
@@ -571,6 +582,21 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
         models_json = _pi_models_json(base_url, api, secret_env, model_ids)
         config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
         command += ["--model", f"{PI_PROVIDER_NAME}/{model}"]
+        if subagent_model:
+            routed_subagent = f"{PI_PROVIDER_NAME}/{subagent_model}"
+    elif provider_defs:
+        # Several named providers in one models.json — e.g. a Kimi executor with DeepSeek-flash
+        # subagents (the cross-provider multi-agent case). Each providerDef entry is a provider
+        # block; `model` / `subagentModel` are pi `provider/id` patterns referencing them by id,
+        # passed through verbatim. Keys are referenced by $ENV name (required_env collects each).
+        providers: dict = {}
+        for provider_def in provider_defs:
+            provider_id, provider_block = _pi_provider_def_block(provider_def)
+            providers[provider_id] = provider_block
+        models_json = json.dumps({"providers": providers}, indent=2) + "\n"
+        config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
+        if model:
+            command += ["--model", model]
     elif model:
         command += ["--model", model]
 
@@ -584,10 +610,8 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
     if subagent_model:
         # pi-subagents reads per-builtin model overrides from settings.json
         # `subagents.agentOverrides`; route every built-in agent to subagentModel (the
-        # opencode-flash / reasonix-subagentModel analog). With a custom endpoint the model
-        # is `agedum/<id>` (already present in the models.json `models` list).
-        routed = f"{PI_PROVIDER_NAME}/{subagent_model}" if base_url else subagent_model
-        settings_json = _pi_subagent_settings_json(routed)
+        # opencode-flash / reasonix-subagentModel analog).
+        settings_json = _pi_subagent_settings_json(routed_subagent)
         config_files.append((str(pi_agent_dir() / "settings.json"), settings_json, True))
 
     return {}, [], command, tuple(config_files)
@@ -620,6 +644,27 @@ def _pi_models_json(base_url: str, api: str, api_key_env: str, model_ids: list[s
         provider["apiKey"] = f"${api_key_env}"
     provider["models"] = [{"id": model_id} for model_id in model_ids]
     return json.dumps({"providers": {PI_PROVIDER_NAME: provider}}, indent=2) + "\n"
+
+
+def _pi_provider_def_block(provider_def: dict) -> tuple[str, dict]:
+    """Render one pi ``models.json`` provider entry from a ``providerDef``.
+
+    Fields: ``id`` → the provider name (pi selects models as ``<id>/<model>``), ``baseUrl`` →
+    ``baseUrl``, ``model`` → the one upstream model id served there, ``apiKeyEnv`` → ``apiKey``
+    as ``$VAR`` (referenced by name, never written; omitted for a keyless endpoint), ``api``
+    (default ``openai-completions``). ``id`` / ``baseUrl`` / ``model`` are required. Returns
+    ``(id, block)``."""
+    fields = {key: str(provider_def.get(key) or "").strip() for key in ("id", "baseUrl", "model")}
+    missing = [key for key, value in fields.items() if not value]
+    if missing:
+        raise ProviderError(f"pi providerDef is missing required field(s): {', '.join(missing)}")
+    api = str(provider_def.get("api") or "openai-completions").strip() or "openai-completions"
+    block: dict = {"baseUrl": fields["baseUrl"], "api": api}
+    api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
+    if api_key_env:
+        block["apiKey"] = f"${api_key_env}"
+    block["models"] = [{"id": fields["model"]}]
+    return fields["id"], block
 
 
 def _pi_subagent_settings_json(model: str) -> str:

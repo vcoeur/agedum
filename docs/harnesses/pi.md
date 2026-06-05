@@ -154,6 +154,46 @@ generated `models.json` `models` list, and the subagent override routes to `aged
 to `agedum/deepseek-flash`. Without `baseUrl`, `model`/`subagentModel` are passed through as
 pi's built-in `provider/id` patterns (e.g. `anthropic/claude-haiku-4-5`).
 
+### Cross-provider multi-agent (`providerDef`) { #provider-def }
+
+When the executor and the fast subagents live on **different** providers (e.g. a Kimi executor
+with DeepSeek-flash subagents — the [reasonix](reasonix.md#two-model)-`kimi-flash` analog), the
+single-`baseUrl` shorthand isn't enough: `models.json` needs more than one provider. Use
+**`providerDef`** — a single object or a **list** of `{id, api, baseUrl, model, apiKeyEnv}`,
+each rendered as a `models.json` provider block. `model` and `subagentModel` are then pi
+`provider/id` patterns referencing those ids, passed through verbatim:
+
+```json
+{
+  "harness": "pi",
+  "slug": "pi-kimi-flash",
+  "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+  "config": {
+    "model": "kimi/k2p6",
+    "subagentModel": "deepseek/deepseek-v4-flash",
+    "providerDef": [
+      { "id": "kimi", "api": "anthropic-messages", "baseUrl": "https://api.kimi.com/coding", "model": "k2p6", "apiKeyEnv": "KIMI_API_KEY" },
+      { "id": "deepseek", "api": "openai-completions", "baseUrl": "https://api.deepseek.com", "model": "deepseek-v4-flash", "apiKeyEnv": "DEEPSEEK_API_KEY" }
+    ]
+  }
+}
+```
+
+| `providerDef` field | Effect |
+|---|---|
+| `id` | the pi provider name; models are selected as `<id>/<model>` |
+| `baseUrl` | the endpoint → the provider's `baseUrl` |
+| `model` | the upstream model id served there → the provider's one `models[]` entry |
+| `api` | the provider API (default `openai-completions`; `anthropic-messages` for a Kimi/Anthropic endpoint) |
+| `apiKeyEnv` | referenced as `apiKey: "$VAR"` (never written); auto-added to `requiredEnv` and exported |
+
+→ a `models.json` with a `kimi` and a `deepseek` provider, `pi --model kimi/k2p6`, and
+`settings.json` routing every built-in subagent to `deepseek/deepseek-v4-flash`. `baseUrl` and
+`providerDef` are **mutually exclusive** — `baseUrl` is the single-endpoint shorthand,
+`providerDef` the explicit multi-provider form. (`api: anthropic-messages` POSTs to
+`<baseUrl>/v1/messages`, so a coding endpoint mounted at `…/coding/v1/messages` uses
+`baseUrl: "…/coding"`.)
+
 **`--prompt`/`--run`.** pi takes the prompt as its positional argument either way; `--print`
 (`-p`) flips it to non-interactive. So `--prompt` seeds the interactive TUI (`pi "<text>"`) and
 `--run` runs once and exits (`pi --print "<text>"`) — the [Claude](claude.md) shape exactly.

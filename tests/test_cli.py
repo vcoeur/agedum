@@ -996,6 +996,68 @@ def test_provider_pi_dry_run_shows_generated_files(monkeypatch, tmp_path, capsys
     assert "sk-secret-zzz" not in out  # the key value is never written or printed
 
 
+def test_provider_pi_provider_def_binds_multi_provider_models(monkeypatch, tmp_path):
+    # A cross-provider pi config (Kimi executor + DeepSeek-flash subagents) binds a models.json
+    # with both provider blocks and requires both providerDef keys.
+    seen = {}
+
+    def fake_run(root, plan, command, *, close_stdin=False):
+        seen["command"] = command
+        seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
+        return 0
+
+    monkeypatch.setattr(cli, "run_virtualfs", fake_run)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr(
+        cli, "load_source", lambda: cli.Source(root=Path("/proj"), agents_md=None, skills_dir=None)
+    )
+    monkeypatch.setattr(cli, "load_global_source", lambda: cli.Source(Path("/g"), None, None))
+    agent_dir = tmp_path / "pi-agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "pkf.json").write_text(
+        json.dumps(
+            {
+                "harness": "pi",
+                "requiredEnv": ["KIMI_API_KEY", "DEEPSEEK_API_KEY"],
+                "config": {
+                    "model": "kimi/k2p6",
+                    "subagentModel": "deepseek/deepseek-v4-flash",
+                    "providerDef": [
+                        {
+                            "id": "kimi",
+                            "api": "anthropic-messages",
+                            "baseUrl": "https://api.kimi.com/coding",
+                            "model": "k2p6",
+                            "apiKeyEnv": "KIMI_API_KEY",
+                        },
+                        {
+                            "id": "deepseek",
+                            "baseUrl": "https://api.deepseek.com",
+                            "model": "deepseek-v4-flash",
+                            "apiKeyEnv": "DEEPSEEK_API_KEY",
+                        },
+                    ],
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("KIMI_API_KEY=sk-kimi\nDEEPSEEK_API_KEY=sk-ds\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "pkf"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert seen["command"] == ["pi", "--model", "kimi/k2p6"]
+    models = json.loads(seen["binds"][str(agent_dir / "models.json")])["providers"]
+    assert set(models) == {"kimi", "deepseek"}
+    assert models["kimi"]["api"] == "anthropic-messages"
+    assert "sk-kimi" not in seen["binds"][str(agent_dir / "models.json")]  # key by name only
+
+
 # --- --providers listing ---
 
 

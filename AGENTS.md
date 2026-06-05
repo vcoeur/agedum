@@ -81,7 +81,12 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   reaches pi by its conventional env-var name via the `requiredEnv` export (never argv). pi has
   **no base-URL flag**, so a `baseUrl` makes agedum generate `~/.pi/agent/models.json` (a
   provider named `agedum`, `apiKey` referenced by `$VAR`, `api` default `openai-completions`,
-  model selected as `agedum/<id>`) — the reasonix.toml analog. A `subagentModel` generates
+  model selected as `agedum/<id>`) — the reasonix.toml analog. For a **cross-provider**
+  multi-agent (executor + subagents on different endpoints, e.g. Kimi executor + DeepSeek-flash
+  subagents), `providerDef` (a single object or a **list** of `{id, api, baseUrl, model,
+  apiKeyEnv}`) emits one `models.json` provider block each; `model`/`subagentModel` are then pi
+  `provider/id` patterns passed through verbatim. `baseUrl` and `providerDef` are mutually
+  exclusive; each `apiKeyEnv` is auto-required + referenced by `$VAR`. A `subagentModel` generates
   `~/.pi/agent/settings.json` `subagents.agentOverrides` routing every [pi-subagents] built-in
   agent (scout/researcher/planner/worker/reviewer/context-builder/oracle/delegate) to one model
   (the opencode-flash / reasonix-`subagentModel` analog). Both generated files are **merged**
