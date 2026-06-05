@@ -49,6 +49,25 @@ its conventional name. A custom endpoint and pi-subagents model routing have no 
 become **generated on-disk config files** (the [reasonix.toml](reasonix.md#custom-endpoint)
 precedent) — merged onto your existing files so they augment rather than mask them.
 
+### Choosing a model setup { #multiple-models }
+
+A pi config scales from one model to several across providers. Pick the row that matches what
+you want:
+
+| You want | Set | Section |
+|---|---|---|
+| one built-in model | `model` (a `provider/id` pattern) | [Built-in provider](#built-in-provider-no-baseurl) |
+| one model at a custom endpoint | `baseUrl` + `model` | [Custom endpoint](#custom-endpoint) |
+| several models at one endpoint | `baseUrl` + `model` + `models` | [Custom endpoint](#custom-endpoint) |
+| a fast subagent tier, one endpoint | `baseUrl` + `model` + `subagentModel` | [Subagent routing](#subagent-routing) |
+| executor + subagents on different endpoints | `providerDef` list + `model` + `subagentModel` | [Cross-provider](#provider-def) |
+
+Registering several models (`models`) just makes them switchable in one session — still a
+single agent. Routing work to a different model (`subagentModel`) is **multi-agent
+delegation**, which needs the [pi-subagents](https://pi.dev/packages/pi-subagents) extension
+installed (see the note in [Subagent routing](#subagent-routing)). `baseUrl` and `providerDef`
+are mutually exclusive — one inline endpoint vs. several named providers.
+
 ### Built-in provider (no `baseUrl`)
 
 ```json
@@ -131,7 +150,20 @@ subagent's model is set in pi's `settings.json` under `subagents.agentOverrides`
 `subagentModel` makes agedum **generate `~/.pi/agent/settings.json`** routing every built-in
 agent — `scout`, `researcher`, `planner`, `worker`, `reviewer`, `context-builder`, `oracle`,
 `delegate` — to one model (the [opencode](opencode.md)-flash / reasonix-`subagentModel`
-analog). It is merged onto your existing `settings.json`, so other settings are untouched.
+analog). It is merged onto your existing `settings.json`, so other settings (e.g. the
+`packages` list) are untouched.
+
+!!! note "`subagentModel` requires the pi-subagents extension"
+    Subagents are **not** part of pi core — they come from the
+    [pi-subagents](https://pi.dev/packages/pi-subagents) extension. Install it on the host
+    once: `pi install npm:pi-subagents` (it registers under `settings.json` `packages`).
+    Without it, pi ignores the `subagents.*` keys, so the generated `settings.json` is
+    **inert** and pi runs as a single agent on `model` — no error, just no delegation. agedum
+    writes the routing config but does **not** install the package (installing is a host
+    action, not something a launch should do). Confirm the extension is present with
+    `pi list` (or the `/subagents-doctor` command inside pi). The same applies to the
+    DeepSeek/Kimi `*-flash` provider configs in agentsconf: they assume pi-subagents is
+    installed.
 
 A strong executor with a fast subagent tier on one custom endpoint — both ids land in the
 generated `models.json` `models` list, and the subagent override routes to `agedum/<sub>`:
