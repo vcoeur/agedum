@@ -1058,6 +1058,30 @@ def test_provider_pi_provider_def_binds_multi_provider_models(monkeypatch, tmp_p
     assert "sk-kimi" not in seen["binds"][str(agent_dir / "models.json")]  # key by name only
 
 
+def test_provider_pi_extension_warning_on_stderr(monkeypatch, tmp_path, capsys):
+    # A pi config needing pi-subagents (via subagentModel) warns on stderr when the host
+    # doesn't have it installed — non-fatal, shown in --dry-run too.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "empty-agent"))  # nothing installed
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "px.json").write_text(
+        json.dumps({"harness": "pi", "config": {"model": "m", "subagentModel": "m-flash"}})
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "pi", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--dry-run", "px"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    err = " ".join(capsys.readouterr().err.split())  # flatten rich's soft-wrapping
+    assert "pi-subagents" in err and "not installed" in err
+
+
 # --- --providers listing ---
 
 

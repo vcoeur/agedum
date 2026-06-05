@@ -226,6 +226,51 @@ each rendered as a `models.json` provider block. `model` and `subagentModel` are
 `<baseUrl>/v1/messages`, so a coding endpoint mounted at `…/coding/v1/messages` uses
 `baseUrl: "…/coding"`.)
 
+### Extension settings + the require gate { #extensions }
+
+Most pi extensions read their config from `settings.json` (pi-subagents reads
+`subagents.agentOverrides` / `subagents.disableBuiltins` there). **`piSettings`** is a generic
+escape hatch — a JSON object **deep-merged into the generated `~/.pi/agent/settings.json`** (the
+[opencode](opencode.md) `opencodeConfig` precedent), so you can configure any settings-based
+extension, or pi-core keys, that agedum doesn't model:
+
+```json
+{
+  "harness": "pi",
+  "slug": "pi-deepseek-tuned",
+  "secretEnv": "DEEPSEEK_API_KEY",
+  "requireExtensions": ["pi-subagents"],
+  "config": {
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "subagentModel": "deepseek-v4-flash",
+    "piSettings": {
+      "subagents": { "disableBuiltins": false, "agentOverrides": { "scout": { "thinking": "high" } } }
+    }
+  }
+}
+```
+
+- **`piSettings` composes with `subagentModel`.** `subagentModel` is the baseline (every
+  built-in → one model); `piSettings` is deep-merged on top, so it **wins on conflict** — use
+  it to override one agent (above, `scout` keeps the flash model but gains `thinking: high`) or
+  add `subagents.disableBuiltins`. A single `settings.json` is generated and merged onto yours.
+- **`requireExtensions`** (a string or list) names extensions the provider depends on.
+  `pi-subagents` is **implicitly required** whenever `subagentModel` or a `piSettings.subagents`
+  block is present. At launch (and in `--dry-run`) agedum checks the host's installed packages
+  (`settings.json` `packages` + `~/.pi/agent/npm/node_modules`) and **warns** for any missing
+  one — because pi silently ignores config for an absent extension, so without the warning a
+  multi-agent provider would quietly run as a single agent. Set **`strict: true`** to make a
+  missing extension a hard error instead (for tasks / CI). agedum never installs — that is a
+  host action (`pi install npm:<name>`).
+
+!!! note "What `piSettings` can and can't reach"
+    `piSettings` writes **`settings.json`** only. An extension that keeps config in its **own
+    file** — e.g. pi-subagents' `parallel`/`async`/`chain` knobs live in
+    `~/.pi/agent/extensions/subagent/config.json`, not `settings.json` — is not reachable this
+    way yet; that needs a per-extension adapter (a planned follow-up). `subagents.agentOverrides`
+    / `disableBuiltins` **are** in `settings.json`, so routing and enable/disable work today.
+
 **`--prompt`/`--run`.** pi takes the prompt as its positional argument either way; `--print`
 (`-p`) flips it to non-interactive. So `--prompt` seeds the interactive TUI (`pi "<text>"`) and
 `--run` runs once and exits (`pi --print "<text>"`) — the [Claude](claude.md) shape exactly.

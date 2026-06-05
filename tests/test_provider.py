@@ -1184,6 +1184,118 @@ def test_pi_provider_def_missing_field_fails_loudly():
         )
 
 
+# --- pi extension support: piSettings passthrough + requireExtensions warn-gate ---
+
+
+def _pi_installed(tmp_path, *names):
+    """A PI_CODING_AGENT_DIR whose settings.json `packages` lists `names` (so the warn-gate
+    sees them as installed). Returns the agent dir path."""
+    agent = tmp_path / "pi-agent"
+    agent.mkdir(parents=True, exist_ok=True)
+    (agent / "settings.json").write_text(json.dumps({"packages": [f"npm:{n}" for n in names]}))
+    return agent
+
+
+def test_pi_settings_passthrough(monkeypatch, tmp_path):
+    # piSettings is deep-merged into a generated settings.json (any settings-based extension).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path, "pi-subagents")))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "config": {
+                "model": "anthropic/claude-sonnet-4",
+                "piSettings": {"subagents": {"disableBuiltins": True}, "quietStartup": True},
+            },
+        },
+        base_env={},
+    )
+    target, content, merge_json = launch.config_files[0]
+    assert target.endswith("settings.json")
+    assert merge_json is True
+    doc = json.loads(content)
+    assert doc == {"subagents": {"disableBuiltins": True}, "quietStartup": True}
+
+
+def test_pi_settings_composes_with_subagent_model(monkeypatch, tmp_path):
+    # subagentModel is the baseline (all 8 builtins); an explicit piSettings wins on conflict.
+    # ONE settings.json is emitted (not two competing files for the same target).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path, "pi-subagents")))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "config": {
+                "model": "anthropic/claude-sonnet-4",
+                "subagentModel": "anthropic/claude-haiku-4-5",
+                "piSettings": {"subagents": {"agentOverrides": {"scout": {"thinking": "high"}}}},
+            },
+        },
+        base_env={},
+    )
+    settings = [c for c in launch.config_files if c[0].endswith("settings.json")]
+    assert len(settings) == 1  # composed into one fragment
+    overrides = json.loads(settings[0][1])["subagents"]["agentOverrides"]
+    assert overrides["worker"] == {"model": "anthropic/claude-haiku-4-5"}  # subagentModel baseline
+    # piSettings merged onto the subagentModel baseline for scout (its model kept, thinking added):
+    assert overrides["scout"] == {"model": "anthropic/claude-haiku-4-5", "thinking": "high"}
+
+
+def test_pi_settings_must_be_object():
+    with pytest.raises(ProviderError, match="piSettings.*must be a JSON object"):
+        build_launch(
+            {"harness": "pi", "config": {"model": "m", "piSettings": ["nope"]}}, base_env={}
+        )
+
+
+def test_pi_require_extensions_warns_when_missing(monkeypatch, tmp_path):
+    # An explicitly required extension that isn't installed → a non-fatal warning (no raise).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path)))  # nothing installed
+    launch = build_launch(
+        {"harness": "pi", "config": {"model": "m", "requireExtensions": ["pi-intercom"]}},
+        base_env={},
+    )
+    assert any("pi-intercom" in w and "not installed" in w for w in launch.warnings)
+
+
+def test_pi_subagent_model_implicitly_requires_pi_subagents(monkeypatch, tmp_path):
+    # subagentModel needs pi-subagents; warn when it's absent even without requireExtensions.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path)))
+    launch = build_launch(
+        {"harness": "pi", "config": {"model": "m", "subagentModel": "m-flash"}}, base_env={}
+    )
+    assert any("pi-subagents" in w for w in launch.warnings)
+
+
+def test_pi_require_extensions_satisfied_no_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path, "pi-subagents")))
+    launch = build_launch(
+        {"harness": "pi", "config": {"model": "m", "subagentModel": "m-flash"}}, base_env={}
+    )
+    assert launch.warnings == ()
+
+
+def test_pi_strict_extensions_fails_loudly(monkeypatch, tmp_path):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path)))
+    with pytest.raises(ProviderError, match="pi-subagents.*not installed"):
+        build_launch(
+            {
+                "harness": "pi",
+                "config": {"model": "m", "subagentModel": "m-flash", "strict": True},
+            },
+            base_env={},
+        )
+
+
+def test_pi_extension_detected_via_node_modules(monkeypatch, tmp_path):
+    # Installed-detection also works from the npm/node_modules dir, not just settings packages.
+    agent = tmp_path / "pi-agent"
+    (agent / "npm" / "node_modules" / "pi-subagents").mkdir(parents=True)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+    launch = build_launch(
+        {"harness": "pi", "config": {"model": "m", "subagentModel": "m-flash"}}, base_env={}
+    )
+    assert launch.warnings == ()
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 
