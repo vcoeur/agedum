@@ -69,6 +69,10 @@ class Launch:
     ``merge_json`` deep-merges ``content`` onto any existing JSON file at the target so an
     injected user-scope config augments rather than masks the user's own. Empty for a
     harness without a generated on-disk config.
+
+    ``warnings`` are non-fatal advisories surfaced at launch (and in ``--dry-run``) — e.g. a
+    pi provider whose `requireExtensions` names a pi extension that is not installed on the
+    host. They never block the launch (use a fail-loud ``ProviderError`` for that).
     """
 
     harness: str
@@ -78,6 +82,7 @@ class Launch:
     command: list[str] = field(default_factory=list)
     secrets: frozenset[str] = frozenset()
     config_files: tuple[tuple[str, str, bool], ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 def default_env_file() -> Path:
@@ -273,6 +278,9 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
     # mask the whole document in --dry-run.
     if _provider_defs(block.get("providerDef")) and "OPENCODE_CONFIG_CONTENT" in env:
         secrets.add("OPENCODE_CONFIG_CONTENT")
+    # pi's requireExtensions gate: warn (or fail-loud, when strict) about pi extensions the
+    # config relies on but the host has not installed — see _pi_extension_warnings.
+    warnings = _pi_extension_warnings(block) if harness == "pi" else []
     return Launch(
         harness=harness,
         label=label,
@@ -281,6 +289,7 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         command=command,
         secrets=frozenset(secrets),
         config_files=tuple(config_files),
+        warnings=tuple(warnings),
     )
 
 
@@ -607,11 +616,30 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
     if thinking:
         command += ["--thinking", thinking]
 
+    # settings.json: a generic `piSettings` passthrough (any settings-based pi extension —
+    # `subagents.*`, pi-core keys — deep-merged onto the user's settings.json) plus the
+    # `subagentModel` shortcut, composed into ONE fragment so a single settings.json is emitted
+    # (two config_files for one target would each merge against the on-disk file, not each
+    # other). subagentModel is the baseline (every builtin → one model); an explicit piSettings
+    # wins on conflict, so it can override an individual agent or add `subagents.disableBuiltins`.
+    settings_fragment: dict = {}
     if subagent_model:
         # pi-subagents reads per-builtin model overrides from settings.json
-        # `subagents.agentOverrides`; route every built-in agent to subagentModel (the
-        # opencode-flash / reasonix-subagentModel analog).
-        settings_json = _pi_subagent_settings_json(routed_subagent)
+        # `subagents.agentOverrides` (the opencode-flash / reasonix-subagentModel analog).
+        settings_fragment = {
+            "subagents": {
+                "agentOverrides": {
+                    name: {"model": routed_subagent} for name in PI_SUBAGENT_BUILTINS
+                }
+            }
+        }
+    pi_settings = block.get("piSettings")
+    if pi_settings is not None:
+        if not isinstance(pi_settings, dict):
+            raise ProviderError("pi `piSettings` must be a JSON object")
+        settings_fragment = _deep_merge(settings_fragment, pi_settings)
+    if settings_fragment:
+        settings_json = json.dumps(settings_fragment, indent=2) + "\n"
         config_files.append((str(pi_agent_dir() / "settings.json"), settings_json, True))
 
     return {}, [], command, tuple(config_files)
@@ -667,11 +695,79 @@ def _pi_provider_def_block(provider_def: dict) -> tuple[str, dict]:
     return fields["id"], block
 
 
-def _pi_subagent_settings_json(model: str) -> str:
-    """Render the ``~/.pi/agent/settings.json`` fragment routing every built-in pi-subagents
-    agent to ``model`` via ``subagents.agentOverrides``."""
-    overrides = {name: {"model": model} for name in PI_SUBAGENT_BUILTINS}
-    return json.dumps({"subagents": {"agentOverrides": overrides}}, indent=2) + "\n"
+def _pi_extension_warnings(block: dict) -> list[str]:
+    """Advisories for pi extensions a config relies on but the host hasn't installed.
+
+    ``requireExtensions`` (a string or list) names extensions the provider needs; **pi-subagents
+    is implicitly required** when ``subagentModel`` or a ``piSettings.subagents`` block is set
+    (those `subagents.*` settings are inert without the extension). Each is matched against the
+    host's installed packages (``~/.pi/agent/settings.json`` `packages` + the
+    ``~/.pi/agent/npm/node_modules`` dir). A missing one yields a warning — or, when the config
+    sets ``strict: true``, a fail-loud :class:`ProviderError` (so a task / CI run refuses rather
+    than silently degrading, e.g. to a single agent). agedum never installs (a host action)."""
+    require = block.get("requireExtensions")
+    specs = [require] if isinstance(require, str) else require if isinstance(require, list) else []
+    required: list[str] = []
+    for spec in specs:
+        name = _pi_pkg_name(str(spec))
+        if name and name not in required:
+            required.append(name)
+    pi_settings = block.get("piSettings")
+    needs_subagents = bool(str(block.get("subagentModel") or "").strip()) or (
+        isinstance(pi_settings, dict) and "subagents" in pi_settings
+    )
+    if needs_subagents and "pi-subagents" not in required:
+        required.append("pi-subagents")
+    if not required:
+        return []
+
+    installed = _pi_installed_package_names()
+    missing = [name for name in required if name not in installed]
+    if not missing:
+        return []
+    messages = [
+        f"pi extension '{name}' is required by this provider but is not installed on the host; "
+        f"run `pi install npm:{name}` (its config is inert without it)"
+        for name in missing
+    ]
+    if block.get("strict") is True:
+        raise ProviderError("; ".join(messages))
+    return messages
+
+
+def _pi_pkg_name(spec: str) -> str:
+    """The bare package name from an extension spec: ``npm:pi-subagents`` / ``git:…/pi-foo`` /
+    ``pi-foo`` → ``pi-foo``. Empty input → ``""``."""
+    value = str(spec or "").strip()
+    for scheme in ("npm:", "git:", "file:"):
+        if value.startswith(scheme):
+            value = value[len(scheme) :]
+            break
+    return value.rstrip("/").split("/")[-1]
+
+
+def _pi_installed_package_names() -> set[str]:
+    """Bare names of pi extensions installed on the host — from ``~/.pi/agent/settings.json``
+    `packages` and the ``~/.pi/agent/npm/node_modules`` directory. Best-effort: an unreadable
+    settings.json or absent node_modules simply yields fewer names."""
+    agent_dir = pi_agent_dir()
+    names: set[str] = set()
+    try:
+        settings = json.loads((agent_dir / "settings.json").read_text())
+        if isinstance(settings, dict):
+            for spec in settings.get("packages") or []:
+                name = _pi_pkg_name(str(spec))
+                if name:
+                    names.add(name)
+    except (OSError, ValueError):
+        pass
+    try:
+        for child in (agent_dir / "npm" / "node_modules").iterdir():
+            if child.is_dir():
+                names.add(child.name)
+    except OSError:
+        pass
+    return names
 
 
 def merge_json_onto_file(target: Path, fragment: str) -> str:

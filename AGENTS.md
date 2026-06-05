@@ -90,8 +90,14 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   `~/.pi/agent/settings.json` `subagents.agentOverrides` routing every [pi-subagents] built-in
   agent (scout/researcher/planner/worker/reviewer/context-builder/oracle/delegate) to one model
   (the opencode-flash / reasonix-`subagentModel` analog). Both generated files are **merged**
-  onto any existing ones (not masked) via the user-scope `config_files` path. `agedum --prompt`
-  seeds `pi "<text>"` (interactive); `--run` maps to `pi --print "<text>"`.
+  onto any existing ones (not masked) via the user-scope `config_files` path. **`piSettings`** is
+  a generic escape hatch: a JSON object deep-merged into the generated `settings.json` (any
+  settings-based extension; `subagentModel` is sugar composed into the same fragment, `piSettings`
+  winning on conflict). **`requireExtensions`** (+ implicit `pi-subagents` when `subagentModel`/
+  `piSettings.subagents` is set) warns at launch — via `Launch.warnings` — when a needed extension
+  is absent from the host (`settings.json packages` / `~/.pi/agent/npm/node_modules`); `strict:
+  true` makes it fail-loud. agedum never installs (a host action). `agedum --prompt` seeds
+  `pi "<text>"` (interactive); `--run` maps to `pi --print "<text>"`.
 
   [pi-subagents]: https://pi.dev/packages/pi-subagents
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional

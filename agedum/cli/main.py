@@ -247,6 +247,9 @@ def _run_config(argv: list[str]) -> int:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1
 
+    for warning in launch.warnings:
+        _err.print(f"[yellow]agedum:[/] {warning}")
+
     if dry_run:
         _print_dry_run(launch, env_path, command)
         return 0
