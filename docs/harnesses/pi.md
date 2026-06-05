@@ -264,12 +264,35 @@ extension, or pi-core keys, that agedum doesn't model:
   missing extension a hard error instead (for tasks / CI). agedum never installs — that is a
   host action (`pi install npm:<name>`).
 
-!!! note "What `piSettings` can and can't reach"
-    `piSettings` writes **`settings.json`** only. An extension that keeps config in its **own
-    file** — e.g. pi-subagents' `parallel`/`async`/`chain` knobs live in
-    `~/.pi/agent/extensions/subagent/config.json`, not `settings.json` — is not reachable this
-    way yet; that needs a per-extension adapter (a planned follow-up). `subagents.agentOverrides`
-    / `disableBuiltins` **are** in `settings.json`, so routing and enable/disable work today.
+`piSettings` writes **`settings.json`**. Some extensions keep config in their **own file** under
+`~/.pi/agent/` instead — e.g. pi-subagents' `parallel`/`async`/`chain` knobs live in
+`extensions/subagent/config.json`, not `settings.json`. **`piExtensionConfig`** reaches those: a
+map of *relative path under `~/.pi/agent`* → JSON object, each deep-merged onto that file:
+
+```json
+{
+  "harness": "pi",
+  "slug": "pi-deepseek-parallel",
+  "secretEnv": "DEEPSEEK_API_KEY",
+  "requireExtensions": ["pi-subagents"],
+  "config": {
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "subagentModel": "deepseek-v4-flash",
+    "piExtensionConfig": {
+      "extensions/subagent/config.json": { "parallel": { "maxTasks": 12, "concurrency": 6 }, "asyncByDefault": true }
+    }
+  }
+}
+```
+
+This generates `~/.pi/agent/extensions/subagent/config.json` (merged onto any existing one)
+alongside the `settings.json` (routing) and `models.json` (endpoint) — three coexisting files.
+Paths must be **relative and stay under `~/.pi/agent`** (no `..`, not absolute), and the
+agedum-managed `settings.json` / `models.json` are rejected — use `piSettings` /
+`baseUrl`\|`providerDef` for those. Pair `piExtensionConfig` with `requireExtensions` so the
+gate still warns when the target extension isn't installed. Between `piSettings` (settings.json)
+and `piExtensionConfig` (any other file), every extension config under `~/.pi/agent` is reachable.
 
 **`--prompt`/`--run`.** pi takes the prompt as its positional argument either way; `--print`
 (`-p`) flips it to non-interactive. So `--prompt` seeds the interactive TUI (`pi "<text>"`) and

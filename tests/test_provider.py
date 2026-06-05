@@ -1296,6 +1296,91 @@ def test_pi_extension_detected_via_node_modules(monkeypatch, tmp_path):
     assert launch.warnings == ()
 
 
+def test_pi_extension_config_writes_extension_own_file(monkeypatch, tmp_path):
+    # piExtensionConfig reaches an extension's OWN file (not settings.json) — e.g.
+    # pi-subagents' parallel/async knobs in extensions/subagent/config.json.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path, "pi-subagents")))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "config": {
+                "model": "m",
+                "piExtensionConfig": {
+                    "extensions/subagent/config.json": {
+                        "parallel": {"maxTasks": 12, "concurrency": 6},
+                        "asyncByDefault": True,
+                    }
+                },
+            },
+        },
+        base_env={},
+    )
+    agent = tmp_path / "pi-agent"
+    entry = next(c for c in launch.config_files if c[0].endswith("subagent/config.json"))
+    target, content, merge_json = entry
+    assert target == str(agent / "extensions" / "subagent" / "config.json")
+    assert merge_json is True
+    assert json.loads(content) == {
+        "parallel": {"maxTasks": 12, "concurrency": 6},
+        "asyncByDefault": True,
+    }
+
+
+def test_pi_extension_config_composes_with_settings_and_models(monkeypatch, tmp_path):
+    # All three generated files coexist: models.json (baseUrl), settings.json (subagentModel),
+    # and the extension-own file (piExtensionConfig).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(_pi_installed(tmp_path, "pi-subagents")))
+    launch = build_launch(
+        {
+            "harness": "pi",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com",
+                "model": "deepseek-v4-pro",
+                "subagentModel": "deepseek-v4-flash",
+                "piExtensionConfig": {"extensions/subagent/config.json": {"asyncByDefault": True}},
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    targets = [c[0] for c in launch.config_files]
+    assert any(t.endswith("models.json") for t in targets)
+    assert any(t.endswith("settings.json") for t in targets)
+    assert any(t.endswith("subagent/config.json") for t in targets)
+
+
+def test_pi_extension_config_rejects_managed_targets():
+    for target in ("settings.json", "models.json"):
+        with pytest.raises(ProviderError, match="agedum-managed"):
+            build_launch(
+                {
+                    "harness": "pi",
+                    "config": {"model": "m", "piExtensionConfig": {target: {"x": 1}}},
+                },
+                base_env={},
+            )
+
+
+def test_pi_extension_config_rejects_unsafe_paths():
+    for bad in ("../escape.json", "/etc/passwd", "a/../../b.json"):
+        with pytest.raises(ProviderError, match="relative path under"):
+            build_launch(
+                {"harness": "pi", "config": {"model": "m", "piExtensionConfig": {bad: {"x": 1}}}},
+                base_env={},
+            )
+
+
+def test_pi_extension_config_value_must_be_object():
+    with pytest.raises(ProviderError, match="must be a JSON object"):
+        build_launch(
+            {
+                "harness": "pi",
+                "config": {"model": "m", "piExtensionConfig": {"extensions/x/config.json": 5}},
+            },
+            base_env={},
+        )
+
+
 # --- with_prompt: per-harness prompt seeding (--prompt / --run) ---
 
 

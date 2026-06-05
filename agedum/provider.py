@@ -642,6 +642,13 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
         settings_json = json.dumps(settings_fragment, indent=2) + "\n"
         config_files.append((str(pi_agent_dir() / "settings.json"), settings_json, True))
 
+    # piExtensionConfig: an extension whose config is its OWN file under ~/.pi/agent (not
+    # settings.json) — e.g. pi-subagents' parallel/async/chain knobs in
+    # extensions/subagent/config.json — is reached by a generic relpath→object map, each entry
+    # deep-merged onto that file. settings.json / models.json are agedum-managed, so they are
+    # rejected here (use piSettings / baseUrl|providerDef).
+    config_files += _pi_extension_config_files(block.get("piExtensionConfig"))
+
     return {}, [], command, tuple(config_files)
 
 
@@ -768,6 +775,45 @@ def _pi_installed_package_names() -> set[str]:
     except OSError:
         pass
     return names
+
+
+def _pi_extension_config_files(value: object) -> list[tuple[str, str, bool]]:
+    """Generated config files for ``piExtensionConfig`` — a ``{relpath: object}`` map writing
+    arbitrary JSON under ``~/.pi/agent`` (deep-merged onto any existing file), for an extension
+    whose config is its **own file** rather than ``settings.json`` (e.g. pi-subagents'
+    ``parallel``/``async``/``chain`` in ``extensions/subagent/config.json``).
+
+    Each key is a path **relative to** ``~/.pi/agent`` (not absolute, no ``..`` — the file must
+    stay under the agent dir). The agedum-managed ``settings.json`` / ``models.json`` are
+    rejected (use ``piSettings`` / ``baseUrl``|``providerDef``) so one target is never written
+    by two config files."""
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        raise ProviderError(
+            "pi `piExtensionConfig` must be a JSON object mapping a relative path to a config "
+            "object"
+        )
+    managed = {"settings.json": "piSettings", "models.json": "baseUrl / providerDef"}
+    files: list[tuple[str, str, bool]] = []
+    for rel, content in value.items():
+        rel_path = str(rel).strip()
+        candidate = Path(rel_path) if rel_path else Path()
+        if not rel_path or candidate.is_absolute() or ".." in candidate.parts:
+            raise ProviderError(
+                f"pi `piExtensionConfig` key {rel!r} must be a relative path under ~/.pi/agent "
+                "(not absolute, no '..')"
+            )
+        norm = candidate.as_posix()
+        if norm in managed:
+            raise ProviderError(
+                f"pi `piExtensionConfig` cannot target {norm!r} (agedum-managed); "
+                f"use `{managed[norm]}` instead"
+            )
+        if not isinstance(content, dict):
+            raise ProviderError(f"pi `piExtensionConfig` value for {rel!r} must be a JSON object")
+        files.append((str(pi_agent_dir() / candidate), json.dumps(content, indent=2) + "\n", True))
+    return files
 
 
 def merge_json_onto_file(target: Path, fragment: str) -> str:
