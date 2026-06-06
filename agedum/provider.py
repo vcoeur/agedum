@@ -576,6 +576,7 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
     # The model `subagents.agentOverrides` points every builtin at: the `agedum/<id>` form
     # under a single `baseUrl`, else the verbatim `provider/id` pattern (providerDef / built-in).
     routed_subagent = subagent_model
+    model_inputs = _pi_model_inputs(block.get("modelInputs"))
 
     if base_url:
         # pi has no --base-url flag: a custom OpenAI-/Anthropic-compatible endpoint becomes a
@@ -588,7 +589,7 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
             )
         model_ids = _pi_model_ids(model, subagent_model, block.get("models"))
         api = str(block.get("api") or "openai-completions").strip() or "openai-completions"
-        models_json = _pi_models_json(base_url, api, secret_env, model_ids)
+        models_json = _pi_models_json(base_url, api, secret_env, model_ids, model_inputs)
         config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
         command += ["--model", f"{PI_PROVIDER_NAME}/{model}"]
         if subagent_model:
@@ -600,7 +601,7 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
         # passed through verbatim. Keys are referenced by $ENV name (required_env collects each).
         providers: dict = {}
         for provider_def in provider_defs:
-            provider_id, provider_block = _pi_provider_def_block(provider_def)
+            provider_id, provider_block = _pi_provider_def_block(provider_def, model_inputs)
             providers[provider_id] = provider_block
         models_json = json.dumps({"providers": providers}, indent=2) + "\n"
         config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
@@ -670,25 +671,59 @@ def _pi_model_ids(model: str, subagent_model: str, extra: object) -> list[str]:
     return ids
 
 
-def _pi_models_json(base_url: str, api: str, api_key_env: str, model_ids: list[str]) -> str:
+def _pi_model_inputs(value: object) -> list[str] | None:
+    """Validate and return a ``modelInputs`` list (``["text", "image"]``) or ``None``.
+    Returns ``None`` when ``value`` is ``None`` (omitted from config) so that the default
+    pi behaviour — ``input: ["text"]`` — takes over.  A bare ``[]`` is also treated as
+    ``None`` to match the common round-tripped-JSON no-image case."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ProviderError("pi `modelInputs` must be a list of strings")
+    cleaned: list[str] = []
+    for item in value:
+        entry = str(item or "").strip()
+        if entry:
+            cleaned.append(entry)
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _pi_models_json(
+    base_url: str,
+    api: str,
+    api_key_env: str,
+    model_ids: list[str],
+    model_inputs: list[str] | None = None,
+) -> str:
     """Render the ``~/.pi/agent/models.json`` fragment for the ``agedum`` custom-endpoint
     provider. The API key is referenced by env-var name (``$VAR``), never its value; omitted
-    for a keyless endpoint."""
+    for a keyless endpoint. If ``model_inputs`` is set, it is applied to every model entry."""
     provider: dict = {"baseUrl": base_url, "api": api}
     if api_key_env:
         provider["apiKey"] = f"${api_key_env}"
-    provider["models"] = [{"id": model_id} for model_id in model_ids]
+    model_entries: list[dict] = []
+    for model_id in model_ids:
+        entry: dict = {"id": model_id}
+        if model_inputs:
+            entry["input"] = model_inputs
+        model_entries.append(entry)
+    provider["models"] = model_entries
     return json.dumps({"providers": {PI_PROVIDER_NAME: provider}}, indent=2) + "\n"
 
 
-def _pi_provider_def_block(provider_def: dict) -> tuple[str, dict]:
+def _pi_provider_def_block(
+    provider_def: dict, global_model_inputs: list[str] | None = None
+) -> tuple[str, dict]:
     """Render one pi ``models.json`` provider entry from a ``providerDef``.
 
     Fields: ``id`` → the provider name (pi selects models as ``<id>/<model>``), ``baseUrl`` →
     ``baseUrl``, ``model`` → the one upstream model id served there, ``apiKeyEnv`` → ``apiKey``
     as ``$VAR`` (referenced by name, never written; omitted for a keyless endpoint), ``api``
     (default ``openai-completions``). ``id`` / ``baseUrl`` / ``model`` are required. Returns
-    ``(id, block)``."""
+    ``(id, block)``. If ``global_model_inputs`` is set, it applies to the model entry unless
+    the providerDef has its own ``modelInputs``."""
     fields = {key: str(provider_def.get(key) or "").strip() for key in ("id", "baseUrl", "model")}
     missing = [key for key, value in fields.items() if not value]
     if missing:
@@ -698,7 +733,12 @@ def _pi_provider_def_block(provider_def: dict) -> tuple[str, dict]:
     api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
     if api_key_env:
         block["apiKey"] = f"${api_key_env}"
-    block["models"] = [{"id": fields["model"]}]
+    model_entry: dict = {"id": fields["model"]}
+    def_inputs = _pi_model_inputs(provider_def.get("modelInputs"))
+    model_inputs = def_inputs if def_inputs is not None else global_model_inputs
+    if model_inputs:
+        model_entry["input"] = model_inputs
+    block["models"] = [model_entry]
     return fields["id"], block
 
 
