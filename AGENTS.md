@@ -3,7 +3,7 @@
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
 private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**,
-**Cline**, **reasonix**, and **aider** harnesses at **project + global scope**.
+**Cline**, **reasonix**, **aider**, and **pi** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
@@ -71,9 +71,20 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   (then `autoCommits: false` → `--no-auto-commits`). Wrapper mode runs the literal command and
   does **not** force `--no-git` (documented caveat). `agedum --run` maps to `aider --message
   "<text>"`; `--prompt` is a fail-loud `ProviderError` (`--message` runs once and exits).
+- **pi** — pure path-discovery (no flags), same shape as opencode/cline/reasonix. Project
+  `AGENTS.md` is read natively at `./AGENTS.md`, so agedum leaves it in place. Global
+  `AGENTS.md` → `~/.pi/agent/AGENTS.md`; skills → `./.pi/skills/` (project) +
+  `~/.pi/agent/skills/` (global). pi discovers skills from `.pi/skills/` and `.agents/skills/`
+  at both scopes — to avoid name-collision warnings, exclude `.agents/skills/` from pi's
+  discovery via `.pi/settings.json` (`{"skills": ["!.agents/skills/**"]}`) so the
+  agedum-compiled copies win. Skills use the `SKILL.pi.md` overlay; no `extra_args`.
+  **Provider mode** maps `model` → environment (pi reads the model from `settings.json`),
+  so a `baseUrl` / custom provider path reuses the reasonix generated-config pattern
+  (not yet implemented — follow-up).
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
-  `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md` / `AGENTS.aider.md`) for the active harness — the instructions analogue of
+  `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md` / `AGENTS.aider.md` /
+  `AGENTS.pi.md`) for the active harness — the instructions analogue of
   `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).

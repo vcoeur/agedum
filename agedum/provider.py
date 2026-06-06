@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider")
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.

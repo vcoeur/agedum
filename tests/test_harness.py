@@ -11,9 +11,11 @@ from agedum.harness import (
     compile_cline,
     compile_kimi,
     compile_opencode,
+    compile_pi,
     compile_reasonix,
     kimi_config_dir,
     opencode_config_dir,
+    pi_config_dir,
     reasonix_home_skills_dir,
     reasonix_user_config_dir,
 )
@@ -758,4 +760,97 @@ def test_compile_aider_global_agents_harness_overlay_merged(tmp_path):
     merged = Path(reads[0]).read_text()
     assert "GLOBAL-BASE" in merged
     assert "AIDER-EXTRA" in merged
+    assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+# ---------------------------------------------------------------------------
+# pi harness
+# ---------------------------------------------------------------------------
+
+
+def test_compile_pi(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.pi.md").write_text("---\nlicense: MIT\n---\npi note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    assert pi_config_dir() == home / ".pi" / "agent"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_pi(project, global_, dest)
+
+    targets = _targets(plan)
+    # pi is pure path-discovery — no extra args.
+    assert plan.extra_args == []
+
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded.
+    assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
+
+    # Global instructions -> ~/.pi/agent/AGENTS.md.
+    assert home / ".pi" / "agent" / "AGENTS.md" in targets
+    assert _src_for(plan, home / ".pi" / "agent" / "AGENTS.md").read_text() == "GLOBAL-INSTR\n"
+
+    # Project skills -> ./.pi/skills, with the pi overlay merged.
+    assert proj / ".pi" / "skills" in targets
+    pskill_md = (_src_for(plan, proj / ".pi" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "license: MIT" in pskill_md
+    assert "pi note" in pskill_md
+
+    # Global skills -> ~/.pi/agent/skills.
+    assert home / ".pi" / "agent" / "skills" in targets
+    assert (_src_for(plan, home / ".pi" / "agent" / "skills") / "gskill" / "SKILL.md").exists()
+
+
+def test_compile_pi_project_only_injects_skills_not_instructions(tmp_path):
+    # No global scope: project AGENTS.md is native (no bind), only project skills bind.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_pi(project, None, dest)
+
+    assert plan.extra_args == []
+    assert _targets(plan) == [proj / ".pi" / "skills"]
+
+
+def test_compile_pi_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.pi.md").write_text("PI-EXTRA\n")
+    (gconf / "AGENTS.opencode.md").write_text("OPENCODE-EXTRA\n")
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_pi(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, pi_config_dir() / "AGENTS.md").read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "PI-EXTRA" in merged
     assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
