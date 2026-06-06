@@ -879,19 +879,23 @@ def test_compile_pi_shadows_agents_skills_with_safe_override(tmp_path):
 
 def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
     """assert_safe allows a safe_override target even when it is git-tracked."""
-    from agedum.launcher import assert_safe, LauncherError
+    from agedum.launcher import assert_safe
 
     proj = tmp_path / "proj"
     (proj / ".agents" / "skills" / "pskill").mkdir(parents=True)
     (proj / "AGENTS.md").write_text("x\n")
     (proj / ".agents" / "skills" / "pskill" / "SKILL.md").write_text("x\n")
     subprocess.run(["git", "-C", str(proj), "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(proj), "config", "user.email", "test@test"], capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(proj), "config", "user.email", "test@test"],
+        capture_output=True,
+    )
     subprocess.run(["git", "-C", str(proj), "config", "user.name", "test"], capture_output=True)
     subprocess.run(["git", "-C", str(proj), "add", "-A"], capture_output=True)
     subprocess.run(["git", "-C", str(proj), "commit", "-m", "init"], capture_output=True)
 
     from agedum.harness import Plan
+
     plan = Plan()
     plan.safe_overrides.add(proj / ".agents" / "skills")
     # Should not raise.
@@ -900,8 +904,8 @@ def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
 
 def test_build_bwrap_argv_emits_tmpfs_for_safe_overrides():
     """build_bwrap_argv adds --tmpfs for each safe_override before ro-binds."""
-    from agedum.launcher import build_bwrap_argv
     from agedum.harness import Plan
+    from agedum.launcher import build_bwrap_argv
 
     plan = Plan()
     plan.safe_overrides.add(Path("/tmp/a"))
