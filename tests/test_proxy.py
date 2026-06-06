@@ -1,5 +1,7 @@
 import json
+import socket
 import threading
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -180,3 +182,58 @@ def test_proxy_passes_non_message_bodies_through():
         with urllib.request.urlopen(request) as response:
             assert response.status == 200
     assert [m["role"] for m in upstream.last_body["messages"]] == ["user"]
+
+
+class _DisconnectingUpstream:
+    """Accepts the connection, drains the request, then closes without replying.
+
+    Reproduces ``http.client.RemoteDisconnected`` inside the proxy's ``urlopen``
+    (raised from ``getresponse()``) — the exact failure that previously crashed the
+    handler thread with an unhandled traceback.
+    """
+
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(5)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def base_url(self):
+        host, port = self._sock.getsockname()[:2]
+        return f"http://{host}:{port}"
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return  # listening socket closed on __exit__
+            conn.recv(65536)  # drain the forwarded request, then drop it on the floor
+            conn.close()
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._sock.close()
+
+
+def test_proxy_returns_502_when_upstream_disconnects():
+    # A dropped upstream socket must surface as a clean 502, not a crashed handler thread.
+    with _DisconnectingUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 502
+            assert json.loads(exc.read())["error"]["type"] == "api_error"
+        else:
+            raise AssertionError("expected a 502 from the proxy")
