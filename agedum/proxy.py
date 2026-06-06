@@ -17,6 +17,7 @@ streaming the response back unchanged (SSE-safe). The wrapper points the child's
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import urllib.error
@@ -135,6 +136,13 @@ class _FoldHandler(BaseHTTPRequestHandler):
             response = exc  # an HTTPError is itself a readable response
         except urllib.error.URLError as exc:
             self._send_error(502, f"agedum fold-proxy: upstream unreachable: {exc.reason}")
+            return
+        except (ConnectionError, http.client.HTTPException) as exc:
+            # A mid-flight disconnect (RemoteDisconnected / IncompleteRead) is raised from
+            # getresponse(), which urllib does *not* wrap in URLError — so it escapes the
+            # clause above. Catch the connection/HTTP-level families here; otherwise one
+            # dropped upstream socket crashes the handler thread with an unhandled traceback.
+            self._send_error(502, f"agedum fold-proxy: upstream disconnected: {exc}")
             return
         try:
             self._relay(response)
