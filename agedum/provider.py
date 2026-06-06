@@ -577,6 +577,7 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
     # under a single `baseUrl`, else the verbatim `provider/id` pattern (providerDef / built-in).
     routed_subagent = subagent_model
     model_inputs = _pi_model_inputs(block.get("modelInputs"))
+    context_window = _pi_context_window(block.get("contextWindow"))
 
     if base_url:
         # pi has no --base-url flag: a custom OpenAI-/Anthropic-compatible endpoint becomes a
@@ -589,7 +590,9 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
             )
         model_ids = _pi_model_ids(model, subagent_model, block.get("models"))
         api = str(block.get("api") or "openai-completions").strip() or "openai-completions"
-        models_json = _pi_models_json(base_url, api, secret_env, model_ids, model_inputs)
+        models_json = _pi_models_json(
+            base_url, api, secret_env, model_ids, model_inputs, context_window
+        )
         config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
         command += ["--model", f"{PI_PROVIDER_NAME}/{model}"]
         if subagent_model:
@@ -601,7 +604,9 @@ def _pi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderRe
         # passed through verbatim. Keys are referenced by $ENV name (required_env collects each).
         providers: dict = {}
         for provider_def in provider_defs:
-            provider_id, provider_block = _pi_provider_def_block(provider_def, model_inputs)
+            provider_id, provider_block = _pi_provider_def_block(
+                provider_def, model_inputs, context_window
+            )
             providers[provider_id] = provider_block
         models_json = json.dumps({"providers": providers}, indent=2) + "\n"
         config_files.append((str(pi_agent_dir() / "models.json"), models_json, True))
@@ -690,16 +695,33 @@ def _pi_model_inputs(value: object) -> list[str] | None:
     return cleaned
 
 
+def _pi_context_window(value: object) -> int | None:
+    """Validate and return a ``contextWindow`` value or ``None``.
+    Must be a positive integer. Returns ``None`` when omitted so pi's 128k default applies."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ProviderError("pi `contextWindow` must be an integer, not a boolean")
+    if not isinstance(value, (int, float)):
+        raise ProviderError("pi `contextWindow` must be an integer")
+    cw = int(value)
+    if cw <= 0:
+        raise ProviderError("pi `contextWindow` must be positive")
+    return cw
+
+
 def _pi_models_json(
     base_url: str,
     api: str,
     api_key_env: str,
     model_ids: list[str],
     model_inputs: list[str] | None = None,
+    context_window: int | None = None,
 ) -> str:
     """Render the ``~/.pi/agent/models.json`` fragment for the ``agedum`` custom-endpoint
     provider. The API key is referenced by env-var name (``$VAR``), never its value; omitted
-    for a keyless endpoint. If ``model_inputs`` is set, it is applied to every model entry."""
+    for a keyless endpoint. If ``model_inputs`` is set, it is applied to every model entry.
+    If ``context_window`` is set, it is applied to every model entry."""
     provider: dict = {"baseUrl": base_url, "api": api}
     if api_key_env:
         provider["apiKey"] = f"${api_key_env}"
@@ -708,13 +730,17 @@ def _pi_models_json(
         entry: dict = {"id": model_id}
         if model_inputs:
             entry["input"] = model_inputs
+        if context_window is not None:
+            entry["contextWindow"] = context_window
         model_entries.append(entry)
     provider["models"] = model_entries
     return json.dumps({"providers": {PI_PROVIDER_NAME: provider}}, indent=2) + "\n"
 
 
 def _pi_provider_def_block(
-    provider_def: dict, global_model_inputs: list[str] | None = None
+    provider_def: dict,
+    global_model_inputs: list[str] | None = None,
+    global_context_window: int | None = None,
 ) -> tuple[str, dict]:
     """Render one pi ``models.json`` provider entry from a ``providerDef``.
 
@@ -723,7 +749,7 @@ def _pi_provider_def_block(
     as ``$VAR`` (referenced by name, never written; omitted for a keyless endpoint), ``api``
     (default ``openai-completions``). ``id`` / ``baseUrl`` / ``model`` are required. Returns
     ``(id, block)``. If ``global_model_inputs`` is set, it applies to the model entry unless
-    the providerDef has its own ``modelInputs``."""
+    the providerDef has its own ``modelInputs``. Same override pattern for ``contextWindow``."""
     fields = {key: str(provider_def.get(key) or "").strip() for key in ("id", "baseUrl", "model")}
     missing = [key for key, value in fields.items() if not value]
     if missing:
@@ -738,6 +764,10 @@ def _pi_provider_def_block(
     model_inputs = def_inputs if def_inputs is not None else global_model_inputs
     if model_inputs:
         model_entry["input"] = model_inputs
+    def_cw = _pi_context_window(provider_def.get("contextWindow"))
+    cw = def_cw if def_cw is not None else global_context_window
+    if cw is not None:
+        model_entry["contextWindow"] = cw
     block["models"] = [model_entry]
     return fields["id"], block
 
