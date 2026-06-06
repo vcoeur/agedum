@@ -25,3 +25,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A tag re-push (e.g. amending lint fixes onto an already-released
+          # version) re-runs this job; without this the second run hard-fails
+          # with "400 File already exists" instead of being a no-op.
+          skip-existing: true
