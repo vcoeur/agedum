@@ -57,6 +57,9 @@ class Plan:
     # Sources the harness reads *in place* without a bind (kimi/opencode read the project
     # AGENTS.md natively). Display-only for --dry-run, so they are not invisible.
     native_reads: list[Path] = field(default_factory=list)
+    # Targets the launcher should tmpfs-shadow (mask with empty) rather than bind into.
+    # Exempt from the git-tracked safety check (they are read-only shadows).
+    safe_overrides: set[Path] = field(default_factory=set)
 
 
 def claude_config_dir() -> Path:
@@ -750,6 +753,11 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
             target = project.root / ".pi" / "skills"
             plan.binds.append((out, target))
             plan.origins[target] = str(project.skills_dir)
+
+    # Shadow .agents/skills/ with an empty tmpfs so pi does not discover the raw
+    # agent-neutral source skills alongside the compiled .pi/skills/ copies — that
+    # would produce a name-collision warning for every shared skill.
+    plan.safe_overrides.add(project.root / ".agents" / "skills")
 
     # Global skills -> ~/.pi/agent/skills.
     if global_ is not None and global_.skills_dir is not None:

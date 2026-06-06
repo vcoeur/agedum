@@ -856,3 +856,61 @@ def test_compile_pi_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
 def test_pi_agent_dir_honours_env_override(tmp_path, monkeypatch):
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "custom-pi"))
     assert pi_agent_dir() == tmp_path / "custom-pi"
+
+
+def test_compile_pi_shadows_agents_skills_with_safe_override(tmp_path):
+    """compile_pi adds .agents/skills/ to safe_overrides so the launcher tmpfs-shadows it."""
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_pi(project, None, dest)
+
+    # The agent-neutral skills directory is shadowed.
+    assert (proj / ".agents" / "skills") in plan.safe_overrides
+    # The compiled skills are still injected into .pi/skills/.
+    assert (proj / ".pi" / "skills") in _targets(plan)
+
+
+def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
+    """assert_safe allows a safe_override target even when it is git-tracked."""
+    from agedum.launcher import assert_safe, LauncherError
+
+    proj = tmp_path / "proj"
+    (proj / ".agents" / "skills" / "pskill").mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("x\n")
+    (proj / ".agents" / "skills" / "pskill" / "SKILL.md").write_text("x\n")
+    subprocess.run(["git", "-C", str(proj), "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(proj), "config", "user.email", "test@test"], capture_output=True)
+    subprocess.run(["git", "-C", str(proj), "config", "user.name", "test"], capture_output=True)
+    subprocess.run(["git", "-C", str(proj), "add", "-A"], capture_output=True)
+    subprocess.run(["git", "-C", str(proj), "commit", "-m", "init"], capture_output=True)
+
+    from agedum.harness import Plan
+    plan = Plan()
+    plan.safe_overrides.add(proj / ".agents" / "skills")
+    # Should not raise.
+    assert_safe(proj, plan)
+
+
+def test_build_bwrap_argv_emits_tmpfs_for_safe_overrides():
+    """build_bwrap_argv adds --tmpfs for each safe_override before ro-binds."""
+    from agedum.launcher import build_bwrap_argv
+    from agedum.harness import Plan
+
+    plan = Plan()
+    plan.safe_overrides.add(Path("/tmp/a"))
+    plan.safe_overrides.add(Path("/tmp/b"))
+    argv = build_bwrap_argv(plan, ["pi"])
+
+    idx_a = argv.index("--tmpfs")
+    assert argv[idx_a + 1] == "/tmp/a" or argv[idx_a + 1] == "/tmp/b"
+    idx_b = argv.index("--tmpfs", idx_a + 1)
+    assert argv[idx_b + 1] == "/tmp/a" or argv[idx_b + 1] == "/tmp/b"
+    # tmpfs comes before -- (command separator).
+    assert argv.index("--tmpfs") < argv.index("--")

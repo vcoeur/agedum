@@ -53,8 +53,12 @@ def build_bwrap_argv(plan: Plan, command: list[str]) -> list[str]:
     """Compose the ``bwrap`` argv: bind each compiled tree at its absolute target.
 
     Directory binds are overlaid per-child (see :func:`_effective_binds`) so a skills bind
-    adds agedum's skills without erasing hand-authored ones already in the target dir."""
+    adds agedum's skills without erasing hand-authored ones already in the target dir.
+    ``safe_overrides`` are tmpfs-shadowed — an empty mount hides the real path without
+    touching disk."""
     argv = ["bwrap", "--dev-bind", "/", "/"]
+    for override_target in sorted(plan.safe_overrides):
+        argv += ["--tmpfs", str(override_target)]
     for src, target in _effective_binds(plan):
         argv += ["--ro-bind", str(src), str(target)]
     argv += ["--", *command]
@@ -71,10 +75,13 @@ def _git_tracked(project_root: Path, target: str) -> bool:
 
 def assert_safe(project_root: Path, plan: Plan) -> None:
     """Refuse to overlay a git-tracked path. Only in-project targets can be tracked;
-    targets outside the project (e.g. ``~/.claude``) are not in this repo."""
+    targets outside the project (e.g. ``~/.claude``) are not in this repo.
+    ``safe_overrides`` are exempt — they are tmpfs shadows, not content injections."""
     if not (project_root / ".git").exists():
         return
     for _, target in plan.binds:
+        if target in plan.safe_overrides:
+            continue
         try:
             rel = target.relative_to(project_root)
         except ValueError:
