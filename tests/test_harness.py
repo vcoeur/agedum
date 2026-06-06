@@ -890,13 +890,9 @@ def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
         ["git", "-C", str(proj), "config", "user.email", "test@test"],
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "-C", str(proj), "config", "user.name", "test"], capture_output=True
-    )
+    subprocess.run(["git", "-C", str(proj), "config", "user.name", "test"], capture_output=True)
     subprocess.run(["git", "-C", str(proj), "add", "-A"], capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(proj), "commit", "-m", "init"], capture_output=True
-    )
+    subprocess.run(["git", "-C", str(proj), "commit", "-m", "init"], capture_output=True)
 
     plan = Plan()
     plan.safe_overrides.add(proj / ".agents" / "skills")
