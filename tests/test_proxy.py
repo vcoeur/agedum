@@ -1,3 +1,5 @@
+import contextlib
+import http.client
 import json
 import socket
 import threading
@@ -237,3 +239,79 @@ def test_proxy_returns_502_when_upstream_disconnects():
             assert json.loads(exc.read())["error"]["type"] == "api_error"
         else:
             raise AssertionError("expected a 502 from the proxy")
+
+
+class _MidBodyDropUpstream:
+    """Sends a valid 200 with a large Content-Length, a few body bytes, then closes.
+
+    The status line and headers arrive intact, so the proxy's ``urlopen`` succeeds and
+    ``_relay`` begins streaming them downstream — but the body ends far short of the
+    promised length, so ``response.read()`` *inside* ``_relay`` raises
+    ``http.client.IncompleteRead``. This is the mid-stream upstream drop that the
+    connect-phase 502 guard cannot catch (the response is already in flight).
+    """
+
+    def __init__(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(5)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    @property
+    def base_url(self):
+        host, port = self._sock.getsockname()[:2]
+        return f"http://{host}:{port}"
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return  # listening socket closed on __exit__
+            conn.recv(65536)  # drain the forwarded request
+            # Promise far more than we deliver, then drop -> IncompleteRead on the next read.
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 1048576\r\n"
+                b"\r\n"
+                b'{"partial":'
+            )
+            conn.close()
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._sock.close()
+
+
+def test_proxy_survives_upstream_drop_mid_stream():
+    # An upstream that dies mid-body — after status + headers are already relayed downstream —
+    # must not crash the handler thread. No 502 is possible (the response is in flight), so
+    # _relay has to swallow the disconnect and stop quietly. We detect a crashed handler
+    # thread by hooking the server's handle_error, which socketserver invokes only when an
+    # exception escapes the request handler.
+    handler_errors = []
+    with _MidBodyDropUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        # Make handler threads non-daemon so the proxy's server_close() (on __exit__) joins
+        # the in-flight handler before we assert — otherwise the assertion races ahead of the
+        # handler thread and a crash (handle_error) can land after the check.
+        proxy._server.daemon_threads = False
+        proxy._server.handle_error = lambda request, client_address: handler_errors.append(
+            client_address
+        )
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # The client sees a truncated stream — the honest outcome of a mid-flight upstream
+        # drop. What must NOT happen is the handler thread dying with an unhandled traceback.
+        with contextlib.suppress(http.client.HTTPException, urllib.error.URLError, OSError):
+            with urllib.request.urlopen(request, timeout=5) as response:
+                response.read()
+    assert handler_errors == []
