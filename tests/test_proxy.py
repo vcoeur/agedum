@@ -1,11 +1,18 @@
 import json
 import socket
+import struct
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
-from agedum.proxy import FoldProxy, fold_system_messages
+from agedum.proxy import (
+    FoldProxy,
+    _FoldHandler,
+    _QuietThreadingHTTPServer,
+    fold_system_messages,
+)
 
 # ---------------------------------------------------------------------------
 # fold_system_messages — pure transform
@@ -237,3 +244,79 @@ def test_proxy_returns_502_when_upstream_disconnects():
             assert json.loads(exc.read())["error"]["type"] == "api_error"
         else:
             raise AssertionError("expected a 502 from the proxy")
+
+
+# ---------------------------------------------------------------------------
+# _QuietThreadingHTTPServer — a peer hanging up is routine, not an error
+# ---------------------------------------------------------------------------
+
+
+def test_quiet_server_swallows_connection_teardown(capsys):
+    # Every connection-level family a proxy routinely sees — a reset before the request
+    # line, a BrokenPipe mid-stream, an aborted upload — must be absorbed silently at the
+    # one seam, wherever in the handler it was raised.
+    server = _QuietThreadingHTTPServer(("127.0.0.1", 0), _FoldHandler)
+    try:
+        for error in (
+            ConnectionResetError(),
+            BrokenPipeError(),
+            ConnectionAbortedError(),
+            TimeoutError(),
+        ):
+            try:
+                raise error
+            except (ConnectionError, TimeoutError):
+                server.handle_error(None, ("127.0.0.1", 12345))
+    finally:
+        server.server_close()
+    assert capsys.readouterr().err == ""
+
+
+def test_quiet_server_still_reports_real_errors(capsys):
+    # The disconnect seam must not hide a genuine bug.
+    server = _QuietThreadingHTTPServer(("127.0.0.1", 0), _FoldHandler)
+    try:
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            server.handle_error(None, ("127.0.0.1", 12345))
+    finally:
+        server.server_close()
+    assert "ValueError" in capsys.readouterr().err
+
+
+def test_proxy_survives_client_reset_before_request():
+    # A client that opens a socket and resets it before sending a request line (the idle
+    # keep-alive socket being reaped) must not take the proxy down — it keeps serving.
+    with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        target = urlsplit(proxy.base_url)
+        resetting = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        resetting.connect((target.hostname, target.port))
+        # SO_LINGER with a zero timeout makes close() send a RST, not a graceful FIN.
+        resetting.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        resetting.close()
+
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+
+
+def test_proxy_relays_close_delimited_not_chunked():
+    # Tier 2: the response is delimited by connection close — no chunked re-framing, no
+    # Content-Length — so the client keeps no idle socket to reset afterwards.
+    with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.headers.get("Connection", "").lower() == "close"
+            assert response.headers.get("Transfer-Encoding") is None
+            assert json.loads(response.read()) == {"ok": True}

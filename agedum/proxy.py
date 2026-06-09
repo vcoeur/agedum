@@ -11,18 +11,27 @@ endpoints tolerate it; strict ones return ``400 unknown variant 'system'``.
 :class:`FoldProxy` listens on an ephemeral ``127.0.0.1`` port, folds every
 ``system``-role message into the top-level ``system`` field (always API-valid: the
 endpoint already accepts that field), and forwards the request to the real upstream,
-streaming the response back unchanged (SSE-safe). The wrapper points the child's
+streaming the response back close-delimited (SSE-safe). The wrapper points the child's
 ``ANTHROPIC_BASE_URL`` at this proxy and tears it down when the child exits.
+
+Transport stance: a reverse proxy sees peers hang up constantly — an idle socket reaped
+by the client, a generation interrupted mid-stream, a connection reset before the request
+line is even read. Those are routine, not errors. :class:`_QuietThreadingHTTPServer`
+absorbs the connection-level exception families in one place so they never surface as
+stderr tracebacks, the proxy serves **one request per connection** (``Connection: close``,
+so the client keeps no idle sockets to reset later), and the upstream hop uses
+:mod:`http.client` directly, whose single exception family makes upstream failures uniform
+to handle.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import sys
 import threading
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 # Headers that must not be copied verbatim across a proxy hop (RFC 7230 §6.1), plus the
 # framing headers we recompute ourselves.
@@ -96,6 +105,30 @@ def fold_system_messages(body: dict) -> dict:
     return folded
 
 
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Threading HTTP server that treats a peer disconnect as routine, not an error.
+
+    A reverse proxy's clients hang up all the time: an idle keep-alive socket reaped by
+    the client (``ConnectionResetError`` before the request line is read), a streaming
+    generation the user interrupts (``BrokenPipeError`` mid-response), a connection
+    aborted mid-upload. The stdlib's default ``handle_error`` dumps a traceback for each
+    of these. This is the single seam where every such teardown — wherever in the handler
+    it is raised — is absorbed silently; anything that is *not* a connection-level error
+    still falls through to the default handler.
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        exception = sys.exc_info()[1]
+        # ConnectionResetError / BrokenPipeError / ConnectionAbortedError are all
+        # ConnectionError subclasses; a slow or vanished client can also raise
+        # TimeoutError. For a proxy these are expected, not faults.
+        if isinstance(exception, (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class _FoldHandler(BaseHTTPRequestHandler):
     """Forward each request to ``upstream`` after folding system-role messages.
 
@@ -115,6 +148,9 @@ class _FoldHandler(BaseHTTPRequestHandler):
         self._proxy()
 
     def _proxy(self) -> None:
+        # One request per connection: the client then keeps no idle socket to reset later.
+        self.close_connection = True
+
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         body = self._maybe_fold(raw)
@@ -126,28 +162,28 @@ class _FoldHandler(BaseHTTPRequestHandler):
         }
         headers["Content-Length"] = str(len(body))
 
-        url = self.upstream.rstrip("/") + self.path
-        request = urllib.request.Request(
-            url, data=body or None, headers=headers, method=self.command
+        upstream = urlsplit(self.upstream)
+        path = upstream.path.rstrip("/") + self.path
+        connection = (
+            http.client.HTTPSConnection(upstream.hostname, upstream.port)
+            if upstream.scheme == "https"
+            else http.client.HTTPConnection(upstream.hostname, upstream.port)
         )
         try:
-            response = urllib.request.urlopen(request)  # noqa: S310 (trusted upstream URL)
-        except urllib.error.HTTPError as exc:
-            response = exc  # an HTTPError is itself a readable response
-        except urllib.error.URLError as exc:
-            self._send_error(502, f"agedum fold-proxy: upstream unreachable: {exc.reason}")
-            return
-        except (ConnectionError, http.client.HTTPException) as exc:
-            # A mid-flight disconnect (RemoteDisconnected / IncompleteRead) is raised from
-            # getresponse(), which urllib does *not* wrap in URLError — so it escapes the
-            # clause above. Catch the connection/HTTP-level families here; otherwise one
-            # dropped upstream socket crashes the handler thread with an unhandled traceback.
-            self._send_error(502, f"agedum fold-proxy: upstream disconnected: {exc}")
+            connection.request(self.command, path, body=body, headers=headers)
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            # Upstream unreachable, or dropped mid-flight (RemoteDisconnected /
+            # IncompleteRead). http.client raises one predictable family for both, so a
+            # single clause covers what urllib split across URLError and bare
+            # ConnectionError. A live client still gets a clean 502 body.
+            connection.close()
+            self._send_error(502, f"agedum fold-proxy: upstream error: {exc}")
             return
         try:
             self._relay(response)
         finally:
-            response.close()
+            connection.close()
 
     def _maybe_fold(self, raw: bytes) -> bytes:
         """Fold system-role messages out of a JSON body; pass anything else through."""
@@ -164,27 +200,27 @@ class _FoldHandler(BaseHTTPRequestHandler):
             return raw
         return json.dumps(folded).encode("utf-8")
 
-    def _relay(self, response) -> None:
-        """Stream the upstream response back, chunk-encoded (SSE-safe)."""
-        status = getattr(response, "status", None) or response.getcode()
-        self.send_response(status)
-        for key, value in response.headers.items():
+    def _relay(self, response: http.client.HTTPResponse) -> None:
+        """Stream the upstream response back, delimited by connection close (SSE-safe).
+
+        We advertise ``Connection: close`` and forward the body straight through, so its
+        end is the end of the connection — no manual chunked re-framing to get wrong, and
+        no idle keep-alive socket for the client to reset afterwards.
+        """
+        self.send_response(response.status)
+        for key, value in response.getheaders():
             lowered = key.lower()
-            if lowered in _HOP_BY_HOP or lowered in ("content-length",):
+            if lowered in _HOP_BY_HOP or lowered == "content-length":
                 continue
             self.send_header(key, value)
-        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
         self.end_headers()
         while True:
             chunk = response.read(8192)
             if not chunk:
                 break
-            self.wfile.write(f"{len(chunk):X}\r\n".encode())
             self.wfile.write(chunk)
-            self.wfile.write(b"\r\n")
             self.wfile.flush()
-        self.wfile.write(b"0\r\n\r\n")
-        self.wfile.flush()
 
     def _send_error(self, status: int, message: str) -> None:
         payload = json.dumps(
@@ -193,6 +229,7 @@ class _FoldHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -209,8 +246,7 @@ class FoldProxy:
 
     def __init__(self, upstream: str) -> None:
         handler = type("_BoundFoldHandler", (_FoldHandler,), {"upstream": upstream})
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self._server.daemon_threads = True
+        self._server = _QuietThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     @property

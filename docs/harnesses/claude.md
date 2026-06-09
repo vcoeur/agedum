@@ -102,6 +102,8 @@ Setting `foldSystemMessages: true` in the config sets `AGEDUM_FOLD_SYSTEM_MESSAG
 run time the claude launch interposes a local `127.0.0.1` reverse proxy in front of
 `ANTHROPIC_BASE_URL`: it folds every `system`-role message into the top-level `system`
 field (always valid — the endpoint already accepts that field), forwards to the real
-upstream, and streams the response back unchanged (SSE-safe). The proxy lives only for the
-duration of the wrapped command, and is a no-op for other harnesses and when the flag is
-unset.
+upstream, and streams the response back close-delimited (SSE-safe). It serves one request
+per connection and treats a client hang-up — an interrupted generation, a reaped idle
+socket — as routine, so a dropped peer never surfaces as a stderr traceback. The proxy
+lives only for the duration of the wrapped command, and is a no-op for other harnesses and
+when the flag is unset.
