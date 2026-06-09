@@ -182,6 +182,14 @@ class _FoldHandler(BaseHTTPRequestHandler):
             return
         try:
             self._relay(response)
+        except (OSError, http.client.HTTPException):
+            # A mid-stream disconnect: the downstream client going away (BrokenPipeError /
+            # ConnectionResetError from self.wfile.write) or the upstream dropping mid-body
+            # (IncompleteRead from response.read). The status line and headers are already
+            # sent, so a 502 is no longer possible — the response is in flight and the
+            # connection is broken. Close the connection and stop quietly instead of letting
+            # the exception crash the ThreadingHTTPServer handler thread.
+            self.close_connection = True
         finally:
             connection.close()
 

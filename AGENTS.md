@@ -149,6 +149,8 @@ are documented there — keep `docs/` in sync when the source layout or a compil
   and every PR.
 - `.github/workflows/release.yml` — on a `v*` tag push, `uv build` then publish to
   **PyPI** via OIDC trusted publishing (no token in the repo). Tag only after merge.
+  Publish is idempotent (`skip-existing: true`): re-pushing an already-released tag
+  is a no-op success, not a "File already exists" failure.
 - `.github/workflows/docs.yml` — on push to `main` touching `docs/**` or `mkdocs.yml`,
   build the site with `mkdocs build --strict` and deploy to GitHub Pages.
 
