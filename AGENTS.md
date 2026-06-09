@@ -194,8 +194,11 @@ mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` revers
 
 - The namespace shares the **real `.git`**, so an in-namespace `git add`/`commit`
   writes to the real repo. `assert_safe` **refuses to inject over a git-tracked
-  path**; injected targets must be untracked + gitignored.
+  path**; injected targets must be untracked + gitignored. The check runs over the
+  **effective per-child binds** (the paths actually mounted), so a tracked but
+  unrelated sibling in a skills dir never blocks a launch it could not endanger.
 - bwrap creates mountpoints on the real FS, leaving empty stubs after exit;
   `run_virtualfs` sweeps the ones it created (each target **and its parent**, deepest
-  first, only if it didn't pre-exist). Plain `--ro-bind`s mask any pre-existing dir;
-  injected content never leaks (leftovers are 0-byte / empty).
+  first, only if it didn't pre-exist) — including `safe_overrides` tmpfs shadows,
+  whose mountpoints bwrap stubs the same way. Plain `--ro-bind`s mask any
+  pre-existing dir; injected content never leaks (leftovers are 0-byte / empty).

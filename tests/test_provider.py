@@ -64,6 +64,21 @@ def test_parse_env_file(tmp_path):
     }
 
 
+def test_parse_env_file_strips_trailing_comment_from_unquoted_value(tmp_path):
+    # `source` semantics: `KEY=val # comment` sets "val"; a `#` inside the value
+    # (`val#ue`) or inside quotes is part of the value.
+    env = tmp_path / ".env"
+    env.write_text(
+        'COMMENTED=value # the comment\nHASH_INSIDE=val#ue\nQUOTED_HASH="value # kept"\n'
+    )
+    parsed = parse_env_file(env)
+    assert parsed == {
+        "COMMENTED": "value",
+        "HASH_INSIDE": "val#ue",
+        "QUOTED_HASH": "value # kept",
+    }
+
+
 # --- config loading ---
 
 
@@ -336,6 +351,20 @@ def test_opencode_flat_effort_alias():
     payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
     options = payload["provider"]["deepseek"]["models"]["deepseek-v4-flash"]["options"]
     assert options["reasoningEffort"] == "low"
+
+
+def test_opencode_options_without_addressable_model_fail_loudly():
+    # effortLevel/defaultOptions attach under provider.<id>.models.<id>; without a
+    # provider/model-shaped `model` they would silently do nothing — must raise instead.
+    for model_value in ("", "deepseek-v4-flash"):
+        with pytest.raises(ProviderError, match="provider/model"):
+            build_launch(
+                {
+                    "harness": "opencode",
+                    "config": {"model": model_value, "effortLevel": "low"},
+                },
+                base_env={},
+            )
 
 
 def test_opencode_explicit_options_win_over_flat_effort():
@@ -662,6 +691,22 @@ def test_reasonix_custom_endpoint_generates_toml():
     # The token still rides the required-env export so reasonix resolves api_key_env.
     assert launch.env["MY_API_KEY"] == "sk-secret-xyz"
     assert "MY_API_KEY" in launch.secrets
+
+
+def test_reasonix_toml_escapes_control_characters():
+    # A value carrying a newline / tab must not emit invalid TOML — basic strings may not
+    # contain raw control characters, so they are escaped.
+    launch = build_launch(
+        {
+            "harness": "reasonix",
+            "config": {"baseUrl": "https://h/v1", "model": 'we"ird\nmo\tdel'},
+        },
+        base_env={},
+    )
+    toml = launch.config_files[0][1]
+    assert '\\"' in toml  # quote escaped
+    assert "\\n" in toml and "\\t" in toml  # control chars escaped
+    assert 'model = "we\\"ird\\nmo\\tdel"' in toml
 
 
 def test_reasonix_custom_endpoint_kind_override():

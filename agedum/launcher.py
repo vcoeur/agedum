@@ -76,12 +76,16 @@ def _git_tracked(project_root: Path, target: str) -> bool:
 def assert_safe(project_root: Path, plan: Plan) -> None:
     """Refuse to overlay a git-tracked path. Only in-project targets can be tracked;
     targets outside the project (e.g. ``~/.claude``) are not in this repo.
-    ``safe_overrides`` are exempt — they are tmpfs shadows, not content injections."""
+
+    The check runs over the *effective* (per-child) binds, not the raw dir-level ones:
+    a skills dir is overlaid per-child (see :func:`_effective_binds`), so a tracked but
+    unrelated sibling (e.g. a hand-authored skill versioned in the repo) is never masked
+    and must not block the launch — only a target agedum would actually bind over does.
+    ``safe_overrides`` are not checked: they are read-only tmpfs shadows, never content
+    injections, and never appear in ``plan.binds``."""
     if not (project_root / ".git").exists():
         return
-    for _, target in plan.binds:
-        if target in plan.safe_overrides:
-            continue
+    for _, target in _effective_binds(plan):
         try:
             rel = target.relative_to(project_root)
         except ValueError:
@@ -90,7 +94,8 @@ def assert_safe(project_root: Path, plan: Plan) -> None:
             raise LauncherError(
                 f"refusing to inject over git-tracked path '{rel}': it must be "
                 f"untracked and gitignored (the namespace shares the real .git, so "
-                f"injected content over a tracked file could be committed)."
+                f"injected content over a tracked file could be committed). Untrack it "
+                f"first — `git rm --cached '{rel}'` — and add it to .gitignore."
             )
 
 
@@ -103,11 +108,18 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
     * **per-child** (:func:`_effective_binds`) — ``.claude/skills/<name>``: the empty stub
       bwrap leaves for an overlaid skill that has no on-disk counterpart.
 
+    ``safe_overrides`` (tmpfs shadows) are candidates too: bwrap creates their mountpoint
+    dirs just like bind targets, so shadowing a path that does not exist (e.g. pi's
+    ``.agents/skills`` in a project without one) would otherwise leave a stub behind.
+
     The sweep is deepest-first and skips anything that pre-existed, so listing a real dir
     (e.g. a user's ``~/.config/opencode/skills`` that already held skills) is harmless — it
     is never removed."""
     candidates: set[Path] = set()
-    for _, target in (*plan.binds, *_effective_binds(plan)):
+    for target in (
+        *(target for _, target in (*plan.binds, *_effective_binds(plan))),
+        *plan.safe_overrides,
+    ):
         candidates.add(target)
         candidates.add(target.parent)
     return candidates

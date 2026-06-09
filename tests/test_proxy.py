@@ -152,6 +152,8 @@ def _make_handler(state):
         def log_message(self, *args):
             pass
 
+        do_PUT = do_POST
+
     return Handler
 
 
@@ -191,6 +193,53 @@ def test_proxy_passes_non_message_bodies_through():
         with urllib.request.urlopen(request) as response:
             assert response.status == 200
     assert [m["role"] for m in upstream.last_body["messages"]] == ["user"]
+
+
+def test_proxy_reads_chunked_request_body():
+    # http.server does not de-chunk request bodies itself; the proxy must, or a chunked
+    # request would be forwarded body-less. The de-chunked body is folded and re-framed
+    # with Content-Length for the upstream hop.
+    body = {
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "hook context"},
+        ]
+    }
+    payload = json.dumps(body).encode()
+    with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        target = urlsplit(proxy.base_url)
+        connection = http.client.HTTPConnection(target.hostname, target.port)
+        try:
+            connection.request(
+                "POST",
+                "/v1/messages",
+                body=iter([payload[:7], payload[7:]]),  # no len() -> chunked encoding
+                headers={"Content-Type": "application/json"},
+                encode_chunked=True,
+            )
+            response = connection.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read()) == {"ok": True}
+        finally:
+            connection.close()
+    # Upstream saw the complete, de-chunked, folded body.
+    assert [m["role"] for m in upstream.last_body["messages"]] == ["user"]
+    assert upstream.last_body["system"] == [{"type": "text", "text": "hook context"}]
+
+
+def test_proxy_forwards_put_requests():
+    # The Anthropic-compat surface is POST/GET/DELETE today, but the proxy is a generic
+    # forwarder — other verbs must pass through rather than 501 at the proxy itself.
+    with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/thing",
+            data=json.dumps({"messages": []}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+    assert upstream.last_body == {"messages": []}
 
 
 class _DisconnectingUpstream:

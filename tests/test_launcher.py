@@ -85,6 +85,39 @@ def test_assert_safe_allows_untracked(tmp_path):
     assert_safe(tmp_path, Plan(binds=[(tmp_path / "compiled.md", tmp_path / "CLAUDE.md")]))
 
 
+def test_assert_safe_ignores_tracked_sibling_in_skills_dir(tmp_path):
+    # The per-child overlay never masks a sibling agedum does not ship, so a tracked,
+    # hand-authored skill in the target dir must not block the launch.
+    _git_init(tmp_path)
+    handmade = tmp_path / ".claude" / "skills" / "handmade"
+    handmade.mkdir(parents=True)
+    (handmade / "SKILL.md").write_text("hand-authored, deliberately versioned\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "x"], check=True)
+
+    compiled = tmp_path / "compiled-skills"
+    (compiled / "demo").mkdir(parents=True)
+    plan = Plan(binds=[(compiled, tmp_path / ".claude" / "skills")])
+    # Should not raise: agedum only binds .claude/skills/demo, never .../handmade.
+    assert_safe(tmp_path, plan)
+
+
+def test_assert_safe_refuses_tracked_same_named_skill(tmp_path):
+    # A tracked skill agedum *would* bind over is still refused.
+    _git_init(tmp_path)
+    demo = tmp_path / ".claude" / "skills" / "demo"
+    demo.mkdir(parents=True)
+    (demo / "SKILL.md").write_text("tracked\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "x"], check=True)
+
+    compiled = tmp_path / "compiled-skills"
+    (compiled / "demo").mkdir(parents=True)
+    plan = Plan(binds=[(compiled, tmp_path / ".claude" / "skills")])
+    with pytest.raises(LauncherError):
+        assert_safe(tmp_path, plan)
+
+
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
 def test_virtualfs_injects_then_sweeps_stubs(tmp_path):
     proj = tmp_path / "proj"
@@ -157,6 +190,20 @@ def test_virtualfs_overlay_preserves_hand_authored_sibling(tmp_path):
     # the shipped-only skill left no stub; the pre-existing user skill is untouched
     assert not (proj / ".claude" / "skills" / "demo").exists()
     assert (proj / ".claude" / "skills" / "user-skill" / "SKILL.md").exists()
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+def test_virtualfs_sweeps_safe_override_stubs(tmp_path):
+    # bwrap creates the mountpoint dirs for a --tmpfs shadow just like for a bind; a
+    # shadow over a path that did not exist must not leave stub dirs on the host.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    plan = Plan(safe_overrides={proj / ".agents" / "skills"})
+
+    rc = run_virtualfs(proj, plan, ["true"])
+
+    assert rc == 0
+    assert not (proj / ".agents").exists()  # both stub levels swept
 
 
 def test_run_appends_plan_extra_args_after_command(monkeypatch, tmp_path):

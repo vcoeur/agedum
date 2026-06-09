@@ -104,6 +104,8 @@ run time the claude launch interposes a local `127.0.0.1` reverse proxy in front
 field (always valid — the endpoint already accepts that field), forwards to the real
 upstream, and streams the response back close-delimited (SSE-safe). It serves one request
 per connection and treats a client hang-up — an interrupted generation, a reaped idle
-socket — as routine, so a dropped peer never surfaces as a stderr traceback. The proxy
-lives only for the duration of the wrapped command, and is a no-op for other harnesses and
-when the flag is unset.
+socket — as routine, so a dropped peer never surfaces as a stderr traceback. Chunked
+request bodies are de-chunked before forwarding, and a hung upstream is bounded by a
+generous per-socket-op timeout (300 s — far above the API's streaming ping cadence, so it
+only ever fires on a genuinely dead peer). The proxy lives only for the duration of the
+wrapped command, and is a no-op for other harnesses and when the flag is unset.

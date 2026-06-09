@@ -233,9 +233,15 @@ def _run_config(argv: list[str]) -> int:
     if provider is None:
         _die("a provider name or config path is required")
 
+    env_path = Path(env_file).expanduser() if env_file else default_env_file()
+    if env_file is not None and not env_path.is_file():
+        # An *explicit* --env that doesn't resolve is a user error — failing loudly here
+        # beats the misleading "X is required by provider … but is not set" downstream.
+        # The default env file stays optional (running without a .env is normal).
+        _die(f"--env file not found: {env_path}")
+
     try:
         config = load_config(resolve_config_path(provider))
-        env_path = Path(env_file).expanduser() if env_file else default_env_file()
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
         launch = build_launch(config, {**os.environ, **dotenv})
         command = (
@@ -513,7 +519,7 @@ def _run(
     command: list[str],
     *,
     close_stdin: bool = False,
-    config_files: tuple[tuple[str, str], ...] = (),
+    config_files: tuple[tuple[str, str, bool], ...] = (),
 ) -> int:
     project = load_source()
     global_ = load_global_source()

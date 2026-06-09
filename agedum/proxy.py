@@ -147,12 +147,23 @@ class _FoldHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         self._proxy()
 
+    def do_PUT(self) -> None:  # noqa: N802
+        self._proxy()
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._proxy()
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._proxy()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._proxy()
+
     def _proxy(self) -> None:
         # One request per connection: the client then keeps no idle socket to reset later.
         self.close_connection = True
 
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        raw = self._read_body()
         body = self._maybe_fold(raw)
 
         headers = {
@@ -164,10 +175,14 @@ class _FoldHandler(BaseHTTPRequestHandler):
 
         upstream = urlsplit(self.upstream)
         path = upstream.path.rstrip("/") + self.path
+        # The timeout bounds every socket op on the hop (connect + each read), so a dead
+        # upstream cannot pin a handler thread forever. Generous on purpose: an SSE stream
+        # only has to produce *some* bytes within the window, and the API pings well inside
+        # five minutes — this is a hung-peer backstop, not a request deadline.
         connection = (
-            http.client.HTTPSConnection(upstream.hostname, upstream.port)
+            http.client.HTTPSConnection(upstream.hostname, upstream.port, timeout=300)
             if upstream.scheme == "https"
-            else http.client.HTTPConnection(upstream.hostname, upstream.port)
+            else http.client.HTTPConnection(upstream.hostname, upstream.port, timeout=300)
         )
         try:
             connection.request(self.command, path, body=body, headers=headers)
@@ -192,6 +207,29 @@ class _FoldHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             connection.close()
+
+    def _read_body(self) -> bytes:
+        """Read the request body — ``Content-Length``-framed or ``chunked``.
+
+        ``http.server`` does not decode chunked transfer coding itself; without this a
+        chunked request would be forwarded body-less. The body is de-chunked here and
+        re-framed with a recomputed ``Content-Length`` for the upstream hop
+        (``Transfer-Encoding`` is hop-by-hop and never copied across).
+        """
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            chunks: list[bytes] = []
+            while True:
+                size_line = self.rfile.readline().split(b";", 1)[0].strip()
+                size = int(size_line or b"0", 16)
+                if size == 0:
+                    # Consume the (empty) trailer section up to the final blank line.
+                    while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                        pass
+                    return b"".join(chunks)
+                chunks.append(self.rfile.read(size))
+                self.rfile.readline()  # the CRLF terminating the chunk data
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
 
     def _maybe_fold(self, raw: bytes) -> bytes:
         """Fold system-role messages out of a JSON body; pass anything else through."""
