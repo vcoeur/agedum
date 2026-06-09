@@ -298,6 +298,22 @@ def test_env_flag_after_provider(monkeypatch, tmp_path, capsys):
     assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
 
 
+def test_explicit_env_file_missing_fails_loudly(monkeypatch, tmp_path, capsys):
+    # A typo'd --env path must error out, not be silently treated as an empty env file
+    # (which would surface later as a misleading "X is required ... but is not set").
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "ds.json").write_text(json.dumps({"harness": "kimi", "config": {}}))
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    monkeypatch.setattr(
+        "sys.argv", ["agedum", "ds", "--env", str(tmp_path / "no-such.env"), "--dry-run"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 2
+    assert "--env file not found" in capsys.readouterr().err
+
+
 def test_dashdash_forwards_literal_flag_to_harness(monkeypatch, tmp_path):
     # `--` after the provider is the escape hatch: --dry-run past it reaches the harness
     # verbatim rather than being claimed by agedum.

@@ -184,8 +184,9 @@ def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a simple ``KEY=VALUE`` ``.env`` (no variable expansion).
 
     Honours an optional ``export `` prefix and surrounding single/double quotes; skips
-    blank lines and ``#`` comments. Mirrors the subset the old generated wrapper relied
-    on when it ran ``source "$env_file"``.
+    blank lines and ``#`` comments, including a trailing `` # comment`` after an unquoted
+    value (a quoted value keeps its ``#`` verbatim). Mirrors the subset the old generated
+    wrapper relied on when it ran ``source "$env_file"``.
     """
     result: dict[str, str] = {}
     for line in path.read_text().splitlines():
@@ -199,9 +200,22 @@ def parse_env_file(path: Path) -> dict[str, str]:
         key, value = key.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        else:
+            # `KEY=val # comment` under `source` sets "val" — the comment is not part
+            # of the value. Only a whitespace-preceded `#` counts; `val#ue` stays intact.
+            value = _strip_trailing_comment(value)
         if key:
             result[key] = value
     return result
+
+
+def _strip_trailing_comment(value: str) -> str:
+    """Drop a `` # comment`` tail from an unquoted ``.env`` value (sh word-splitting
+    semantics: only a ``#`` preceded by whitespace starts a comment)."""
+    for index, char in enumerate(value):
+        if char == "#" and index > 0 and value[index - 1] in (" ", "\t"):
+            return value[:index].rstrip()
+    return value
 
 
 def provider_label(config: dict) -> str:
@@ -996,8 +1010,12 @@ def _reasonix_agent_lines(block: dict) -> list[str]:
 
 
 def _toml_escape(value: str) -> str:
-    """Escape a string for a TOML double-quoted basic string (backslash, then quote)."""
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape a string for a TOML double-quoted basic string: backslash, quote, and the
+    control characters a basic string may not carry raw (``\\n`` / ``\\t`` / ``\\r``;
+    anything else below 0x20 as ``\\uXXXX``) — so no input can emit invalid TOML."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return "".join(f"\\u{ord(char):04X}" if ord(char) < 0x20 else char for char in escaped)
 
 
 def _reasonix_provider_block_from_def(provider_def: dict) -> str:
@@ -1121,7 +1139,15 @@ def _opencode_config_doc(block: dict) -> dict:
         default_options["reasoningEffort"] = flat_effort
 
     options = _clean_options(default_options)
-    if options and model and "/" in model:
+    if options:
+        # The default-model options hang off `provider.<id>.models.<id>.options`, which
+        # needs a `provider/model`-shaped `model` to address. Silently dropping them
+        # would read as "configured" while doing nothing — fail loudly instead.
+        if not model or "/" not in model:
+            raise ProviderError(
+                "opencode `effortLevel`/`defaultOptions` need `model` in `provider/model` "
+                f"form to attach to (got {model!r})"
+            )
         provider_id, model_id = model.split("/", 1)
         document["provider"] = {provider_id: {"models": {model_id: {"options": options}}}}
 

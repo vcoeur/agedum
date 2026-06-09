@@ -14,9 +14,9 @@ process. The real working tree and `$HOME` are never written to.
 
 ```mermaid
 flowchart TD
-  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix / compile_aider / compile_pi<br/>→ Plan(binds, extra_args)"]
+  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix / compile_aider / compile_pi<br/>→ Plan(binds, extra_args, safe_overrides)"]
   b --> c["assert_safe(): refuse git-tracked targets"]
-  c --> d["bwrap --dev-bind / / --ro-bind src target … -- command extra_args"]
+  c --> d["bwrap --dev-bind / / --tmpfs shadow … --ro-bind src target … -- command extra_args"]
   d --> e["child runs, sees injected files"]
   e --> f["sweep stub mountpoints bwrap left behind"]
 ```
@@ -27,10 +27,19 @@ Internally this is three modules:
   a `Source` (`root`, `agents_md`, `skills_dir`).
 - **`harness.py`** — `compile_claude` / `compile_kimi` / `compile_opencode` / `compile_cline` /
   `compile_reasonix` / `compile_aider` / `compile_pi` render a `Source` pair into a
-  `Plan`: a list of absolute `(compiled-file → mount-target)` binds **plus**
-  `extra_args` to append to the command.
+  `Plan`: a list of absolute `(compiled-file → mount-target)` binds, **plus**
+  `extra_args` to append to the command, plus `safe_overrides` — targets to shadow with
+  an empty tmpfs instead of binding content (pi uses one to hide the raw
+  `.agents/skills/` so it does not collide with the compiled `.pi/skills/` copies).
 - **`launcher.py`** — `assert_safe`, `build_bwrap_argv`, and `run_virtualfs` validate,
   compose the `bwrap` argv, run the command, and clean up.
+
+Provider mode adds one more injection channel on top of the same pipeline:
+`Launch.config_files` — agedum-*generated* config files a harness needs on disk
+(reasonix's project-root `reasonix.toml`; pi's user-scope `models.json` /
+`settings.json`, deep-merged onto any existing file). The CLI writes each into the
+throwaway dir and appends it to `plan.binds`, so generated configs go through the same
+git-safety check and stub sweep as every other bind.
 
 The compiled tree lives under a `tempfile.mkdtemp()` directory that is removed when the
 command exits.
@@ -83,6 +92,13 @@ be untracked and gitignored. Targets outside the project repo (e.g. `~/.claude/.
 are never tracked by this repo, so they are allowed. In practice: list `CLAUDE.md`,
 `.claude/`, `.kimi/`, `.opencode/`, `.cline/`, `.reasonix/`, and `.pi/` in your `.gitignore`.
 
+The check runs over the **effective, per-child** binds — the exact paths the namespace
+will mount. A tracked but unrelated sibling inside a skills target dir (say a
+hand-authored skill you deliberately version under `.claude/skills/`) does not block the
+launch, because the per-child overlay never masks it; only a path agedum would actually
+bind over must be untracked. `safe_overrides` are not subject to the check: a tmpfs
+shadow is read-only masking, never injectable content.
+
 ### Stub sweeping
 
 To bind a file at a path that does not yet exist, `bwrap` creates the mountpoint on the
@@ -92,10 +108,11 @@ but the empty placeholder can.
 
 `run_virtualfs` records which candidate paths existed before the run, and after the
 command sweeps the ones it created — deepest first, and only if still empty. Candidates
-are each target **and its immediate parent**, taken over both the dir-level binds (e.g.
-the `.claude` dir created to hold `.claude/skills`) and the per-child overlay targets
+are each target **and its immediate parent**, taken over the dir-level binds (e.g.
+the `.claude` dir created to hold `.claude/skills`), the per-child overlay targets
 (e.g. `.claude/skills/<name>` — the empty stub left when agedum ships a skill the target
-dir did not already have). Anything that pre-existed — including a user's
+dir did not already have), and the `safe_overrides` tmpfs shadows (bwrap creates their
+mountpoints the same way). Anything that pre-existed — including a user's
 `~/.config/opencode/skills/` that already held skills — is left alone. The net effect: a
 clean working tree after the command, with the real repo untouched.
 

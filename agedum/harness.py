@@ -753,11 +753,11 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
             target = project.root / ".pi" / "skills"
             plan.binds.append((out, target))
             plan.origins[target] = str(project.skills_dir)
-
-    # Shadow .agents/skills/ with an empty tmpfs so pi does not discover the raw
-    # agent-neutral source skills alongside the compiled .pi/skills/ copies — that
-    # would produce a name-collision warning for every shared skill.
-    plan.safe_overrides.add(project.root / ".agents" / "skills")
+        # Shadow .agents/skills/ with an empty tmpfs so pi does not discover the raw
+        # agent-neutral source skills alongside the compiled .pi/skills/ copies — that
+        # would produce a name-collision warning for every shared skill. Only when the
+        # source dir exists — shadowing a missing path would just make bwrap stub it.
+        plan.safe_overrides.add(project.root / ".agents" / "skills")
 
     # Global skills -> ~/.pi/agent/skills.
     if global_ is not None and global_.skills_dir is not None:
