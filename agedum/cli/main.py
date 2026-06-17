@@ -50,6 +50,7 @@ from agedum.provider import (
     default_env_file,
     list_providers,
     load_config,
+    load_merged_config,
     merge_json_onto_file,
     parse_env_file,
     providers_dir,
@@ -246,9 +247,15 @@ def _run_config(argv: list[str]) -> int:
         _die(f"--env file not found: {env_path}")
 
     try:
-        config = load_config(resolve_config_path(provider))
+        config_path = resolve_config_path(provider)
+        if load_config(config_path).get("abstract") is True:
+            raise ProviderError(
+                f"{provider} is an abstract base config (abstract: true) and cannot be "
+                "launched directly — launch a config that extends it"
+            )
+        config = load_merged_config(config_path)
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
-        launch = build_launch(config, {**os.environ, **dotenv})
+        launch = build_launch(config, {**os.environ, **dotenv}, label=provider)
         command = (
             with_prompt(launch, rest, prompt_text, interactive=prompt_interactive)
             if prompt_text is not None

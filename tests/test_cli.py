@@ -1212,3 +1212,46 @@ def test_wrapper_dry_run_prints_sandbox_plan(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "write-confinement" in out
     assert "/data" in out
+
+
+# --- config dirs + extends (provider mode) ---
+
+
+def test_provider_nested_path_with_extends_launches(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    providers = tmp_path / "providers"
+    (providers / "base").mkdir(parents=True)
+    (providers / "claude").mkdir(parents=True)
+    (providers / "base" / "c.json").write_text(
+        json.dumps({"abstract": True, "harness": "claude", "config": {}})
+    )
+    (providers / "claude" / "deepseek.json").write_text(
+        json.dumps({"extends": "base/c.json", "config": {}})
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "claude/deepseek.json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["claude"]  # resolved + extends-merged + launched
+
+
+def test_abstract_config_refuses_to_launch(monkeypatch, tmp_path):
+    _no_launch(monkeypatch)  # must never reach run_virtualfs
+    providers = tmp_path / "providers"
+    (providers / "base").mkdir(parents=True)
+    (providers / "base" / "claude.json").write_text(
+        json.dumps({"abstract": True, "harness": "claude", "config": {}})
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "base/claude.json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1  # fail-loud, no launch

@@ -109,19 +109,27 @@ def providers_dir() -> Path:
 
 
 def resolve_config_path(value: str, base_dir: Path | None = None) -> Path:
-    """Resolve a CLI ``value`` to a config path.
+    """Resolve a config reference to a path, anchored at the providers root.
 
-    A ``value`` containing ``/`` or ending in ``.json`` is a path (absolute as-is,
-    else relative to CWD); anything else is a provider name resolved to
-    ``<providers_dir>/<name>.json``.
+    A ``value`` starting with ``/`` is an absolute filesystem path; anything else resolves
+    **relative to the providers root** (``base_dir`` or :func:`providers_dir`), so nested
+    references like ``claude/deepseek`` or ``base/claude.json`` work. ``.json`` is appended
+    when the value has no extension. The same rule resolves both the ``agedum <value>``
+    argument and an ``extends`` reference; a path that does not exist surfaces as an error at
+    load time (there is no fallback search).
     """
-    if "/" in value or value.endswith(".json"):
-        return Path(value).expanduser()
-    return (base_dir or providers_dir()) / f"{value}.json"
+    candidate = Path(value) if value.startswith("/") else (base_dir or providers_dir()) / value
+    if candidate.suffix != ".json":
+        candidate = candidate.parent / f"{candidate.name}.json"
+    return candidate
 
 
 def load_config(path: Path) -> dict:
-    """Read and parse a provider config JSON; raise :class:`ProviderError` on failure."""
+    """Read and parse a single provider config JSON file; raise :class:`ProviderError`.
+
+    This is the raw, one-file load — it does **not** resolve ``extends``. Use
+    :func:`load_merged_config` to get a config's effective (extends-resolved) form.
+    """
     try:
         raw = path.read_text()
     except OSError as exc:
@@ -137,14 +145,64 @@ def load_config(path: Path) -> dict:
     return config
 
 
+# File-level meta keys: consumed during resolution, never passed to the launch.
+_META_KEYS = ("extends", "abstract")
+
+
+def _without_meta(config: dict) -> dict:
+    """A copy of ``config`` without the meta keys (``extends`` / ``abstract``).
+
+    ``abstract`` is a property of the file as authored, not of the merged result, so it is
+    dropped here — a config extending an abstract base never inherits its abstractness."""
+    return {key: value for key, value in config.items() if key not in _META_KEYS}
+
+
+def _extends_refs(config: dict) -> list[str]:
+    """Normalise a config's ``extends`` (string, list, or absent) to a list of refs."""
+    raw = config.get("extends")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return list(raw)
+    raise ProviderError("`extends` must be a string or a list of strings")
+
+
+def load_merged_config(
+    path: Path, base_dir: Path | None = None, _seen: frozenset[Path] | None = None
+) -> dict:
+    """Load a provider config and resolve its ``extends`` chain into one effective config.
+
+    Each ``extends`` reference resolves by the providers-root rule (see
+    :func:`resolve_config_path`); bases are deep-merged left→right and the extending config's
+    own keys applied last (child wins). A base may itself ``extends`` (recursive). The meta
+    keys (``extends`` / ``abstract``) are stripped from the result. A circular ``extends``
+    chain raises :class:`ProviderError`.
+    """
+    providers = base_dir or providers_dir()
+    resolved = path.resolve()
+    seen = _seen or frozenset()
+    if resolved in seen:
+        raise ProviderError(f"circular extends involving {path}")
+    seen = seen | {resolved}
+    raw = load_config(path)
+    merged: dict = {}
+    for ref in _extends_refs(raw):
+        base = load_merged_config(resolve_config_path(ref, providers), providers, seen)
+        merged = _deep_merge(merged, base)
+    return _deep_merge(merged, _without_meta(raw))
+
+
 @dataclass(frozen=True)
 class ProviderSummary:
     """One row of ``agedum --providers``: a provider config reduced to its listing fields.
 
-    ``name`` is the bare name passed to ``agedum <name>`` (the file stem). ``harness`` and
-    ``model`` are parsed from the config (``None`` when absent). ``error`` is set instead
-    when the file could not be read or parsed, so a single bad config never aborts the
-    listing.
+    ``name`` is the reference passed to ``agedum <name>`` — the config's path **relative to
+    the providers root**, without ``.json`` (e.g. ``claude/deepseek``). ``harness`` and
+    ``model`` come from the config's *effective* (extends-resolved) form (``None`` when
+    absent). ``error`` is set instead when the file could not be read, parsed, or resolved,
+    so a single bad config never aborts the listing.
     """
 
     name: str
@@ -155,19 +213,30 @@ class ProviderSummary:
 
 
 def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
-    """Summarise every ``*.json`` provider config in ``directory`` (default:
-    :func:`providers_dir`), sorted by name.
+    """Summarise every launchable provider config under ``directory`` (default:
+    :func:`providers_dir`), recursively, sorted by name.
 
-    Each entry carries the launch ``name`` plus the parsed ``harness`` / ``model``; an
-    unreadable or invalid config yields a summary with ``error`` set and the parsed fields
-    ``None`` rather than raising. A missing directory yields an empty list.
+    Walks subdirectories; each config's ``name`` is its path relative to the root (no
+    ``.json``). ``abstract: true`` configs (bases) are skipped. ``harness`` / ``model`` come
+    from the effective (extends-resolved) config; an unreadable, invalid, or
+    unresolvable config yields a summary with ``error`` set rather than raising. A missing
+    directory yields an empty list.
     """
     target = directory or providers_dir()
     summaries: list[ProviderSummary] = []
-    for path in sorted(target.glob("*.json")):
-        name = path.stem
+    if not target.is_dir():
+        return summaries
+    for path in sorted(target.rglob("*.json")):
+        name = path.relative_to(target).with_suffix("").as_posix()
         try:
-            config = load_config(path)
+            raw = load_config(path)
+        except ProviderError as exc:
+            summaries.append(ProviderSummary(name, path, error=str(exc)))
+            continue
+        if raw.get("abstract") is True:
+            continue  # a base, not a launchable provider
+        try:
+            config = load_merged_config(path, target)
         except ProviderError as exc:
             summaries.append(ProviderSummary(name, path, error=str(exc)))
             continue
@@ -224,8 +293,12 @@ def _strip_trailing_comment(value: str) -> str:
 
 
 def provider_label(config: dict) -> str:
-    """The human label for a provider: ``slug`` else ``name`` else ``harness``."""
-    return str(config.get("slug") or config.get("name") or config.get("harness") or "provider")
+    """Fallback label for a provider: ``slug`` else ``harness``.
+
+    The canonical label is the **config path**, passed to :func:`build_launch` as ``label``
+    (the provider's identity is its path now — the ``name`` field is gone). This fallback is
+    only used when no path-based label is supplied (e.g. a direct ``build_launch`` call)."""
+    return str(config.get("slug") or config.get("harness") or "provider")
 
 
 def required_env(config: dict) -> list[str]:
@@ -252,19 +325,21 @@ def required_env(config: dict) -> list[str]:
     return result
 
 
-def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
+def build_launch(config: dict, base_env: dict[str, str], *, label: str | None = None) -> Launch:
     """Resolve a parsed provider ``config`` into a :class:`Launch` using ``base_env``
     (typically ``os.environ`` overlaid with the parsed ``.env``).
 
-    Validates the harness and that every required var is present and non-empty in
-    ``base_env``; raises :class:`ProviderError` otherwise.
+    ``config`` is the *effective* config (already extends-resolved). ``label`` is the
+    provider's display name — the config path the user invoked; it falls back to
+    :func:`provider_label` when not given. Validates the harness and that every required var
+    is present and non-empty in ``base_env``; raises :class:`ProviderError` otherwise.
     """
     harness = config.get("harness")
     if harness not in HARNESSES:
         raise ProviderError(
             f"unsupported or missing harness {harness!r}; expected one of {', '.join(HARNESSES)}"
         )
-    label = provider_label(config)
+    label = label or provider_label(config)
     block = config.get("config") or {}
     if not isinstance(block, dict):
         raise ProviderError("`config` must be a JSON object")

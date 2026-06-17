@@ -38,13 +38,18 @@ the config envelope, prompt-seeding, and `--dry-run`. The **`config` block is pe
 
 ## Resolving the provider
 
-The single positional argument is **a name or a path**:
+The single positional argument is a **config reference**, resolved **relative to the
+providers root** (`${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`):
 
-- **path** — it contains `/` or ends in `.json`. Absolute as-is, otherwise relative to the
-  current directory.
-- **name** — anything else. Resolved to
-  `${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json`. Run
-  [`agedum --providers`](cli.md#listing-providers) to list the names available there.
+- a value starting with `/` is an **absolute** filesystem path;
+- anything else is **relative to the providers root** — nested paths included, so configs may
+  be organised in subdirectories: `agedum claude/deepseek.json` → `<root>/claude/deepseek.json`;
+- `.json` is appended when the value has no extension (`agedum claude/deepseek` also works);
+- a reference that resolves to no file is an **error** — there is no CWD or fallback search.
+
+Run [`agedum --providers`](cli.md#listing-providers) to list the launchable configs by their
+path (e.g. `claude/deepseek`). A config's **identity and label are its path** — there is no
+`name` field.
 
 Any token after the provider that isn't an agedum flag is passed to the harness verbatim
 (`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env` and `--dry-run` are
@@ -71,8 +76,6 @@ The config is the condash-style agent envelope:
 ```json
 {
   "harness": "claude",
-  "name": "Claude Deepseek Auto",
-  "slug": "claude-deepseek-auto",
   "secretEnv": "DEEPSEEK_API_KEY",
   "requiredEnv": ["DEEPSEEK_API_KEY"],
   "config": { "...": "per-harness options" }
@@ -85,12 +88,40 @@ The config is the condash-style agent envelope:
 | `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` / `reasonix` / `aider` / `pi` pass it through under its own name (reasonix reads it via the provider's `api_key_env`, aider via litellm, pi by the conventional var name or a `$VAR` reference in a generated `models.json`); `cline` passes it as `--key`. |
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so a harness that reads it from the environment sees it. |
 | `config` | The per-harness option block — see the harness page table above. |
+| `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
+| `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
 | `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, agedum's injection dirs, `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
-| `name` / `slug` | Labels; `slug` (else `name`, else the harness) names the provider in error and `--dry-run` messages. |
 
-Save the file as `<slug>.json` under `~/.config/agents/providers/` (or anywhere, and launch
-it by path), put the API token in `~/.config/agents/.env`, then `agedum <slug> --dry-run` to
-check it before launching for real.
+A config's **identity and label are its path** under the providers root — there is no `name`
+field. Save the config at the path you want to launch it by (e.g.
+`~/.config/agents/providers/claude/deepseek.json`), put the API token in
+`~/.config/agents/.env`, then `agedum claude/deepseek.json --dry-run` to check it.
+
+## Extending configs — `extends` { #extends }
+
+A config can **`extends`** one or more **base** configs and inherit their settings, so shared
+options are written once. `extends` is a config reference (or a list of them), resolved the
+same way as the launch argument — relative to the providers root, or absolute when starting
+with `/`:
+
+```json
+// providers/base/claude-deepseek.json   (a shared base, not launched directly)
+{ "abstract": true, "harness": "claude", "secretEnv": "DEEPSEEK_API_KEY",
+  "config": { "baseUrl": "https://api.deepseek.com/anthropic", "effortLevel": "max" } }
+
+// providers/claude/deepseek.json
+{ "extends": "base/claude-deepseek.json", "config": { "model": "deepseek-v4-pro" } }
+```
+
+`agedum claude/deepseek.json` then launches the **merged** config (base + child). Rules:
+
+- **Merge** is a deep-merge: nested objects (like `config`) combine key-by-key. With a **list**
+  of bases, they merge left→right and the extending config is applied **last** (child wins).
+- **Recursive** — a base may itself `extends` another.
+- A **cycle** (a → b → a) or a base that resolves to no file is an **error**.
+- `abstract: true` marks a config as a base only: it is skipped by `--providers` and refuses to
+  launch directly (`agedum base/claude-deepseek.json` errors). Abstractness is **not** inherited
+  — a config that extends an abstract base is itself launchable.
 
 ## Filesystem sandbox — `sandbox` { #sandbox }
 

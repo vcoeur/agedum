@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,7 @@ from agedum.provider import (
     default_env_file,
     list_providers,
     load_config,
+    load_merged_config,
     parse_env_file,
     providers_dir,
     required_env,
@@ -16,20 +18,33 @@ from agedum.provider import (
     with_prompt,
 )
 
-# --- config-path resolution ---
+
+def _write_config(root, rel, obj):
+    """Write a JSON config at ``root/rel`` (creating parents); return its path."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj))
+    return path
 
 
-def test_resolve_name_under_providers_dir(tmp_path):
+# --- config-path resolution (anchored at the providers root) ---
+
+
+def test_resolve_name_under_providers_root(tmp_path):
     assert resolve_config_path("ds-auto", tmp_path) == tmp_path / "ds-auto.json"
 
 
-def test_resolve_explicit_json_path_is_verbatim():
-    assert resolve_config_path("./local/x.json").name == "x.json"
-    assert str(resolve_config_path("sub/dir/y.json")).endswith("sub/dir/y.json")
+def test_resolve_nested_path_is_providers_root_relative(tmp_path):
+    # A value with a slash is providers-root-relative (not CWD-relative); .json appended.
+    nested = tmp_path / "claude" / "deepseek.json"
+    assert resolve_config_path("claude/deepseek", tmp_path) == nested
+    assert resolve_config_path("claude/deepseek.json", tmp_path) == nested
+    assert resolve_config_path("base/claude.json", tmp_path) == tmp_path / "base" / "claude.json"
 
 
-def test_resolve_absolute_path():
-    assert str(resolve_config_path("/abs/p.json")) == "/abs/p.json"
+def test_resolve_absolute_path(tmp_path):
+    assert resolve_config_path("/abs/p.json", tmp_path) == Path("/abs/p.json")
+    assert resolve_config_path("/abs/p", tmp_path) == Path("/abs/p.json")
 
 
 def test_providers_dir_env_override(monkeypatch):
@@ -1616,3 +1631,84 @@ def test_sandbox_read_write_must_be_a_list_of_strings():
         build_launch({"harness": "claude", "config": {}, "sandbox": {"readWrite": "nope"}}, {})
     with pytest.raises(ProviderError, match="readWrite"):
         build_launch({"harness": "claude", "config": {}, "sandbox": {"readWrite": [1]}}, {})
+
+
+# --- config dirs + extends ---
+
+
+def test_load_merged_config_single_extends(tmp_path):
+    base = {"abstract": True, "harness": "claude", "config": {"baseUrl": "u", "effort": "max"}}
+    _write_config(tmp_path, "base/claude.json", base)
+    child = {"extends": "base/claude.json", "config": {"model": "pro"}}
+    merged = load_merged_config(_write_config(tmp_path, "claude/deepseek.json", child), tmp_path)
+    # base + child config deep-merged; meta keys stripped; abstract NOT inherited.
+    assert merged == {
+        "harness": "claude",
+        "config": {"baseUrl": "u", "effort": "max", "model": "pro"},
+    }
+
+
+def test_load_merged_config_child_overrides_base(tmp_path):
+    _write_config(tmp_path, "base/c.json", {"harness": "claude", "config": {"model": "b", "x": 1}})
+    child = {"extends": "base/c.json", "config": {"model": "child"}}
+    merged = load_merged_config(_write_config(tmp_path, "c.json", child), tmp_path)
+    assert merged["config"] == {"model": "child", "x": 1}
+
+
+def test_load_merged_config_list_extends_left_to_right(tmp_path):
+    _write_config(tmp_path, "a.json", {"harness": "claude", "config": {"x": 1, "y": 1}})
+    _write_config(tmp_path, "b.json", {"config": {"y": 2, "z": 2}})
+    child = {"extends": ["a.json", "b.json"], "config": {"z": 3}}
+    merged = load_merged_config(_write_config(tmp_path, "child.json", child), tmp_path)
+    # a, then b over a (y), then child over both (z).
+    assert merged["config"] == {"x": 1, "y": 2, "z": 3}
+
+
+def test_load_merged_config_is_recursive(tmp_path):
+    _write_config(tmp_path, "grand.json", {"harness": "claude", "config": {"a": 1}})
+    _write_config(tmp_path, "mid.json", {"extends": "grand.json", "config": {"b": 2}})
+    child = _write_config(tmp_path, "child.json", {"extends": "mid.json", "config": {"c": 3}})
+    assert load_merged_config(child, tmp_path)["config"] == {"a": 1, "b": 2, "c": 3}
+
+
+def test_load_merged_config_absolute_extends(tmp_path):
+    base = _write_config(tmp_path, "elsewhere/base.json", {"harness": "claude", "config": {"a": 1}})
+    child = _write_config(tmp_path, "child.json", {"extends": str(base)})
+    assert load_merged_config(child, tmp_path)["config"] == {"a": 1}
+
+
+def test_load_merged_config_missing_base_errors(tmp_path):
+    child = _write_config(tmp_path, "child.json", {"extends": "nope.json"})
+    with pytest.raises(ProviderError, match="cannot read"):
+        load_merged_config(child, tmp_path)
+
+
+def test_load_merged_config_cycle_errors(tmp_path):
+    _write_config(tmp_path, "a.json", {"extends": "b.json"})
+    _write_config(tmp_path, "b.json", {"extends": "a.json"})
+    with pytest.raises(ProviderError, match="circular"):
+        load_merged_config(tmp_path / "a.json", tmp_path)
+
+
+def test_extends_must_be_string_or_list(tmp_path):
+    child = _write_config(tmp_path, "child.json", {"extends": 5})
+    with pytest.raises(ProviderError, match="extends"):
+        load_merged_config(child, tmp_path)
+
+
+def test_list_providers_recursive_skips_abstract(tmp_path):
+    base = {"abstract": True, "harness": "claude", "config": {"model": "x"}}
+    _write_config(tmp_path, "base/claude.json", base)
+    child = {"extends": "base/claude.json", "config": {"model": "pro"}}
+    _write_config(tmp_path, "claude/deepseek.json", child)
+    _write_config(tmp_path, "top.json", {"harness": "kimi", "config": {"model": "k"}})
+    by_name = {s.name: s for s in list_providers(tmp_path)}
+    assert set(by_name) == {"claude/deepseek", "top"}  # abstract base skipped
+    # harness/model come from the effective (extends-resolved) config.
+    assert by_name["claude/deepseek"].harness == "claude"
+    assert by_name["claude/deepseek"].model == "pro"
+
+
+def test_build_launch_uses_given_label():
+    launch = build_launch({"harness": "claude", "config": {}}, {}, label="claude/deepseek")
+    assert launch.label == "claude/deepseek"

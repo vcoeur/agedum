@@ -158,17 +158,20 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 
 Two modes, dispatched in `cli/main.py` on the first argument:
 
-- **provider** (primary) — `agedum <name|path> [--env <file>] [--dry-run] [harness args...]`.
-  Read a condash-style provider config JSON (a bare name → `<providers_dir>/<name>.json`;
-  a `/`- or `.json`-bearing value → a path), resolve the env from
-  `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`), validate `requiredEnv`, set
-  the provider/model/auth env in `os.environ`, then run the same virtual-FS launch as
-  wrapper mode with `command = [<harness-binary>, *harness-args]`. The harness is read
-  **from the config**; there is no `--harness` flag. `--dry-run` prints the resolved env
-  (secrets masked), the injected virtual files, and the argv without launching. Secrets
-  are read into the agedum process (not kept out as the retired `--build-script` codegen
-  did). An optional top-level `sandbox` config field (`{readWrite: [...]}`) requests the same
-  write-confinement as wrapper `--sandbox`. This is the primary, user-facing entry.
+- **provider** (primary) — `agedum <config-ref> [--env <file>] [--dry-run] [harness args...]`.
+  Read a condash-style provider config JSON. The reference resolves **relative to the providers
+  root** (`<providers_dir>/<ref>`, `.json` appended if absent), or absolute when it starts with
+  `/`; nested paths are allowed (`agedum claude/deepseek.json`) and not-found is an error (no CWD
+  fallback). A config may **`extends`** one or more bases (a string or list, same resolution):
+  bases are deep-merged left→right and the child applied last (recursive; cycles error). An
+  **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
+  abstractness is not inherited. A config's **identity/label is its path** (the `name` field is
+  gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
+  validate `requiredEnv`, set the provider/model/auth env in `os.environ`, and run the same
+  virtual-FS launch as wrapper mode. The harness is read **from the config**; no `--harness` flag.
+  `--dry-run` prints the resolved env (secrets masked), the injected virtual files, and the argv.
+  An optional top-level `sandbox` field (`{readWrite: [...]}`) requests the same write-confinement
+  as wrapper `--sandbox`. This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
   The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
   context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`); everything
@@ -179,18 +182,21 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   (and, under `--sandbox`, the writable set) without running. Context and command are decoupled.
 
 Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch, like
-`--version`): **`--providers`** prints every `*.json` config in `providers_dir()` as
-`name  harness  model` (via `provider.list_providers` → `_run_list_providers`), honouring
-`$AGENTS_PROVIDERS_DIR`; a config that won't parse is listed with its error, never fatal.
+`--version`): **`--providers`** prints every launchable config under `providers_dir()`
+(walked **recursively**; `abstract` bases skipped) as `path  harness  model` — the path
+relative to the root, e.g. `claude/deepseek` (via `provider.list_providers` →
+`_run_list_providers`), honouring `$AGENTS_PROVIDERS_DIR`; a config that won't parse or
+resolve is listed with its error, never fatal.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
 `compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a read-only host
-+ writable `writable_roots`), `provider.py` (`resolve_config_path` / `load_config` /
++ writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored /
+`load_config` raw + `load_merged_config` resolving the `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
-`list_providers` → `ProviderSummary` rows for `--providers`; per-harness env mapping
-mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` reverse proxy),
+`list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
+per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` reverse proxy),
 `cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config` / `_run_wrapper` /
 `_run_list_providers`).
 
