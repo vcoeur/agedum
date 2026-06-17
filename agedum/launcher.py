@@ -19,6 +19,7 @@ Two safety rules, both validated empirically:
 
 from __future__ import annotations
 
+import glob
 import os
 import subprocess
 from pathlib import Path
@@ -53,13 +54,20 @@ def _effective_binds(plan: Plan) -> list[tuple[Path, Path]]:
     return expanded
 
 
-def _resolve_rw(raw: str, project_root: Path) -> Path:
-    """Resolve a sandbox ``read_write`` template to an absolute path.
+def _resolve_rw(raw: str, project_root: Path) -> list[Path]:
+    """Resolve a sandbox ``read_write`` template to absolute paths.
 
     Expands ``${PROJECT_ROOT}`` to the project root, ``$VAR`` from the environment, and a
-    leading ``~`` to the home dir."""
+    leading ``~`` to the home dir. If the result holds a shell glob metacharacter
+    (``*`` / ``?`` / ``[``) it is expanded against the filesystem and **every existing match**
+    is returned, sorted (``~/src/*`` → each immediate child of ``~/src``); an unmatched glob
+    contributes nothing. A plain (non-glob) template returns its single literal path whether or
+    not it exists, matching the pre-glob behaviour."""
     expanded = raw.replace(PROJECT_ROOT_TOKEN, str(project_root))
-    return Path(os.path.expandvars(expanded)).expanduser()
+    resolved = str(Path(os.path.expandvars(expanded)).expanduser())
+    if any(char in resolved for char in "*?["):
+        return [Path(match) for match in sorted(glob.glob(resolved))]
+    return [Path(resolved)]
 
 
 def _nearest_existing_dir(path: Path) -> Path:
@@ -84,14 +92,16 @@ def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Pat
     * the **nearest existing ancestor of every injected file** — so bwrap can create the
       mount point (it cannot on a read-only parent), and so the harness can persist its own
       state (e.g. ``~/.claude`` for Claude Code's sessions);
-    * each resolved ``sandbox.read_write`` path — extra data the agent may modify.
+    * each ``sandbox.read_write`` entry, resolved (and glob-expanded) to zero or more paths —
+      extra data the agent may modify.
 
     ``/tmp`` is writable separately (a private tmpfs), not via this list.
     """
     roots: list[Path] = [project_root]
     for _, target in _effective_binds(plan):
         roots.append(_nearest_existing_dir(target.parent))
-    roots += [_resolve_rw(raw, project_root) for raw in sandbox.read_write]
+    for raw in sandbox.read_write:
+        roots += _resolve_rw(raw, project_root)
     return _dedupe_roots(roots)
 
 

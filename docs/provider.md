@@ -145,7 +145,10 @@ into so the harness keeps its own state (e.g. `~/.claude`), a private `/tmp`, an
 ```
 
 `readWrite` paths are templates resolved at launch: `~` → your home, `$VAR` → the
-environment, `${PROJECT_ROOT}` → the project root. A path already inside the project root is
+environment, `${PROJECT_ROOT}` → the project root. An entry holding a shell glob
+(`*`, `?`, `[…]`) is expanded against the filesystem and every existing match is added — so
+`~/src/*` makes each immediate subdirectory of `~/src` writable (the `~/src` dir itself is not
+bound, and an unmatched glob adds nothing). A path already inside the project root is
 redundant (the project root is always writable) and folded in. An empty `"sandbox": {}` still
 confines — only the always-writable set applies. This is the provider-mode equivalent of
 wrapper mode's [`--sandbox` / `--rw-dir`](wrapper.md#sandbox); `agedum <name> --dry-run` lists
