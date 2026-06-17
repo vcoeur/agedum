@@ -98,6 +98,8 @@ command can write only to
 - the dirs agedum injects into, so the harness can persist its own state (e.g. `~/.claude`);
 - a private **`/tmp`** (a fresh tmpfs, discarded on exit);
 - any directory you add with **`--rw-dir DIR`** (repeatable; passing it implies `--sandbox`).
+  A `DIR` holding a shell glob (`*`, `?`, `[…]`) is expanded to each existing match, so
+  `--rw-dir '~/src/*'` makes every immediate subdirectory of `~/src` writable.
 
 Everything else on the host stays readable but cannot be modified, so an autonomous agent
 cannot alter or delete files outside its working set.

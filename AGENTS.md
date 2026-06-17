@@ -215,7 +215,8 @@ per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the `fo
 - **Write-confinement** (`--sandbox` / a provider `sandbox` block) replaces the default
   `--dev-bind / /` (full read-write host) with `--ro-bind / /` + `--dev /dev` + `--proc /proc`
   + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (project root + the nearest existing
-  ancestor of every injection target + the declared `read_write` paths). Two facts the recipe
+  ancestor of every injection target + the declared `read_write` paths, each glob-expanded —
+  `*`/`?`/`[` resolves to every existing match, so `~/src/*` binds each child of `~/src`). Two facts the recipe
   depends on, both validated empirically: bwrap **cannot create a mount point on a read-only
   parent** (so every injection target's parent must be writable — hence `~/.claude` is
   auto-writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its

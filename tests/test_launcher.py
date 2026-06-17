@@ -327,11 +327,41 @@ def test_writable_roots_drops_paths_nested_under_the_project(tmp_path):
     assert Path("/elsewhere") in roots
 
 
+def test_writable_roots_expands_glob_read_write(tmp_path):
+    # A glob read_write entry makes every matching child writable (e.g. `~/src/*` → each repo
+    # under ~/src), without binding the glob parent itself.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    src = tmp_path / "src"
+    (src / "one").mkdir(parents=True)
+    (src / "two").mkdir()
+    sandbox = Sandbox(enabled=True, read_write=(str(src / "*"),))
+    roots = writable_roots(Plan(), sandbox, proj)
+    assert src / "one" in roots
+    assert src / "two" in roots
+    assert src not in roots
+
+
 def test_resolve_rw_expands_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("AGEDUM_RW_TEST_DIR", "/env/dir")
-    assert _resolve_rw("${PROJECT_ROOT}/out", tmp_path) == tmp_path / "out"
-    assert _resolve_rw("$AGEDUM_RW_TEST_DIR/x", tmp_path) == Path("/env/dir/x")
-    assert _resolve_rw("~/data", tmp_path) == Path.home() / "data"
+    # A plain (non-glob) template resolves to a single literal path, kept whether or not it
+    # exists.
+    assert _resolve_rw("${PROJECT_ROOT}/out", tmp_path) == [tmp_path / "out"]
+    assert _resolve_rw("$AGEDUM_RW_TEST_DIR/x", tmp_path) == [Path("/env/dir/x")]
+    assert _resolve_rw("~/data", tmp_path) == [Path.home() / "data"]
+    assert _resolve_rw(str(tmp_path / "missing"), tmp_path) == [tmp_path / "missing"]
+
+
+def test_resolve_rw_expands_globs(tmp_path):
+    src = tmp_path / "src"
+    (src / "alpha").mkdir(parents=True)
+    (src / "beta").mkdir()
+    (src / "note.txt").write_text("x")
+    # `~/src/*`-style entry → every existing immediate child, sorted; the glob's parent dir
+    # itself is not added.
+    assert _resolve_rw(str(src / "*"), tmp_path) == [src / "alpha", src / "beta", src / "note.txt"]
+    # An unmatched glob contributes nothing (no bogus literal path with a `*` in it).
+    assert _resolve_rw(str(src / "nope" / "*"), tmp_path) == []
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
