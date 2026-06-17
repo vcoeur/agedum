@@ -10,10 +10,11 @@ from agedum.cli import main as cli
 def _capture_run(monkeypatch):
     captured = {}
 
-    def fake_run(root, plan, command, *, close_stdin=False):
+    def fake_run(root, plan, command, *, close_stdin=False, sandbox=None):
         captured["command"] = command
         captured["plan"] = plan
         captured["close_stdin"] = close_stdin
+        captured["sandbox"] = sandbox
         return 0
 
     monkeypatch.setattr(cli, "run_virtualfs", fake_run)
@@ -805,7 +806,7 @@ def test_provider_reasonix_custom_endpoint_binds_toml(monkeypatch, tmp_path):
     # A baseUrl reasonix provider injects a generated reasonix.toml bound at the project root.
     seen = {}
 
-    def fake_run(root, plan, command, *, close_stdin=False):
+    def fake_run(root, plan, command, *, close_stdin=False, sandbox=None):
         # Read bind sources here — _run rmtrees the temp dir once it returns.
         seen["command"] = command
         seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
@@ -880,7 +881,7 @@ def test_provider_pi_custom_endpoint_binds_models_and_settings(monkeypatch, tmp_
     # and ~/.pi/agent/settings.json (subagent routing), bound at their absolute user-scope paths.
     seen = {}
 
-    def fake_run(root, plan, command, *, close_stdin=False):
+    def fake_run(root, plan, command, *, close_stdin=False, sandbox=None):
         seen["command"] = command
         seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
         return 0
@@ -931,7 +932,7 @@ def test_provider_pi_models_json_merges_existing_user_file(monkeypatch, tmp_path
     # A generated user-scope file augments rather than masks the user's own models.json.
     seen = {}
 
-    def fake_run(root, plan, command, *, close_stdin=False):
+    def fake_run(root, plan, command, *, close_stdin=False, sandbox=None):
         seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
         return 0
 
@@ -1017,7 +1018,7 @@ def test_provider_pi_provider_def_binds_multi_provider_models(monkeypatch, tmp_p
     # with both provider blocks and requires both providerDef keys.
     seen = {}
 
-    def fake_run(root, plan, command, *, close_stdin=False):
+    def fake_run(root, plan, command, *, close_stdin=False, sandbox=None):
         seen["command"] = command
         seen["binds"] = {str(target): src.read_text() for src, target in plan.binds}
         return 0
@@ -1145,3 +1146,69 @@ def test_providers_invalid_config_is_listed_not_fatal(monkeypatch, tmp_path, cap
     out = capsys.readouterr().out
     assert "good" in out and "kimi" in out
     assert "broken" in out and "unreadable" in out
+
+
+# --- sandbox (write-confinement) ---
+
+
+def test_wrapper_sandbox_flag_enables_confinement(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "--sandbox", "--", "claude"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["sandbox"] is not None
+    assert captured["sandbox"].enabled
+    assert captured["sandbox"].read_write == ()
+
+
+def test_wrapper_rw_dir_implies_sandbox(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    monkeypatch.setattr(
+        "sys.argv",
+        ["agedum", "--wrapper", "claude", "--rw-dir", "/data", "--rw-dir=/more", "--", "claude"],
+    )
+    with pytest.raises(SystemExit):
+        cli.app()
+    assert captured["sandbox"].enabled
+    assert captured["sandbox"].read_write == ("/data", "/more")
+
+
+def test_wrapper_without_sandbox_passes_none(monkeypatch):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "claude", "--", "claude"])
+    with pytest.raises(SystemExit):
+        cli.app()
+    assert captured["sandbox"] is None
+
+
+def test_provider_mode_propagates_sandbox(monkeypatch, tmp_path):
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    config = {"harness": "claude", "config": {}, "sandbox": {"readWrite": ["/data"]}}
+    _write_provider(tmp_path, "boxed", config, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "boxed"])
+    with pytest.raises(SystemExit):
+        cli.app()
+    assert captured["sandbox"].enabled
+    assert captured["sandbox"].read_write == ("/data",)
+
+
+def test_wrapper_dry_run_prints_sandbox_plan(monkeypatch, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda p, g, d: cli.Plan())
+    args = [
+        "agedum", "--wrapper", "claude", "--sandbox",
+        "--rw-dir", "/data", "--dry-run", "--", "claude",
+    ]  # fmt: skip
+    monkeypatch.setattr("sys.argv", args)
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "write-confinement" in out
+    assert "/data" in out

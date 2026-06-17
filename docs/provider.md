@@ -85,11 +85,42 @@ The config is the condash-style agent envelope:
 | `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` / `reasonix` / `aider` / `pi` pass it through under its own name (reasonix reads it via the provider's `api_key_env`, aider via litellm, pi by the conventional var name or a `$VAR` reference in a generated `models.json`); `cline` passes it as `--key`. |
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so a harness that reads it from the environment sees it. |
 | `config` | The per-harness option block — see the harness page table above. |
+| `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, agedum's injection dirs, `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
 | `name` / `slug` | Labels; `slug` (else `name`, else the harness) names the provider in error and `--dry-run` messages. |
 
 Save the file as `<slug>.json` under `~/.config/agents/providers/` (or anywhere, and launch
 it by path), put the API token in `~/.config/agents/.env`, then `agedum <slug> --dry-run` to
 check it before launching for real.
+
+## Filesystem sandbox — `sandbox` { #sandbox }
+
+An optional top-level `sandbox` block confines what the launched harness can **write**.
+Without it, the harness shares your whole filesystem read-write — the namespace isolates only
+*what the harness reads as config*, not where it can write. With it, the host is mounted
+**read-only** and the harness can write only to the **project root**, the dirs agedum injects
+into so the harness keeps its own state (e.g. `~/.claude`), a private `/tmp`, and each path in
+**`readWrite`**:
+
+```json
+{
+  "harness": "claude",
+  "slug": "claude-boxed",
+  "secretEnv": "DEEPSEEK_API_KEY",
+  "config": { "...": "..." },
+  "sandbox": {
+    "readWrite": ["~/notes", "${PROJECT_ROOT}/build"]
+  }
+}
+```
+
+`readWrite` paths are templates resolved at launch: `~` → your home, `$VAR` → the
+environment, `${PROJECT_ROOT}` → the project root. A path already inside the project root is
+redundant (the project root is always writable) and folded in. An empty `"sandbox": {}` still
+confines — only the always-writable set applies. This is the provider-mode equivalent of
+wrapper mode's [`--sandbox` / `--rw-dir`](wrapper.md#sandbox); `agedum <name> --dry-run` lists
+the resulting writable set under a `sandbox · write-confinement` heading. It confines the
+**filesystem** only — the network is untouched, so the harness still reaches its endpoint.
+Linux-only, like the rest of the launch.
 
 ## Seeding an initial prompt — `--prompt` / `--run` { #prompt-seeding }
 

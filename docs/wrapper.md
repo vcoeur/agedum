@@ -6,7 +6,7 @@ description: Wrapper mode (agedum --wrapper <harness> -- <command>) compiles the
 # Wrapper mode
 
 ```text
-agedum --wrapper <harness> [--dry-run] -- <command> [args...]
+agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command> [args...]
 ```
 
 Wrapper mode runs **any command** inside a private mount namespace where the
@@ -84,7 +84,35 @@ agedum --wrapper claude --dry-run -- claude   # list the injected virtual files,
 ```
 
 The output groups the dispositions by scope (project / global); the same view
-[provider mode](provider.md#dry-run) shows, minus the resolved environment.
+[provider mode](provider.md#dry-run) shows, minus the resolved environment. With
+`--sandbox`, it also lists the writable set (see below).
+
+## Filesystem sandbox — `--sandbox` { #sandbox }
+
+By default the launched command shares your whole filesystem **read-write** — the mount
+namespace isolates only *what the harness reads as config*, not where it can write. Pass
+`--sandbox` to switch to **write-confinement**: the host is mounted **read-only**, and the
+command can write only to
+
+- the **project root** — the working tree it was launched in;
+- the dirs agedum injects into, so the harness can persist its own state (e.g. `~/.claude`);
+- a private **`/tmp`** (a fresh tmpfs, discarded on exit);
+- any directory you add with **`--rw-dir DIR`** (repeatable; passing it implies `--sandbox`).
+
+Everything else on the host stays readable but cannot be modified, so an autonomous agent
+cannot alter or delete files outside its working set.
+
+```bash
+agedum --wrapper claude --sandbox -- claude -p "…"            # confine writes to the project
+agedum --wrapper claude --rw-dir ~/scratch -- claude -p "…"   # + a writable scratch dir
+```
+
+`--dry-run` prints the resolved writable set under a `sandbox · write-confinement` heading,
+so you can see exactly what the command will be able to write before launching. A `--rw-dir`
+that already lives inside the project root is folded in — a parent bind covers it.
+
+This confines the **filesystem** only: the network is untouched, so the harness still reaches
+its model endpoint. Like all of wrapper mode it is Linux-only and relies on `bwrap`.
 
 ## No footprint
 

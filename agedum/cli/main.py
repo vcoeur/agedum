@@ -34,6 +34,7 @@ from rich.console import Console
 from agedum import __version__
 from agedum.harness import (
     Plan,
+    Sandbox,
     compile_aider,
     compile_claude,
     compile_cline,
@@ -42,7 +43,7 @@ from agedum.harness import (
     compile_pi,
     compile_reasonix,
 )
-from agedum.launcher import LauncherError, run_virtualfs
+from agedum.launcher import LauncherError, run_virtualfs, writable_roots
 from agedum.provider import (
     ProviderError,
     build_launch,
@@ -73,8 +74,8 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
     "[--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi> [--dry-run] -- "
-    "<command> [args...]"
+    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi> [--sandbox] "
+    "[--rw-dir DIR]... [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
 
@@ -102,6 +103,10 @@ virtual-file context, with no provider env:
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
                         cline | reasonix | aider | pi) then run the command after -- inside
                         the namespace
+  --sandbox             write-confinement: mount the host read-only so the command can only
+                        write the project root, agedum's injection dirs, /tmp, and any
+                        --rw-dir paths (default: full read-write host access)
+  --rw-dir DIR          add DIR to the writable set (repeatable); implies --sandbox
   --dry-run             print the virtual files that would be injected, don't run
 
 Other:
@@ -267,7 +272,11 @@ def _run_config(argv: list[str]) -> int:
     # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
     non_interactive = prompt_text is not None and not prompt_interactive
     return _run(
-        launch.harness, command, close_stdin=non_interactive, config_files=launch.config_files
+        launch.harness,
+        command,
+        close_stdin=non_interactive,
+        config_files=launch.config_files,
+        sandbox=launch.sandbox,
     )
 
 
@@ -279,7 +288,7 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print()
     _print_environment(launch)
     _print_config_files(launch)
-    extra_args = _print_plan_sections(launch.harness)
+    extra_args = _print_plan_sections(launch.harness, launch.sandbox)
     _print_command(command, extra_args, _secret_values(launch))
 
 
@@ -384,13 +393,15 @@ def _display_path(path: Path) -> str:
     return _abs_display(path)
 
 
-def _print_plan_sections(mode: str) -> list[str]:
+def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]:
     """Compile the located sources and print the per-scope source dispositions.
 
     For each scope (project, global) every source is listed with what happens to it:
     injected ``→ <dest>``, ``read in place`` (kimi/opencode read the project AGENTS.md
     natively), routed to the kimi ``--agent-file``, or an explicit note when the scope is
-    empty. Returns the launch's appended args (kimi ``--agent-file``) for the command line.
+    empty. When ``sandbox`` is enabled, the write-confinement section (the read-write set
+    over a read-only host) is printed too. Returns the launch's appended args (kimi
+    ``--agent-file``) for the command line.
     """
     project = load_source()
     global_ = load_global_source()
@@ -399,6 +410,12 @@ def _print_plan_sections(mode: str) -> list[str]:
         plan = _COMPILERS[mode](project, global_, dest)
         # is_dir() reflects whether a bind is a skills dir vs a file; resolve before cleanup.
         dir_targets = {target for src, target in plan.binds if src.is_dir()}
+        # Resolve the writable set while the compiled sources still exist (rmtree below).
+        sandbox_roots = (
+            writable_roots(plan, sandbox, project.root)
+            if sandbox is not None and sandbox.enabled
+            else None
+        )
     finally:
         shutil.rmtree(dest, ignore_errors=True)
     # Project-scope paths display relative to the cwd; global-scope stays ~-absolute so
@@ -419,7 +436,18 @@ def _print_plan_sections(mode: str) -> list[str]:
         empty="(no ~/.config/agents/AGENTS.md or ~/.config/agents/skills)",
         display=_abs_display,
     )
+    if sandbox_roots is not None:
+        _print_sandbox(sandbox_roots)
     return plan.extra_args
+
+
+def _print_sandbox(roots: list[Path]) -> None:
+    """Print the write-confinement plan: the host is read-only; only these are writable."""
+    print("sandbox · write-confinement (host mounted read-only)")
+    rows = [*(f"{_abs_display(root)}/" for root in roots), "/tmp/  (private tmpfs scratch)"]
+    for row in rows:
+        print(f"  rw  {row}")
+    print()
 
 
 def _print_scope(
@@ -478,6 +506,8 @@ def _run_wrapper(argv: list[str]) -> int:
 
     mode: str | None = None
     dry_run = False
+    sandbox_enabled = False
+    rw_dirs: list[str] = []
     index = 0
     while index < len(flags):
         flag = flags[index]
@@ -497,6 +527,16 @@ def _run_wrapper(argv: list[str]) -> int:
             mode = value
         elif flag == "--dry-run":
             dry_run = True
+        elif flag == "--sandbox":
+            sandbox_enabled = True
+        elif flag == "--rw-dir" or flag.startswith("--rw-dir="):
+            if "=" in flag:
+                rw_dirs.append(flag.split("=", 1)[1])
+            else:
+                index += 1
+                if index >= len(flags):
+                    _die("--rw-dir requires a directory path")
+                rw_dirs.append(flags[index])
         else:
             _die(f"unknown option: {flag}")
         index += 1
@@ -504,14 +544,19 @@ def _run_wrapper(argv: list[str]) -> int:
     if mode is None:
         _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider|pi")
 
+    # --rw-dir implies confinement (the paths are meaningless without a read-only host).
+    sandbox = (
+        Sandbox(enabled=True, read_write=tuple(rw_dirs)) if (sandbox_enabled or rw_dirs) else None
+    )
+
     if dry_run:
         print(f"harness    {mode}")
         print()
-        extra_args = _print_plan_sections(mode)
+        extra_args = _print_plan_sections(mode, sandbox)
         _print_command(command, extra_args)
         return 0
 
-    return _run(mode, command)
+    return _run(mode, command, sandbox=sandbox)
 
 
 def _run(
@@ -520,6 +565,7 @@ def _run(
     *,
     close_stdin: bool = False,
     config_files: tuple[tuple[str, str, bool], ...] = (),
+    sandbox: Sandbox | None = None,
 ) -> int:
     project = load_source()
     global_ = load_global_source()
@@ -536,7 +582,9 @@ def _run(
         plan = _COMPILERS[mode](project, global_, dest)
         _inject_config_files(plan, project.root, dest, config_files)
         with _maybe_fold_proxy(mode):
-            return run_virtualfs(project.root, plan, command, close_stdin=close_stdin)
+            return run_virtualfs(
+                project.root, plan, command, close_stdin=close_stdin, sandbox=sandbox
+            )
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1

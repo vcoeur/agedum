@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agedum.harness import pi_agent_dir
+from agedum.harness import Sandbox, pi_agent_dir
 
 HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi")
 
@@ -73,6 +73,10 @@ class Launch:
     ``warnings`` are non-fatal advisories surfaced at launch (and in ``--dry-run``) — e.g. a
     pi provider whose `requireExtensions` names a pi extension that is not installed on the
     host. They never block the launch (use a fail-loud ``ProviderError`` for that).
+
+    ``sandbox`` (when set) requests filesystem confinement: the host is mounted read-only and
+    only the working set is writable (see :class:`agedum.harness.Sandbox`). ``None`` keeps the
+    legacy full read-write host bind.
     """
 
     harness: str
@@ -83,6 +87,7 @@ class Launch:
     secrets: frozenset[str] = frozenset()
     config_files: tuple[tuple[str, str, bool], ...] = ()
     warnings: tuple[str, ...] = ()
+    sandbox: Sandbox | None = None
 
 
 def default_env_file() -> Path:
@@ -304,7 +309,29 @@ def build_launch(config: dict, base_env: dict[str, str]) -> Launch:
         secrets=frozenset(secrets),
         config_files=tuple(config_files),
         warnings=tuple(warnings),
+        sandbox=_parse_sandbox(config),
     )
+
+
+def _parse_sandbox(config: dict) -> Sandbox | None:
+    """Parse the optional top-level ``sandbox`` block into a :class:`Sandbox`.
+
+    Presence of ``sandbox`` enables write-confinement (the launcher mounts the host
+    read-only). ``readWrite`` is a list of path templates the agent may modify (``~`` /
+    ``$VAR`` / ``${PROJECT_ROOT}`` resolved at launch). Absent ``sandbox`` → ``None`` (the
+    legacy full read-write launch). The project root and agedum's own injection dirs are
+    always writable, so they need not be listed.
+    """
+    raw = config.get("sandbox")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProviderError("`sandbox` must be a JSON object")
+    read_write = raw.get("readWrite", [])
+    if not isinstance(read_write, list) or not all(isinstance(item, str) for item in read_write):
+        raise ProviderError("`sandbox.readWrite` must be a list of path strings")
+    cleaned = tuple(item.strip() for item in read_write if item.strip())
+    return Sandbox(enabled=True, read_write=cleaned)
 
 
 def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool) -> list[str]:

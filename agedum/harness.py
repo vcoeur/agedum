@@ -62,6 +62,28 @@ class Plan:
     safe_overrides: set[Path] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class Sandbox:
+    """Filesystem confinement for the launched harness (write-confinement model).
+
+    When ``enabled``, the launcher mounts the whole host **read-only** and makes
+    writable only the project root, the nearest existing ancestor of each injected
+    file (so bwrap can create the mount point, and the harness can persist its own
+    state — e.g. ``~/.claude``), every path in ``read_write``, and a private
+    ``/tmp``. Everything else is read-only, so the agent cannot modify files outside
+    its working set. When disabled (the default), the legacy full read-write host
+    bind is used — the namespace then isolates only *what the harness reads as
+    config*, not the filesystem.
+
+    ``read_write`` holds raw path templates resolved at launch (see
+    :func:`agedum.launcher.writable_roots`): ``~`` → the home dir, ``$VAR`` → the
+    environment, ``${PROJECT_ROOT}`` → the project root.
+    """
+
+    enabled: bool = False
+    read_write: tuple[str, ...] = ()
+
+
 def claude_config_dir() -> Path:
     """Claude's user-scope config dir — ``$CLAUDE_CONFIG_DIR`` or ``~/.claude``."""
     override = os.environ.get("CLAUDE_CONFIG_DIR")

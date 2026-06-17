@@ -19,10 +19,14 @@ Two safety rules, both validated empirically:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
-from agedum.harness import Plan
+from agedum.harness import Plan, Sandbox
+
+# The token a sandbox ``read_write`` template expands to the project root.
+PROJECT_ROOT_TOKEN = "${PROJECT_ROOT}"
 
 
 class LauncherError(RuntimeError):
@@ -49,14 +53,91 @@ def _effective_binds(plan: Plan) -> list[tuple[Path, Path]]:
     return expanded
 
 
-def build_bwrap_argv(plan: Plan, command: list[str]) -> list[str]:
+def _resolve_rw(raw: str, project_root: Path) -> Path:
+    """Resolve a sandbox ``read_write`` template to an absolute path.
+
+    Expands ``${PROJECT_ROOT}`` to the project root, ``$VAR`` from the environment, and a
+    leading ``~`` to the home dir."""
+    expanded = raw.replace(PROJECT_ROOT_TOKEN, str(project_root))
+    return Path(os.path.expandvars(expanded)).expanduser()
+
+
+def _nearest_existing_dir(path: Path) -> Path:
+    """The deepest existing ancestor of ``path`` (or ``path`` itself if it exists).
+
+    bwrap cannot create a mount point on a read-only parent, so an injected file's nearest
+    existing ancestor is what must be made writable for the bind to land."""
+    current = path
+    while not current.exists() and current != current.parent:
+        current = current.parent
+    return current
+
+
+def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Path]:
+    """The directories a write-confinement launch mounts read-write.
+
+    The union of three sources, de-duplicated with descendants dropped (a parent bind
+    already makes them writable):
+
+    * the **project root** — the agent's working tree, and where project-scope files are
+      injected;
+    * the **nearest existing ancestor of every injected file** — so bwrap can create the
+      mount point (it cannot on a read-only parent), and so the harness can persist its own
+      state (e.g. ``~/.claude`` for Claude Code's sessions);
+    * each resolved ``sandbox.read_write`` path — extra data the agent may modify.
+
+    ``/tmp`` is writable separately (a private tmpfs), not via this list.
+    """
+    roots: list[Path] = [project_root]
+    for _, target in _effective_binds(plan):
+        roots.append(_nearest_existing_dir(target.parent))
+    roots += [_resolve_rw(raw, project_root) for raw in sandbox.read_write]
+    return _dedupe_roots(roots)
+
+
+def _dedupe_roots(paths: list[Path]) -> list[Path]:
+    """Drop duplicates and any path nested under another in the list, keeping first-seen
+    order — a parent ``--bind`` already covers everything beneath it."""
+    seen: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.append(path)
+    return [p for p in seen if not any(p != other and p.is_relative_to(other) for other in seen)]
+
+
+def build_bwrap_argv(
+    plan: Plan,
+    command: list[str],
+    *,
+    sandbox: Sandbox | None = None,
+    project_root: Path | None = None,
+) -> list[str]:
     """Compose the ``bwrap`` argv: bind each compiled tree at its absolute target.
+
+    Without an enabled ``sandbox`` (the default) the whole host is bound **read-write**
+    (``--dev-bind / /``) and only the injected files are read-only — the namespace isolates
+    *what the harness reads as config*, not the filesystem. With an enabled ``sandbox``
+    (write-confinement) the host is bound **read-only**, only :func:`writable_roots` (plus a
+    private ``/tmp``) are writable, and ``--dev`` / ``--proc`` supply the device and process
+    mounts a read-only root would otherwise lack — so the harness cannot modify files
+    outside its working set. ``project_root`` is required when a sandbox is enabled (it seeds
+    the writable set and resolves ``${PROJECT_ROOT}``).
 
     Directory binds are overlaid per-child (see :func:`_effective_binds`) so a skills bind
     adds agedum's skills without erasing hand-authored ones already in the target dir.
     ``safe_overrides`` are tmpfs-shadowed — an empty mount hides the real path without
     touching disk."""
-    argv = ["bwrap", "--dev-bind", "/", "/"]
+    if sandbox is not None and sandbox.enabled:
+        if project_root is None:
+            raise LauncherError("a sandbox launch requires the project root")
+        argv = [
+            "bwrap", "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ]  # fmt: skip
+        for writable in writable_roots(plan, sandbox, project_root):
+            argv += ["--bind", str(writable), str(writable)]
+    else:
+        argv = ["bwrap", "--dev-bind", "/", "/"]
     for override_target in sorted(plan.safe_overrides):
         argv += ["--tmpfs", str(override_target)]
     for src, target in _effective_binds(plan):
@@ -126,7 +207,12 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
 
 
 def run_virtualfs(
-    project_root: Path, plan: Plan, command: list[str], *, close_stdin: bool = False
+    project_root: Path,
+    plan: Plan,
+    command: list[str],
+    *,
+    close_stdin: bool = False,
+    sandbox: Sandbox | None = None,
 ) -> int:
     """Run `command` with `plan` injected; return its exit code. Sweeps stub mountpoints.
 
@@ -135,9 +221,14 @@ def run_virtualfs(
     never get — opencode's ``run`` subcommand otherwise hangs forever on an open, non-tty
     stdin (e.g. a pipe). Interactive launches (a bare provider or ``--prompt``) keep the
     inherited stdin so the live session can read keystrokes.
+
+    ``sandbox`` (when enabled) switches the launch to write-confinement: the host is mounted
+    read-only and only the working set is writable (see :func:`build_bwrap_argv`).
     """
     assert_safe(project_root, plan)
-    argv = build_bwrap_argv(plan, [*command, *plan.extra_args])
+    argv = build_bwrap_argv(
+        plan, [*command, *plan.extra_args], sandbox=sandbox, project_root=project_root
+    )
     candidates = _cleanup_candidates(plan)
     pre_existing = {p: p.exists() for p in candidates}
     stdin = subprocess.DEVNULL if close_stdin else None
