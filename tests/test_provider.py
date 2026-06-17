@@ -1577,3 +1577,42 @@ def test_with_prompt_pi_run_uses_print():
 def test_with_prompt_pi_preserves_passthrough():
     cmd = with_prompt(_launch("pi", ["pi"]), ["--no-skills"], "go", interactive=False)
     assert cmd == ["pi", "--no-skills", "--print", "go"]
+
+
+# --- sandbox (write-confinement) ---
+
+
+def test_build_launch_parses_sandbox():
+    config = {
+        "harness": "claude",
+        "config": {},
+        "sandbox": {"readWrite": ["~/data", "${PROJECT_ROOT}/out"]},
+    }
+    launch = build_launch(config, {})
+    assert launch.sandbox is not None
+    assert launch.sandbox.enabled
+    assert launch.sandbox.read_write == ("~/data", "${PROJECT_ROOT}/out")
+
+
+def test_build_launch_without_sandbox_is_none():
+    assert build_launch({"harness": "claude", "config": {}}, {}).sandbox is None
+
+
+def test_sandbox_empty_block_enables_with_no_extra_rw():
+    # `"sandbox": {}` still confines (host read-only); only the auto-writable set applies.
+    launch = build_launch({"harness": "claude", "config": {}, "sandbox": {}}, {})
+    assert launch.sandbox is not None
+    assert launch.sandbox.enabled
+    assert launch.sandbox.read_write == ()
+
+
+def test_sandbox_block_must_be_an_object():
+    with pytest.raises(ProviderError, match="`sandbox` must be a JSON object"):
+        build_launch({"harness": "claude", "config": {}, "sandbox": []}, {})
+
+
+def test_sandbox_read_write_must_be_a_list_of_strings():
+    with pytest.raises(ProviderError, match="readWrite"):
+        build_launch({"harness": "claude", "config": {}, "sandbox": {"readWrite": "nope"}}, {})
+    with pytest.raises(ProviderError, match="readWrite"):
+        build_launch({"harness": "claude", "config": {}, "sandbox": {"readWrite": [1]}}, {})

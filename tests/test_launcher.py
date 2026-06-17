@@ -1,17 +1,33 @@
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from agedum.harness import Plan, compile_claude
+from agedum.harness import Plan, Sandbox, compile_claude
 from agedum.launcher import (
     LauncherError,
     _effective_binds,
+    _resolve_rw,
     assert_safe,
     build_bwrap_argv,
     run_virtualfs,
+    writable_roots,
 )
 from agedum.sources import load_source
+
+
+def _binds(argv, flag):
+    """Extract the (src, dest) string pairs mounted with ``flag`` from a bwrap argv."""
+    pairs = []
+    index = 0
+    while index < len(argv):
+        if argv[index] == flag:
+            pairs.append((argv[index + 1], argv[index + 2]))
+            index += 3
+        else:
+            index += 1
+    return pairs
 
 
 def _git_init(path):
@@ -251,3 +267,99 @@ def test_run_virtualfs_stdin_handling(monkeypatch, tmp_path):
     # close_stdin (a non-interactive --run): stdin is /dev/null so the harness can't block.
     run_virtualfs(tmp_path, Plan(), ["opencode", "run", "go"], close_stdin=True)
     assert captured["stdin"] is sp.DEVNULL
+
+
+# --- write-confinement sandbox ---
+
+
+def test_build_bwrap_argv_default_is_full_read_write(tmp_path):
+    # No sandbox (or a disabled one) keeps the legacy full read-write host bind.
+    plan = Plan()
+    argv = build_bwrap_argv(plan, ["claude"], sandbox=Sandbox(enabled=False), project_root=tmp_path)
+    assert argv[:4] == ["bwrap", "--dev-bind", "/", "/"]
+    assert "--bind" not in argv
+
+
+def test_build_bwrap_argv_sandbox_confines(tmp_path):
+    plan = Plan(binds=[(tmp_path / "c.md", tmp_path / "CLAUDE.md")])
+    sandbox = Sandbox(enabled=True, read_write=("/var/data",))
+    argv = build_bwrap_argv(plan, ["claude"], sandbox=sandbox, project_root=tmp_path)
+    # Host read-only, with device / process / scratch mounts a read-only root lacks.
+    assert argv[:10] == [
+        "bwrap", "--ro-bind", "/", "/",
+        "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+    ]  # fmt: skip
+    writable = _binds(argv, "--bind")
+    assert (str(tmp_path), str(tmp_path)) in writable  # project root writable
+    assert ("/var/data", "/var/data") in writable  # declared rw path writable
+    # The compiled file is still injected read-only, over the now-writable project root.
+    assert (str(tmp_path / "c.md"), str(tmp_path / "CLAUDE.md")) in _binds(argv, "--ro-bind")
+    assert argv[-2:] == ["--", "claude"]
+
+
+def test_build_bwrap_argv_sandbox_requires_project_root():
+    with pytest.raises(LauncherError):
+        build_bwrap_argv(Plan(), ["x"], sandbox=Sandbox(enabled=True), project_root=None)
+
+
+def test_writable_roots_unions_project_injection_parents_and_rw(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # A global-scope injection (e.g. ~/.claude/CLAUDE.md) lives outside the project: its
+    # nearest existing ancestor must be writable so bwrap can create the mount point and the
+    # harness can persist its own state.
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    plan = Plan(binds=[(tmp_path / "g.md", home / ".claude" / "CLAUDE.md")])
+    sandbox = Sandbox(enabled=True, read_write=("/data",))
+    roots = writable_roots(plan, sandbox, proj)
+    assert proj in roots
+    assert home / ".claude" in roots
+    assert Path("/data") in roots
+
+
+def test_writable_roots_drops_paths_nested_under_the_project(tmp_path):
+    # A read_write path inside the project root is redundant — the project root bind covers it.
+    sandbox = Sandbox(enabled=True, read_write=("${PROJECT_ROOT}/out", "/elsewhere"))
+    roots = writable_roots(Plan(), sandbox, tmp_path)
+    assert tmp_path in roots
+    assert tmp_path / "out" not in roots
+    assert Path("/elsewhere") in roots
+
+
+def test_resolve_rw_expands_tokens(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGEDUM_RW_TEST_DIR", "/env/dir")
+    assert _resolve_rw("${PROJECT_ROOT}/out", tmp_path) == tmp_path / "out"
+    assert _resolve_rw("$AGEDUM_RW_TEST_DIR/x", tmp_path) == Path("/env/dir/x")
+    assert _resolve_rw("~/data", tmp_path) == Path.home() / "data"
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+def test_virtualfs_sandbox_confines_writes(tmp_path):
+    # The decisive behaviour: writes land inside the working set and nowhere else.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sandbox = Sandbox(enabled=True)
+
+    rc_in = run_virtualfs(proj, Plan(), ["touch", str(proj / "inside.txt")], sandbox=sandbox)
+    assert rc_in == 0
+    assert (proj / "inside.txt").exists()  # the in-project write reached the host
+
+    rc_out = run_virtualfs(proj, Plan(), ["touch", str(outside / "leak.txt")], sandbox=sandbox)
+    assert rc_out != 0
+    assert not (outside / "leak.txt").exists()  # the out-of-set write never reached the host
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+def test_virtualfs_sandbox_allows_declared_rw_dir(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    sandbox = Sandbox(enabled=True, read_write=(str(data),))
+
+    rc = run_virtualfs(proj, Plan(), ["touch", str(data / "ok.txt")], sandbox=sandbox)
+    assert rc == 0
+    assert (data / "ok.txt").exists()  # a write into a declared rw dir reached the host

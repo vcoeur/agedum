@@ -167,13 +167,16 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   **from the config**; there is no `--harness` flag. `--dry-run` prints the resolved env
   (secrets masked), the injected virtual files, and the argv without launching. Secrets
   are read into the agedum process (not kept out as the retired `--build-script` codegen
-  did). This is the primary, user-facing entry.
-- **wrapper** — `agedum --wrapper <harness> [--dry-run] -- <command...>`. The low-level
-  entry provider mode builds on. The flag before `--` chooses the virtual-file context
-  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`); everything after
-  `--` is the child argv (some harnesses get extra flags appended — kimi's `--agent-file`,
+  did). An optional top-level `sandbox` config field (`{readWrite: [...]}`) requests the same
+  write-confinement as wrapper `--sandbox`. This is the primary, user-facing entry.
+- **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
+  The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
+  context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`); everything
+  after `--` is the child argv (some harnesses get extra flags appended — kimi's `--agent-file`,
   aider's `--read` per scope; Claude, opencode, cline, reasonix, and pi are pure binds).
-  `--dry-run` prints the injected virtual files without running. Context and command are decoupled.
+  `--sandbox` switches to **write-confinement** (read-only host; `--rw-dir DIR`, repeatable,
+  adds a writable dir and implies `--sandbox`). `--dry-run` prints the injected virtual files
+  (and, under `--sandbox`, the writable set) without running. Context and command are decoupled.
 
 Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch, like
 `--version`): **`--providers`** prints every `*.json` config in `providers_dir()` as
@@ -183,7 +186,8 @@ Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch,
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
 `compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
-appends `plan.extra_args`), `provider.py` (`resolve_config_path` / `load_config` /
+appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a read-only host
++ writable `writable_roots`), `provider.py` (`resolve_config_path` / `load_config` /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` → `ProviderSummary` rows for `--providers`; per-harness env mapping
 mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` reverse proxy),
@@ -202,3 +206,12 @@ mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` revers
   first, only if it didn't pre-exist) — including `safe_overrides` tmpfs shadows,
   whose mountpoints bwrap stubs the same way. Plain `--ro-bind`s mask any
   pre-existing dir; injected content never leaks (leftovers are 0-byte / empty).
+- **Write-confinement** (`--sandbox` / a provider `sandbox` block) replaces the default
+  `--dev-bind / /` (full read-write host) with `--ro-bind / /` + `--dev /dev` + `--proc /proc`
+  + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (project root + the nearest existing
+  ancestor of every injection target + the declared `read_write` paths). Two facts the recipe
+  depends on, both validated empirically: bwrap **cannot create a mount point on a read-only
+  parent** (so every injection target's parent must be writable — hence `~/.claude` is
+  auto-writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its
+  path is tmpfs-shadowed in the namespace (so agedum's compiled files under `/tmp` still bind
+  with `--tmpfs /tmp` active). Off by default — every existing launch is unchanged.
