@@ -315,6 +315,18 @@ def test_claude_upstream_api_rejects_unknown_value():
         )
 
 
+def test_claude_proxy_option_without_base_url_is_rejected():
+    with pytest.raises(ProviderError, match="no .*baseUrl"):
+        build_launch(
+            {
+                "harness": "claude",
+                "secretEnv": "OPENCODE_GO_API_KEY",
+                "config": {"upstreamApi": "openai-completions", "model": "kimi-k2.7-code"},
+            },
+            base_env=_GO_ENV,
+        )
+
+
 def test_claude_upstream_api_and_fold_are_mutually_exclusive():
     with pytest.raises(ProviderError, match="both `upstreamApi"):
         build_launch(

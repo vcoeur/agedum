@@ -621,6 +621,13 @@ def test_request_tool_choice_specific_tool():
 # ---------------------------------------------------------------------------
 
 
+def test_response_tolerates_null_choice():
+    # A backend emitting `choices: [null]` must not crash the transform with AttributeError.
+    out = openai_to_anthropic_response({"choices": [None]})
+    assert out["content"] == []
+    assert out["stop_reason"] == "end_turn"
+
+
 def test_response_text_and_usage():
     out = openai_to_anthropic_response(
         {
@@ -937,6 +944,67 @@ def test_stream_parallel_tool_calls_distinct_indices():
     assert [s["content_block"]["name"] for s in starts] == ["foo", "bar"]
     stops = sorted(d["index"] for t, d in events if t == "content_block_stop")
     assert stops == [0, 1]
+    # Anthropic requires one open block at a time: each start is followed by its stop
+    # before the next start — i.e. the block-lifecycle events strictly alternate.
+    lifecycle = [
+        (t, d["index"]) for t, d in events if t in ("content_block_start", "content_block_stop")
+    ]
+    assert lifecycle == [
+        ("content_block_start", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_stop", 1),
+    ]
+
+
+def test_stream_text_resumes_in_new_block_after_tool():
+    # text -> tool -> text: the resumed text must open a fresh block, never a delta against
+    # the already-stopped first text block.
+    events = _drive(
+        [
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "before"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "t", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "after"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    lifecycle = [
+        (t, d["index"]) for t, d in events if t in ("content_block_start", "content_block_stop")
+    ]
+    # three blocks: text(0), tool(1), text(2) — each closed before the next opens
+    assert lifecycle == [
+        ("content_block_start", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_stop", 1),
+        ("content_block_start", 2),
+        ("content_block_stop", 2),
+    ]
+    # the resumed text delta targets the new block (index 2), not the stopped one (index 0)
+    after = [d for t, d in events if t == "content_block_delta" and d["index"] == 2]
+    assert after[0]["delta"] == {"type": "text_delta", "text": "after"}
 
 
 def test_stream_fabricates_output_tokens_when_usage_missing():
@@ -971,6 +1039,7 @@ class _FakeOpenAIState:
         self.last_body = None
         self.last_path = None
         self.last_auth = None
+        self.last_accept_encoding = None
 
 
 class _FakeOpenAI:
@@ -1004,6 +1073,7 @@ def _make_openai_handler(state):
             state.last_body = json.loads(self.rfile.read(length)) if length else {}
             state.last_path = self.path
             state.last_auth = self.headers.get("Authorization")
+            state.last_accept_encoding = self.headers.get("Accept-Encoding")
             kind, payload = state.response
             if kind == "stream":
                 self.send_response(200)
@@ -1082,6 +1152,8 @@ def test_translate_proxy_non_streaming_text():
     assert state.last_body["model"] == "kimi-k2.7-code"
     assert state.last_body["messages"][0] == {"role": "system", "content": "be brief"}
     assert state.last_body["tools"][0]["function"]["name"] == "t"
+    # identity encoding is forced — we re-parse the body, so a gzip response would break us
+    assert state.last_accept_encoding == "identity"
     # response was translated back to Anthropic shape
     assert body["type"] == "message"
     assert body["content"] == [{"type": "text", "text": "hi there"}]

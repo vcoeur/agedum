@@ -503,6 +503,13 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
     if not base_url:
+        # A proxy option without a baseUrl has nothing to sit in front of — fail loudly
+        # rather than silently run vanilla Claude against the real Anthropic API.
+        if block.get("foldSystemMessages") is True or str(block.get("upstreamApi") or "").strip():
+            raise ProviderError(
+                "claude config sets a proxy option (foldSystemMessages / upstreamApi) but no "
+                "baseUrl for it to proxy"
+            )
         # Native Claude: no provider overrides (the all-empty config). Run bare.
         return {}, [], ["claude"], ()
     if not secret_env:

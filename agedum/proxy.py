@@ -112,6 +112,17 @@ def fold_system_messages(body: dict) -> dict:
     return folded
 
 
+def _parse_json_dict(raw: bytes) -> dict | None:
+    """Parse a request body to a JSON object, or ``None`` if empty / not-JSON / not-a-dict."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 # ---------------------------------------------------------------------------
 # Anthropic Messages -> OpenAI Chat Completions (request)
 # ---------------------------------------------------------------------------
@@ -124,6 +135,11 @@ _STOP_REASON = {
     "function_call": "tool_use",
     "content_filter": "end_turn",
 }
+
+
+def _stop_reason(finish_reason: str | None) -> str:
+    """Map an OpenAI ``finish_reason`` to an Anthropic ``stop_reason`` (default ``end_turn``)."""
+    return _STOP_REASON.get(finish_reason or "stop", "end_turn")
 
 
 def _system_to_text(system: object) -> str:
@@ -361,7 +377,7 @@ def openai_to_anthropic_response(data: dict, *, model: str | None = None) -> dic
     an ``input`` object); ``finish_reason`` maps to ``stop_reason``; usage maps to Anthropic
     token fields (``cache_creation_input_tokens`` has no OpenAI source, so it is omitted).
     """
-    choice = (data.get("choices") or [{}])[0]
+    choice = (data.get("choices") or [{}])[0] or {}
     message = choice.get("message") or {}
     content: list[dict] = []
     text = message.get("content")
@@ -390,7 +406,7 @@ def openai_to_anthropic_response(data: dict, *, model: str | None = None) -> dic
         "role": "assistant",
         "model": data.get("model") or model or "",
         "content": content,
-        "stop_reason": _STOP_REASON.get(choice.get("finish_reason") or "stop", "end_turn"),
+        "stop_reason": _stop_reason(choice.get("finish_reason")),
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens") or 0,
@@ -424,9 +440,11 @@ class OpenAIToAnthropicStream:
         self.message_id = "msg_agedum"
         self.started = False
         self.finished = False
-        self.text_index: int | None = None
         self.next_index = 0
-        self.open_indices: set[int] = set()
+        # Anthropic requires content blocks to be opened and closed strictly in sequence —
+        # one open at a time. Track the single currently-open block; a new block closes it.
+        self.current_index: int | None = None
+        self.current_kind: str | None = None  # "text" | "tool"
         # OpenAI tool_calls[].index -> {anthropic_index, started, id, name, buffer}
         self.tool_blocks: dict[int, dict] = {}
         self.finish_reason: str | None = None
@@ -475,22 +493,14 @@ class OpenAIToAnthropicStream:
         details = usage.get("prompt_tokens_details") or {}
         self.cache_read = details.get("cached_tokens") or self.cache_read
 
-    def _open_text_block(self) -> list[bytes]:
-        if self.text_index is not None:
+    def _close_current(self) -> list[bytes]:
+        """Stop the currently-open content block, if any (enforces one-open-at-a-time)."""
+        if self.current_index is None:
             return []
-        self.text_index = self.next_index
-        self.next_index += 1
-        self.open_indices.add(self.text_index)
-        return [
-            self._event(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": self.text_index,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            )
-        ]
+        event = self._content_block_stop(self.current_index)
+        self.current_index = None
+        self.current_kind = None
+        return [event]
 
     def _content_block_stop(self, index: int) -> bytes:
         return self._event("content_block_stop", {"type": "content_block_stop", "index": index})
@@ -507,7 +517,9 @@ class OpenAIToAnthropicStream:
 
     def _feed_tool_call(self, tool_call: dict) -> list[bytes]:
         events: list[bytes] = []
-        openai_index = tool_call.get("index") or 0
+        # `index` keys the tool call across delta fragments; it is always present in the
+        # OpenAI streaming schema. Use .get(..., 0) (not `or 0`) so a real index 0 is kept.
+        openai_index = tool_call.get("index", 0)
         block = self.tool_blocks.setdefault(
             openai_index,
             {"anthropic_index": None, "started": False, "id": None, "name": None, "buffer": ""},
@@ -520,14 +532,15 @@ class OpenAIToAnthropicStream:
         arguments = function.get("arguments") or ""
 
         if not block["started"] and block["id"] and block["name"]:
-            # A tool block follows the text: close the text block before opening it.
-            if self.text_index is not None and self.text_index in self.open_indices:
-                self.open_indices.discard(self.text_index)
-                events.append(self._content_block_stop(self.text_index))
+            # Close whatever block is open (text, or a prior tool) before opening this one —
+            # the target backends stream each tool call's arguments contiguously, so the
+            # previous block's deltas have all arrived by now.
+            events.extend(self._close_current())
             block["anthropic_index"] = self.next_index
             self.next_index += 1
             block["started"] = True
-            self.open_indices.add(block["anthropic_index"])
+            self.current_index = block["anthropic_index"]
+            self.current_kind = "tool"
             events.append(
                 self._event(
                     "content_block_start",
@@ -565,18 +578,34 @@ class OpenAIToAnthropicStream:
             # A trailing usage-only chunk (``stream_options.include_usage``).
             self._absorb_usage(chunk.get("usage"))
             return events
-        choice = choices[0]
+        choice = choices[0] or {}
         delta = choice.get("delta") or {}
 
         content = delta.get("content")
         if isinstance(content, str) and content:
-            events.extend(self._open_text_block())
+            if self.current_kind != "text":
+                # Open a fresh text block (closing any open tool block first), so text that
+                # resumes after a tool call lands in its own block rather than a stopped one.
+                events.extend(self._close_current())
+                self.current_index = self.next_index
+                self.next_index += 1
+                self.current_kind = "text"
+                events.append(
+                    self._event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": self.current_index,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                )
             events.append(
                 self._event(
                     "content_block_delta",
                     {
                         "type": "content_block_delta",
-                        "index": self.text_index,
+                        "index": self.current_index,
                         "delta": {"type": "text_delta", "text": content},
                     },
                 )
@@ -597,9 +626,7 @@ class OpenAIToAnthropicStream:
             return []
         self.finished = True
         events = self._ensure_started()
-        for index in sorted(self.open_indices):
-            events.append(self._content_block_stop(index))
-        self.open_indices.clear()
+        events.extend(self._close_current())
         output_tokens = self.output_tokens or max(1, self._output_chars // 4)
         usage: dict = {"output_tokens": output_tokens}
         if self.input_tokens:
@@ -612,7 +639,7 @@ class OpenAIToAnthropicStream:
                 {
                     "type": "message_delta",
                     "delta": {
-                        "stop_reason": _STOP_REASON.get(self.finish_reason or "stop", "end_turn"),
+                        "stop_reason": _stop_reason(self.finish_reason),
                         "stop_sequence": None,
                     },
                     "usage": usage,
@@ -847,13 +874,8 @@ class _FoldHandler(_BaseProxyHandler):
 
     def _maybe_fold(self, raw: bytes) -> bytes:
         """Fold system-role messages out of a JSON body; pass anything else through."""
-        if not raw:
-            return raw
-        try:
-            parsed = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
-            return raw
-        if not isinstance(parsed, dict):
+        parsed = _parse_json_dict(raw)
+        if parsed is None:
             return raw
         folded = fold_system_messages(parsed)
         if folded is parsed:
@@ -879,12 +901,7 @@ class _TranslateHandler(_BaseProxyHandler):
             return None
         # No OpenAI token-count endpoint exists; a cheap chars/4 estimate keeps Claude Code's
         # context budgeting working. Imprecise by design — documented as a v1 limitation.
-        try:
-            body = json.loads(raw) if raw else {}
-        except (ValueError, UnicodeDecodeError):
-            return {"input_tokens": 0}
-        if not isinstance(body, dict):
-            return {"input_tokens": 0}
+        body = _parse_json_dict(raw) or {}
         chars = len(_system_to_text(body.get("system")))
         for message in body.get("messages") or []:
             if isinstance(message, dict):
@@ -898,13 +915,8 @@ class _TranslateHandler(_BaseProxyHandler):
         return self._translate_body(raw), new_path, self._translate_headers(headers)
 
     def _translate_body(self, raw: bytes) -> bytes:
-        if not raw:
-            return raw
-        try:
-            body = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
-            return raw
-        if not isinstance(body, dict):
+        body = _parse_json_dict(raw)
+        if body is None:
             return raw
         translated = anthropic_to_openai_request(
             body, model=self.model or None, reasoning_effort=self.reasoning_effort or None
@@ -923,11 +935,17 @@ class _TranslateHandler(_BaseProxyHandler):
                 token = value[7:].strip() if value.lower().startswith("bearer ") else value
             elif lowered in ("anthropic-version", "anthropic-beta"):
                 continue
+            elif lowered == "accept-encoding":
+                # Unlike the fold proxy (which relays bytes 1:1), we re-read and re-parse the
+                # response body — so force identity encoding rather than risk a gzip body the
+                # JSON/SSE parsers would choke on. Claude Code's client advertises gzip.
+                continue
             else:
                 out[name] = value
         if token:
             out["Authorization"] = f"Bearer {token}"
         out["Content-Type"] = "application/json"
+        out["Accept-Encoding"] = "identity"
         return out
 
     def relay_response(self, response: http.client.HTTPResponse) -> None:
