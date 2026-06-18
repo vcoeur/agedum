@@ -1754,6 +1754,153 @@ def test_with_prompt_pi_preserves_passthrough():
     assert cmd == ["pi", "--no-skills", "--print", "go"]
 
 
+# --- codex (OpenAI Codex CLI) ---
+
+
+def test_codex_basic_model_flag():
+    # model is a plain -m flag; no custom provider and no on-disk config without baseUrl.
+    launch = build_launch(
+        {"harness": "codex", "config": {"model": "gpt-5.5"}},
+        base_env={},
+    )
+    assert launch.command == ["codex", "-m", "gpt-5.5"]
+    assert launch.config_files == ()
+
+
+def test_codex_bare_runs_codex():
+    launch = build_launch({"harness": "codex", "config": {}}, base_env={})
+    assert launch.command == ["codex"]
+    assert launch.config_files == ()
+
+
+def test_codex_custom_endpoint_passes_provider_overrides():
+    # baseUrl -> a [model_providers.agedum] block via -c overrides, selected with -c
+    # model_provider=agedum, plus -m <model>. No file is generated. wire_api is NOT emitted
+    # without wireApi, so codex's own default (the Responses API) applies.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"baseUrl": "https://proxy.local/v1", "model": "deepseek-v4-pro"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.command == [
+        "codex",
+        "-c",
+        'model_provider="agedum"',
+        "-c",
+        'model_providers.agedum.name="agedum"',
+        "-c",
+        'model_providers.agedum.base_url="https://proxy.local/v1"',
+        "-c",
+        'model_providers.agedum.env_key="DEEPSEEK_API_KEY"',
+        "-m",
+        "deepseek-v4-pro",
+    ]
+    assert not any("wire_api" in token for token in launch.command)
+    assert launch.config_files == ()
+
+
+def test_codex_wire_api_override():
+    # wireApi is emitted only when explicitly set.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "OPENAI_API_KEY",
+            "config": {
+                "baseUrl": "https://example.com/v1",
+                "model": "gpt-5.5",
+                "wireApi": "responses",
+            },
+        },
+        base_env={"OPENAI_API_KEY": "sk-x"},
+    )
+    assert 'model_providers.agedum.wire_api="responses"' in launch.command
+
+
+def test_codex_key_via_env_export_not_argv():
+    # The key reaches codex via the required-env export (its conventional name, referenced as
+    # the provider's env_key), never argv.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"baseUrl": "https://api.deepseek.com/v1", "model": "deepseek-v4-pro"},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-secret"},
+    )
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-secret"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+    assert "sk-secret" not in " ".join(launch.command)
+
+
+def test_codex_subagent_model_generates_flash_agent_file(monkeypatch, tmp_path):
+    # subagentModel -> a generated ~/.codex/agents/flash.toml custom-agent (the fast model),
+    # written verbatim (not JSON-merged). codex has no global subagent-model knob.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com/v1",
+                "model": "deepseek-v4-pro",
+                "subagentModel": "deepseek-v4-flash",
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert len(launch.config_files) == 1
+    target, content, merge_json = launch.config_files[0]
+    assert target == str(tmp_path / "codex-home" / "agents" / "flash.toml")
+    assert merge_json is False
+    assert 'name = "flash"' in content
+    assert 'model = "deepseek-v4-flash"' in content
+    assert "developer_instructions" in content
+    # The executor still launches on the primary model.
+    assert launch.command[-2:] == ["-m", "deepseek-v4-pro"]
+
+
+def test_codex_chat_completions_interposes_proxy_upstream():
+    # chatCompletions: true -> the upstream is signaled via AGEDUM_CODEX_CHAT_UPSTREAM (the CLI
+    # then interposes a Responses<->Chat proxy); no wire_api override is emitted (codex speaks
+    # the Responses API to the proxy). The base_url override still carries the real upstream —
+    # the CLI rewrites it to the proxy address at launch.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "baseUrl": "https://api.deepseek.com/v1",
+                "model": "deepseek-v4-pro",
+                "chatCompletions": True,
+            },
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert launch.env["AGEDUM_CODEX_CHAT_UPSTREAM"] == "https://api.deepseek.com/v1"
+    assert not any("wire_api" in token for token in launch.command)
+    assert 'model_providers.agedum.base_url="https://api.deepseek.com/v1"' in launch.command
+
+
+def test_with_prompt_codex_interactive_is_positional():
+    # codex seeds an interactive session from a positional prompt; base flags preserved.
+    cmd = with_prompt(_launch("codex", ["codex", "-m", "m"]), [], "hello", interactive=True)
+    assert cmd == ["codex", "-m", "m", "hello"]
+
+
+def test_with_prompt_codex_run_uses_exec():
+    # The `exec` subcommand runs once non-interactively; it leads, before flags and the prompt.
+    cmd = with_prompt(_launch("codex", ["codex", "-m", "m"]), [], "hello", interactive=False)
+    assert cmd == ["codex", "exec", "-m", "m", "hello"]
+
+
+def test_with_prompt_codex_preserves_passthrough():
+    cmd = with_prompt(_launch("codex", ["codex"]), ["--full-auto"], "go", interactive=False)
+    assert cmd == ["codex", "exec", "--full-auto", "go"]
+
+
 # --- sandbox (write-confinement) ---
 
 

@@ -53,13 +53,13 @@ sibling exists:
 
 - `AGENTS.claude.md` is applied for the claude harness, `AGENTS.kimi.md` for kimi,
   `AGENTS.opencode.md` for opencode, `AGENTS.cline.md` for Cline, `AGENTS.reasonix.md` for
-  reasonix, `AGENTS.aider.md` for aider, `AGENTS.pi.md` for pi. An overlay for a *different*
-  harness is ignored.
+  reasonix, `AGENTS.aider.md` for aider, `AGENTS.pi.md` for pi, `AGENTS.codex.md` for codex. An
+  overlay for a *different* harness is ignored.
 - Unlike `SKILL.md`, `AGENTS.md` has no front-matter to union — the merge is a plain body
   concatenation: the base, a blank line, then the overlay body.
 - This is **user scope only**. A project-scope `AGENTS.<harness>.md` is not merged — for
-  kimi, opencode, cline, reasonix, and pi the project `AGENTS.md` is read natively and never
-  injected (aider injects it via `--read` but still takes no project overlay), so a project
+  kimi, opencode, cline, reasonix, pi, and codex the project `AGENTS.md` is read natively and
+  never injected (aider injects it via `--read` but still takes no project overlay), so a project
   overlay would have nowhere to land.
 
 ## Skills
@@ -168,7 +168,7 @@ flowchart LR
 ```
 
 The targets differ per harness — kimi reads the project `AGENTS.md` natively and injects
-the global one via a `--agent-file`; opencode, cline, reasonix, and pi read the project
+the global one via a `--agent-file`; opencode, cline, reasonix, pi, and codex read the project
 `AGENTS.md` natively and bind the global one to their own config path; aider reads neither
 scope natively and injects both via `--read`. See the
 [harness pages](harnesses/index.md) for each harness's full mapping.

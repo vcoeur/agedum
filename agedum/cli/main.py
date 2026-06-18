@@ -38,6 +38,7 @@ from agedum.harness import (
     compile_aider,
     compile_claude,
     compile_cline,
+    compile_codex,
     compile_kimi,
     compile_opencode,
     compile_pi,
@@ -45,6 +46,7 @@ from agedum.harness import (
 )
 from agedum.launcher import LauncherError, run_virtualfs, writable_roots
 from agedum.provider import (
+    CODEX_PROVIDER_NAME,
     ProviderError,
     build_launch,
     default_env_file,
@@ -70,12 +72,13 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
     "reasonix": compile_reasonix,
     "aider": compile_aider,
     "pi": compile_pi,
+    "codex": compile_codex,
 }
 
 USAGE = (
     "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
     "[--dry-run] [harness args...]\n"
-    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi> [--sandbox] "
+    "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi|codex> [--sandbox] "
     "[--rw-dir DIR]... [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
@@ -102,8 +105,8 @@ Wrapper mode (low-level; provider mode builds on it) — run any command inside 
 virtual-file context, with no provider env:
 
   --wrapper <harness>   build virtual files for the harness (claude | kimi | opencode |
-                        cline | reasonix | aider | pi) then run the command after -- inside
-                        the namespace
+                        cline | reasonix | aider | pi | codex) then run the command after --
+                        inside the namespace
   --sandbox             write-confinement: mount the host read-only so the command can only
                         write the project root, agedum's injection dirs, /tmp, and any
                         --rw-dir paths (default: full read-write host access)
@@ -301,11 +304,17 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
 
 
 def _print_proxy(launch) -> None:
-    """Show the local proxy interposed in front of ``ANTHROPIC_BASE_URL``, if any.
+    """Show the local proxy interposed in front of the harness's endpoint, if any.
 
-    The env table alone doesn't make it obvious that Claude Code will talk to a localhost
+    The env table alone doesn't make it obvious that the harness will talk to a localhost
     address rather than the configured ``baseUrl``, so name the proxy and its real upstream.
     """
+    codex_upstream = launch.env.get("AGEDUM_CODEX_CHAT_UPSTREAM")
+    if codex_upstream:
+        print("proxy")
+        print(f"  responses→chat-completions → {codex_upstream}")
+        print()
+        return
     upstream = launch.env.get("ANTHROPIC_BASE_URL")
     if not upstream:
         return
@@ -549,7 +558,7 @@ def _run_wrapper(argv: list[str]) -> int:
                 if index >= len(flags):
                     _die(
                         "--wrapper requires a harness: "
-                        "claude, kimi, opencode, cline, reasonix, aider, or pi"
+                        "claude, kimi, opencode, cline, reasonix, aider, pi, or codex"
                     )
                 value = flags[index]
             if value not in _COMPILERS:
@@ -572,7 +581,7 @@ def _run_wrapper(argv: list[str]) -> int:
         index += 1
 
     if mode is None:
-        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider|pi")
+        _die("a harness is required: --wrapper claude|kimi|opencode|cline|reasonix|aider|pi|codex")
 
     # --rw-dir implies confinement (the paths are meaningless without a read-only host).
     sandbox = (
@@ -611,9 +620,9 @@ def _run(
     try:
         plan = _COMPILERS[mode](project, global_, dest)
         _inject_config_files(plan, project.root, dest, config_files)
-        with _maybe_proxy(mode):
+        with _maybe_proxy(mode), _maybe_codex_proxy(mode, command) as run_command:
             return run_virtualfs(
-                project.root, plan, command, close_stdin=close_stdin, sandbox=sandbox
+                project.root, plan, run_command, close_stdin=close_stdin, sandbox=sandbox
             )
     except LauncherError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
@@ -691,3 +700,37 @@ def _maybe_proxy(mode: str) -> Iterator[None]:
             yield
         finally:
             os.environ["ANTHROPIC_BASE_URL"] = upstream
+
+
+@contextmanager
+def _maybe_codex_proxy(mode: str, command: list[str]) -> Iterator[list[str]]:
+    """Interpose the Responses↔Chat translation proxy for a codex launch against a
+    Chat-Completions endpoint; yield the command to actually run.
+
+    Enabled by ``AGEDUM_CODEX_CHAT_UPSTREAM`` (set by a codex provider config's
+    ``chatCompletions: true``). codex speaks only the Responses API, but the upstream serves
+    Chat Completions, so a local :class:`~agedum.proxy.ResponsesToChatProxy` translates both
+    directions. The proxy's ephemeral address replaces the upstream in codex's
+    ``-c model_providers.<id>.base_url`` override; codex — inside the bwrap namespace, which
+    shares the host loopback — reaches it at ``127.0.0.1``. A no-op for any other harness or
+    when the var is unset (the original command is yielded unchanged).
+    """
+    upstream = os.environ.get("AGEDUM_CODEX_CHAT_UPSTREAM", "")
+    if mode != "codex" or not upstream:
+        yield command
+        return
+
+    from agedum.proxy import ResponsesToChatProxy
+
+    with ResponsesToChatProxy(upstream) as proxy:
+        yield _rewrite_codex_base_url(command, proxy.base_url)
+
+
+def _rewrite_codex_base_url(command: list[str], base_url: str) -> list[str]:
+    """Return ``command`` with the codex ``-c model_providers.<id>.base_url="..."`` value
+    swapped for ``base_url`` (the live proxy address)."""
+    prefix = f"model_providers.{CODEX_PROVIDER_NAME}.base_url="
+    return [
+        f'{prefix}"{base_url}"' if isinstance(arg, str) and arg.startswith(prefix) else arg
+        for arg in command
+    ]

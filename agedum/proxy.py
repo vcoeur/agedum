@@ -37,7 +37,9 @@ import http.client
 import json
 import sys
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import count
 from urllib.parse import urlsplit
 
 # Headers that must not be copied verbatim across a proxy hop (RFC 7230 §6.1), plus the
@@ -1092,4 +1094,453 @@ class TranslateProxy(_LocalProxy):
                     "reasoning_effort": reasoning_effort or "",
                 },
             )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Responses API <-> Chat Completions translation (codex harness)
+# ---------------------------------------------------------------------------
+#
+# Recent codex speaks ONLY the OpenAI Responses API (wire_api="chat" removed Feb 2026), but
+# DeepSeek and most OpenAI-compatible providers serve only Chat Completions. ResponsesToChatProxy
+# (a _LocalProxy, like FoldProxy/TranslateProxy) translates codex's POST /responses into a
+# /chat/completions call and the streamed Chat deltas back into the Responses SSE event sequence
+# codex consumes (text + function calls).
+
+
+def _responses_message_text(content: object) -> str:
+    """Flatten a Responses message ``content`` (string or part list) into plain text.
+
+    Parts are ``{type: input_text|output_text|text, text: ...}`` (or bare strings); their
+    ``text`` is concatenated. Non-text parts (images, etc.) are skipped — MVP is text-only.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "".join(parts)
+    return ""
+
+
+def _function_call_output_text(output: object) -> str:
+    """The string content of a Responses ``function_call_output`` item → a Chat tool message."""
+    if isinstance(output, str):
+        return output
+    if output is None:
+        return ""
+    if isinstance(output, list):
+        return _responses_message_text(output)
+    return json.dumps(output)
+
+
+def _append_input_messages(messages: list[dict], input_: object) -> None:
+    """Append Responses ``input`` items to the Chat ``messages`` list, mapping item types.
+
+    ``message`` → its role's Chat message (``developer`` → ``system``, hoisted to the front);
+    consecutive ``function_call`` items → one assistant message with a ``tool_calls`` array
+    (Chat requires all of a turn's calls in one message); ``function_call_output`` →
+    a ``role: tool`` message keyed by ``tool_call_id``; ``reasoning`` items are dropped (the
+    thinking-model reasoning round-trip is a deferred follow-up).
+    """
+    if input_ is None:
+        return
+    if isinstance(input_, str):
+        messages.append({"role": "user", "content": input_})
+        return
+    if not isinstance(input_, list):
+        return
+    for item in input_:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type", "message")
+        if item_type == "function_call":
+            call = {
+                "id": item.get("call_id") or item.get("id") or "",
+                "type": "function",
+                "function": {
+                    "name": item.get("name") or "",
+                    "arguments": item.get("arguments") or "",
+                },
+            }
+            if (
+                messages
+                and messages[-1].get("role") == "assistant"
+                and messages[-1].get("tool_calls")
+            ):
+                messages[-1]["tool_calls"].append(call)
+            else:
+                messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
+        elif item_type == "function_call_output":
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id") or "",
+                    "content": _function_call_output_text(item.get("output")),
+                }
+            )
+        elif item_type == "reasoning":
+            continue
+        else:
+            role = item.get("role") or "user"
+            if role == "developer":
+                role = "system"
+            message = {"role": role, "content": _responses_message_text(item.get("content"))}
+            if role == "system":
+                # Chat requires the system prompt first; keep a leading instructions system.
+                insert_at = 1 if (messages and messages[0].get("role") == "system") else 0
+                messages.insert(insert_at, message)
+            else:
+                messages.append(message)
+
+
+def _responses_tools_to_chat(tools: object) -> list[dict]:
+    """Convert Responses function tools (flat ``{type, name, description, parameters}``) to
+    Chat's nested ``{type: function, function: {...}}`` shape. Non-function tools are skipped."""
+    if not isinstance(tools, list):
+        return []
+    converted: list[dict] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        nested = tool.get("function")
+        if isinstance(nested, dict):
+            function = dict(nested)
+        else:
+            function = {"name": tool.get("name") or ""}
+            if tool.get("description") is not None:
+                function["description"] = tool["description"]
+            if "parameters" in tool:
+                function["parameters"] = tool["parameters"]
+        converted.append({"type": "function", "function": function})
+    return converted
+
+
+def _responses_tool_choice_to_chat(tool_choice: object) -> object | None:
+    """Map a Responses ``tool_choice`` to the Chat form; ``None`` to omit it."""
+    if tool_choice in ("auto", "none", "required"):
+        return tool_choice
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        name = tool_choice.get("name") or (tool_choice.get("function") or {}).get("name")
+        if name:
+            return {"type": "function", "function": {"name": name}}
+    return None
+
+
+def responses_to_chat_request(req: dict) -> dict:
+    """Translate a codex Responses-API request body into a Chat Completions request body.
+
+    ``instructions`` (codex's system prompt) becomes the leading system message; ``input``
+    items become the conversation ``messages``; ``tools`` are reshaped; ``max_output_tokens``
+    → ``max_tokens``. Streaming is requested with usage so the final ``response.completed`` can
+    carry token counts.
+    """
+    messages: list[dict] = []
+    system_text = req.get("instructions") or req.get("system")
+    if isinstance(system_text, str) and system_text:
+        messages.append({"role": "system", "content": system_text})
+    _append_input_messages(messages, req.get("input"))
+
+    chat: dict = {"messages": messages, "stream": True, "stream_options": {"include_usage": True}}
+    if req.get("model"):
+        chat["model"] = req["model"]
+    tools = _responses_tools_to_chat(req.get("tools"))
+    if tools:
+        chat["tools"] = tools
+        tool_choice = _responses_tool_choice_to_chat(req.get("tool_choice"))
+        if tool_choice is not None:
+            chat["tool_choice"] = tool_choice
+    if isinstance(req.get("max_output_tokens"), int):
+        chat["max_tokens"] = req["max_output_tokens"]
+    for key in ("temperature", "top_p"):
+        if req.get(key) is not None:
+            chat[key] = req[key]
+    return chat
+
+
+def _sse_frame(event_type: str, data: dict) -> bytes:
+    """One Responses-API SSE frame: an ``event:`` line plus a single-line ``data:`` JSON."""
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _iter_chat_sse(read) -> object:
+    """Yield each upstream Chat Completions SSE ``data:`` payload as a parsed dict.
+
+    ``read`` is a ``response.read``-style callable. Lines are reassembled across chunk
+    boundaries; ``data: [DONE]`` ends the stream; unparseable payloads are skipped.
+    """
+    buffer = b""
+    while True:
+        chunk = read(4096)
+        if not chunk:
+            break
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            line = line.strip()
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == b"[DONE]":
+                return
+            try:
+                yield json.loads(payload)
+            except ValueError:
+                continue
+
+
+def translate_chat_stream(read, *, model: str) -> object:
+    """Yield Responses-API SSE frames (bytes) translated from an upstream Chat Completions
+    SSE stream read via ``read`` (a ``response.read``-style callable).
+
+    Text sequence: ``response.created`` → ``response.output_item.added`` (message) →
+    ``response.output_text.delta``* → ``response.output_text.done`` →
+    ``response.output_item.done`` → ``response.completed``. Tool calls accumulate from the Chat
+    ``delta.tool_calls`` and emit a ``function_call`` item (``added`` →
+    ``function_call_arguments.delta`` → ``...done`` → ``output_item.done``) after any message.
+    """
+    seq = count()
+    response_id = "resp_" + uuid.uuid4().hex
+    msg_item_id = "msg_" + uuid.uuid4().hex
+    yield _sse_frame(
+        "response.created",
+        {
+            "type": "response.created",
+            "sequence_number": next(seq),
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "status": "in_progress",
+                "model": model,
+                "output": [],
+            },
+        },
+    )
+
+    text_parts: list[str] = []
+    message_started = False
+    tool_calls: dict[int, dict] = {}
+    usage: dict | None = None
+
+    for data in _iter_chat_sse(read):
+        if not isinstance(data, dict):
+            continue
+        if isinstance(data.get("usage"), dict):
+            usage = data["usage"]
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            if not message_started:
+                message_started = True
+                yield _sse_frame(
+                    "response.output_item.added",
+                    {
+                        "type": "response.output_item.added",
+                        "sequence_number": next(seq),
+                        "output_index": 0,
+                        "item": {
+                            "id": msg_item_id,
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    },
+                )
+            text_parts.append(content)
+            yield _sse_frame(
+                "response.output_text.delta",
+                {
+                    "type": "response.output_text.delta",
+                    "sequence_number": next(seq),
+                    "item_id": msg_item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": content,
+                },
+            )
+        for tool_call in delta.get("tool_calls") or []:
+            index = tool_call.get("index", 0)
+            accumulator = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if tool_call.get("id"):
+                accumulator["id"] = tool_call["id"]
+            function = tool_call.get("function") or {}
+            if function.get("name"):
+                accumulator["name"] = function["name"]
+            if function.get("arguments"):
+                accumulator["arguments"] += function["arguments"]
+
+    output: list[dict] = []
+    if message_started:
+        full_text = "".join(text_parts)
+        yield _sse_frame(
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done",
+                "sequence_number": next(seq),
+                "item_id": msg_item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "text": full_text,
+            },
+        )
+        message_item = {
+            "id": msg_item_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": full_text}],
+        }
+        yield _sse_frame(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "sequence_number": next(seq),
+                "output_index": 0,
+                "item": message_item,
+            },
+        )
+        output.append(message_item)
+
+    base_index = 1 if message_started else 0
+    for relative_index, key in enumerate(sorted(tool_calls)):
+        accumulator = tool_calls[key]
+        output_index = base_index + relative_index
+        call_id = accumulator["id"] or ("call_" + uuid.uuid4().hex)
+        fc_item_id = "fc_" + uuid.uuid4().hex
+        arguments = accumulator["arguments"]
+        yield _sse_frame(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "sequence_number": next(seq),
+                "output_index": output_index,
+                "item": {
+                    "id": fc_item_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": accumulator["name"],
+                    "arguments": "",
+                },
+            },
+        )
+        if arguments:
+            yield _sse_frame(
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "sequence_number": next(seq),
+                    "item_id": fc_item_id,
+                    "output_index": output_index,
+                    "delta": arguments,
+                },
+            )
+        yield _sse_frame(
+            "response.function_call_arguments.done",
+            {
+                "type": "response.function_call_arguments.done",
+                "sequence_number": next(seq),
+                "item_id": fc_item_id,
+                "output_index": output_index,
+                "arguments": arguments,
+            },
+        )
+        function_item = {
+            "id": fc_item_id,
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": accumulator["name"],
+            "arguments": arguments,
+        }
+        yield _sse_frame(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "sequence_number": next(seq),
+                "output_index": output_index,
+                "item": function_item,
+            },
+        )
+        output.append(function_item)
+
+    completed: dict = {
+        "id": response_id,
+        "object": "response",
+        "status": "completed",
+        "model": model,
+        "output": output,
+    }
+    if usage:
+        completed["usage"] = {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+    yield _sse_frame(
+        "response.completed",
+        {"type": "response.completed", "sequence_number": next(seq), "response": completed},
+    )
+
+
+class _ResponsesToChatHandler(_BaseProxyHandler):
+    """Translate codex's Responses-API request → ``/chat/completions`` and the streamed Chat
+    deltas → Responses-API SSE. The chat-only-provider analog of :class:`_TranslateHandler`,
+    built on the shared :class:`_BaseProxyHandler` forward mechanics."""
+
+    # Stashed by transform_request for relay_response (one handler instance per request).
+    _model = ""
+
+    def short_circuit(self, path: str, raw: bytes) -> dict | None:
+        # codex preflights GET /models for metadata; the upstream's OpenAI-shaped list does
+        # not match codex's expected {models:[…]}, so answer locally with an empty valid list —
+        # codex falls back to per-model defaults (a benign "metadata not found" warning).
+        if self.command == "GET" and path.split("?", 1)[0].rstrip("/").endswith("/models"):
+            return {"models": []}
+        return None
+
+    def transform_request(
+        self, raw: bytes, path: str, headers: dict[str, str]
+    ) -> tuple[bytes, str, dict[str, str]]:
+        req = _parse_json_dict(raw) or {}
+        self._model = str(req.get("model") or "")
+        body = json.dumps(responses_to_chat_request(req), separators=(",", ":")).encode()
+        headers = dict(headers)
+        headers["Accept"] = "text/event-stream"
+        return body, "/chat/completions", headers
+
+    def relay_response(self, response: http.client.HTTPResponse) -> None:
+        if response.status != 200:
+            # Surface the upstream error body verbatim so codex shows the real cause.
+            self._relay_passthrough(response)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for frame in translate_chat_stream(response.read, model=self._model):
+            self.wfile.write(frame)
+            self.wfile.flush()
+
+
+class ResponsesToChatProxy(_LocalProxy):
+    """A localhost proxy translating codex's Responses API ⇄ Chat Completions toward a
+    Chat-Completions ``upstream`` (DeepSeek etc.).
+
+    Use as a context manager; :attr:`base_url` is the address to set as the codex provider's
+    ``base_url`` while the ``with`` block is open (codex appends ``/responses``)."""
+
+    def __init__(self, upstream: str) -> None:
+        super().__init__(
+            type("_BoundResponsesHandler", (_ResponsesToChatHandler,), {"upstream": upstream})
         )

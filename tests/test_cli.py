@@ -121,6 +121,45 @@ def test_wrapper_pi_is_registered(monkeypatch):
     assert captured["command"] == ["pi", "hi"]
 
 
+def test_rewrite_codex_base_url_swaps_only_base_url():
+    command = [
+        "codex",
+        "-c",
+        'model_provider="agedum"',
+        "-c",
+        'model_providers.agedum.base_url="https://api.deepseek.com/v1"',
+        "-c",
+        'model_providers.agedum.env_key="DEEPSEEK_API_KEY"',
+        "-m",
+        "deepseek-v4-pro",
+    ]
+    rewritten = cli._rewrite_codex_base_url(command, "http://127.0.0.1:9999")
+    assert 'model_providers.agedum.base_url="http://127.0.0.1:9999"' in rewritten
+    assert 'model_providers.agedum.base_url="https://api.deepseek.com/v1"' not in rewritten
+    # Only the base_url token changed.
+    assert 'model_providers.agedum.env_key="DEEPSEEK_API_KEY"' in rewritten
+    assert rewritten[0] == "codex"
+    assert rewritten[-2:] == ["-m", "deepseek-v4-pro"]
+
+
+def test_maybe_codex_proxy_noop_without_env(monkeypatch):
+    # No AGEDUM_CODEX_CHAT_UPSTREAM -> the command is yielded unchanged, no proxy started.
+    monkeypatch.delenv("AGEDUM_CODEX_CHAT_UPSTREAM", raising=False)
+    with cli._maybe_codex_proxy("codex", ["codex", "-m", "x"]) as command:
+        assert command == ["codex", "-m", "x"]
+
+
+def test_wrapper_codex_is_registered(monkeypatch):
+    # codex is a registered wrapper harness; dispatch reaches its compiler and runs.
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "codex", lambda project, global_, dest: cli.Plan())
+    monkeypatch.setattr("sys.argv", ["agedum", "--wrapper", "codex", "--", "codex", "hi"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    assert captured["command"] == ["codex", "hi"]
+
+
 def test_dry_run_aider_read_disposition(monkeypatch, capsys):
     # aider injects instructions via --read; --dry-run must label that disposition, not the
     # kimi --agent-file one (the shared extra_args path).

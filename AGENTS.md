@@ -3,7 +3,7 @@
 A Python CLI that drives any agent CLI from an agent-neutral source shape
 (`AGENTS.md` + `.agents/skills/`), compiling per harness and injecting it via a
 private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**,
-**Cline**, **reasonix**, **aider**, and **pi** harnesses at **project + global scope**.
+**Cline**, **reasonix**, **aider**, **pi**, and **codex** harnesses at **project + global scope**.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
@@ -104,10 +104,32 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   `pi "<text>"` (interactive); `--run` maps to `pi --print "<text>"`.
 
   [pi-subagents]: https://pi.dev/packages/pi-subagents
+- **codex** — the OpenAI [Codex CLI](https://github.com/openai/codex) (`@openai/codex`). Pure
+  path-discovery like opencode/cline/reasonix/pi: `compile_codex` leaves the project `AGENTS.md`
+  in place (codex walks work-dir→root for `AGENTS.md`), binds the global `AGENTS.md` (+ optional
+  `AGENTS.codex.md` overlay) to `~/.codex/AGENTS.md` (`$CODEX_HOME`-aware, `codex_config_dir()`),
+  and binds skills (`SKILL.codex.md` overlay) to `./.codex/skills/` (project) + `~/.codex/skills/`
+  (global). No `extra_args`. **Provider mode** (`_codex_env`) maps `model` → `-m`; the key reaches
+  codex by its conventional env-var name via the `requiredEnv` export (never argv). codex has **no
+  base-URL flag**, so a `baseUrl` is passed as `-c` overrides defining a `[model_providers.agedum]`
+  block (`base_url` + `env_key` = `secretEnv`; `wireApi` emitted only when set) selected with
+  `-c model_provider=agedum` — codex parses each `-c` value as TOML, so no file is generated for
+  the endpoint. Recent codex speaks **only the Responses API** (`wire_api = "chat"` removed Feb
+  2026), so a Chat-Completions endpoint (DeepSeek etc.) sets **`chatCompletions: true`**:
+  `_codex_env` emits `AGEDUM_CODEX_CHAT_UPSTREAM`, and at launch `cli.main._maybe_codex_proxy`
+  interposes a `ResponsesToChatProxy` (`proxy.py`, the `FoldProxy` sibling) — codex speaks
+  Responses to the proxy, which translates to/from `/chat/completions` upstream — rewriting the
+  `base_url` override to the proxy address. A `subagentModel` generates a codex custom-agent file
+  `~/.codex/agents/flash.toml` (the fast model) the primary can delegate to — codex has no global
+  subagent-model knob ([codex#19482]), so it is **inert unless explicitly invoked** (the most
+  faithful mapping codex's subagent model allows). `agedum --prompt` seeds `codex "<text>"`
+  (interactive); `--run` maps to `codex exec "<text>"`.
+
+  [codex#19482]: https://github.com/openai/codex/issues/19482
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional
   sibling `AGENTS.<harness>.md` (`AGENTS.claude.md` / `AGENTS.kimi.md` /
   `AGENTS.opencode.md` / `AGENTS.cline.md` / `AGENTS.reasonix.md` / `AGENTS.aider.md` /
-  `AGENTS.pi.md`) for the active harness — the instructions analogue of
+  `AGENTS.pi.md` / `AGENTS.codex.md`) for the active harness — the instructions analogue of
   `SKILL.<harness>.md`. `AGENTS.md` has no front-matter, so the merge is a body
   concatenation (base, blank line, overlay). **User scope only** — the project `AGENTS.md`
   takes no overlay (for kimi/opencode it is read natively, never injected).
@@ -174,9 +196,10 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   as wrapper `--sandbox`. This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
   The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
-  context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`); everything
-  after `--` is the child argv (some harnesses get extra flags appended — kimi's `--agent-file`,
-  aider's `--read` per scope; Claude, opencode, cline, reasonix, and pi are pure binds).
+  context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi` / `codex`);
+  everything after `--` is the child argv (some harnesses get extra flags appended — kimi's
+  `--agent-file`, aider's `--read` per scope; Claude, opencode, cline, reasonix, pi, and codex
+  are pure binds).
   `--sandbox` switches to **write-confinement** (read-only host; `--rw-dir DIR`, repeatable,
   adds a writable dir and implies `--sandbox`). `--dry-run` prints the injected virtual files
   (and, under `--sandbox`, the writable set) without running. Context and command are decoupled.
@@ -189,16 +212,21 @@ relative to the root, e.g. `claude/deepseek` (via `provider.list_providers` →
 resolve is listed with its error, never fatal.
 
 Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` /
-`compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` → a `Plan` of absolute binds **+ `extra_args`** for
+`compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` / `compile_codex` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a read-only host
 + writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored /
 `load_config` raw + `load_merged_config` resolving the `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
-per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the claude reverse proxies: `FoldProxy` for `foldSystemMessages` and `TranslateProxy` for `upstreamApi: openai-completions`, sharing one `_BaseProxyHandler` transport skeleton),
-`cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config` / `_run_wrapper` /
-`_run_list_providers`).
+per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (three localhost reverse
+proxies sharing one `_BaseProxyHandler` transport skeleton + `_LocalProxy` lifecycle: the claude
+`FoldProxy` (`foldSystemMessages`) and `TranslateProxy` (`upstreamApi: openai-completions`,
+Anthropic⇄OpenAI), and the codex `ResponsesToChatProxy` that translates the Responses API ⇄ Chat
+Completions for chat-only providers), `cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config`
+/ `_run_wrapper` / `_run_list_providers`; `_maybe_proxy` interposes the claude proxies via
+`ANTHROPIC_BASE_URL`, `_maybe_codex_proxy` interposes the codex proxy by rewriting the `base_url`
+override).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 

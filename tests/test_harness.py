@@ -7,9 +7,11 @@ from agedum.harness import (
     claude_config_dir,
     cline_config_dir,
     cline_global_agents_md,
+    codex_config_dir,
     compile_aider,
     compile_claude,
     compile_cline,
+    compile_codex,
     compile_kimi,
     compile_opencode,
     compile_pi,
@@ -925,6 +927,101 @@ def test_compile_pi_no_shadow_without_project_skills(tmp_path):
     plan = compile_pi(load_source(proj), None, dest)
 
     assert plan.safe_overrides == set()
+
+
+def test_compile_codex(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+    (sk / "SKILL.codex.md").write_text("---\nlicense: MIT\n---\ncodex note\n")
+
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "ghome" / ".config" / "agents" / "skills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert codex_config_dir() == home / ".codex"
+
+    project = load_source(proj)
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_codex(project, global_, dest)
+
+    targets = _targets(plan)
+    # codex is pure path-discovery — no extra args.
+    assert plan.extra_args == []
+
+    # Project AGENTS.md is read natively at ./AGENTS.md — never injected, but recorded.
+    assert proj / "AGENTS.md" not in targets
+    assert proj / "AGENTS.md" in plan.native_reads
+
+    # Global instructions -> ~/.codex/AGENTS.md (codex's user-scope rules file).
+    assert home / ".codex" / "AGENTS.md" in targets
+    assert _src_for(plan, home / ".codex" / "AGENTS.md").read_text() == "GLOBAL-INSTR\n"
+
+    # Project skills -> ./.codex/skills, with the SKILL.codex.md overlay merged in.
+    assert proj / ".codex" / "skills" in targets
+    pskill_md = (_src_for(plan, proj / ".codex" / "skills") / "pskill" / "SKILL.md").read_text()
+    assert "name: pskill" in pskill_md
+    assert "license: MIT" in pskill_md
+    assert "codex note" in pskill_md
+
+    # Global skills -> ~/.codex/skills.
+    assert home / ".codex" / "skills" in targets
+    assert (_src_for(plan, home / ".codex" / "skills") / "gskill" / "SKILL.md").exists()
+
+
+def test_compile_codex_project_only_injects_skills_not_instructions(tmp_path):
+    # No global scope: project AGENTS.md is native (no bind), only project skills bind.
+    proj = tmp_path / "proj"
+    sk = proj / ".agents" / "skills" / "pskill"
+    sk.mkdir(parents=True)
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    (sk / "SKILL.md").write_text("---\nname: pskill\ndescription: d\n---\nbody\n")
+
+    project = load_source(proj)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_codex(project, None, dest)
+
+    assert plan.extra_args == []
+    assert _targets(plan) == [proj / ".codex" / "skills"]
+
+
+def test_compile_codex_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-BASE\n")
+    (gconf / "AGENTS.codex.md").write_text("CODEX-EXTRA\n")
+    (gconf / "AGENTS.pi.md").write_text("PI-EXTRA\n")
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_codex(load_source(tmp_path / "noproj"), global_, dest)
+
+    merged = _src_for(plan, codex_config_dir() / "AGENTS.md").read_text()
+    assert "GLOBAL-BASE" in merged
+    assert "CODEX-EXTRA" in merged
+    assert "PI-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_codex_config_dir_honours_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "custom-codex"))
+    assert codex_config_dir() == tmp_path / "custom-codex"
 
 
 def test_build_bwrap_argv_emits_tmpfs_for_safe_overrides():

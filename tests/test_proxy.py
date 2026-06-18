@@ -12,12 +12,15 @@ from urllib.parse import urlsplit
 from agedum.proxy import (
     FoldProxy,
     OpenAIToAnthropicStream,
+    ResponsesToChatProxy,
     TranslateProxy,
     _FoldHandler,
     _QuietThreadingHTTPServer,
     anthropic_to_openai_request,
     fold_system_messages,
     openai_to_anthropic_response,
+    responses_to_chat_request,
+    translate_chat_stream,
 )
 
 # ---------------------------------------------------------------------------
@@ -1305,3 +1308,259 @@ def _parse_raw_sse(raw):
         data = json.loads(lines[1].split("data:", 1)[1].strip())
         events.append((event_type, data))
     return events
+
+
+# ---------------------------------------------------------------------------
+# Responses <-> Chat Completions translation (codex harness)
+# ---------------------------------------------------------------------------
+
+
+def _reader(data: bytes):
+    """A ``response.read(n)``-style callable over a fixed byte buffer."""
+    buffer = {"bytes": data}
+
+    def read(size):
+        chunk = buffer["bytes"][:size]
+        buffer["bytes"] = buffer["bytes"][size:]
+        return chunk
+
+    return read
+
+
+def _chat_sse(*chunks) -> bytes:
+    """A Chat Completions SSE byte stream from JSON chunk dicts plus a terminal ``[DONE]``."""
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    return (body + "data: [DONE]\n\n").encode()
+
+
+def _parse_responses_sse(frames: bytes) -> list:
+    """Parse Responses-API SSE frames into ``[(event_type, data_dict), ...]``."""
+    events = []
+    for block in frames.decode().split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        event_type = data = None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_type = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line[len("data:") :].strip())
+        events.append((event_type, data))
+    return events
+
+
+def test_responses_to_chat_request_instructions_and_input():
+    chat = responses_to_chat_request(
+        {"model": "m", "instructions": "be terse", "input": "hello", "max_output_tokens": 128}
+    )
+    assert chat["model"] == "m"
+    assert chat["stream"] is True
+    assert chat["stream_options"] == {"include_usage": True}
+    assert chat["messages"] == [
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert chat["max_tokens"] == 128
+
+
+def test_responses_to_chat_request_input_items_and_tools():
+    chat = responses_to_chat_request(
+        {
+            "instructions": "sys",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                },
+                {"type": "function_call", "call_id": "c1", "name": "run", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": "done"},
+                {"type": "reasoning", "summary": []},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "run",
+                    "description": "d",
+                    "parameters": {"type": "object"},
+                }
+            ],
+            "tool_choice": "auto",
+        }
+    )
+    assert [m["role"] for m in chat["messages"]] == ["system", "user", "assistant", "tool"]
+    assistant = chat["messages"][2]
+    assert assistant["tool_calls"][0]["id"] == "c1"
+    assert assistant["tool_calls"][0]["function"] == {"name": "run", "arguments": "{}"}
+    assert chat["messages"][3] == {"role": "tool", "tool_call_id": "c1", "content": "done"}
+    assert chat["tools"] == [
+        {
+            "type": "function",
+            "function": {"name": "run", "description": "d", "parameters": {"type": "object"}},
+        }
+    ]
+    assert chat["tool_choice"] == "auto"
+    # The reasoning item is dropped (no extra message).
+    assert len(chat["messages"]) == 4
+
+
+def test_translate_chat_stream_text():
+    blob = _chat_sse(
+        {"choices": [{"delta": {"content": "PO"}}]},
+        {"choices": [{"delta": {"content": "NG"}}]},
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        },
+    )
+    events = _parse_responses_sse(
+        b"".join(translate_chat_stream(_reader(blob), model="deepseek-v4-pro"))
+    )
+    types = [event for event, _ in events]
+    assert types[0] == "response.created"
+    assert types[-1] == "response.completed"
+    assert "response.output_item.added" in types
+    deltas = [data["delta"] for event, data in events if event == "response.output_text.delta"]
+    assert "".join(deltas) == "PONG"
+    done = next(data for event, data in events if event == "response.output_text.done")
+    assert done["text"] == "PONG"
+    completed = next(data for event, data in events if event == "response.completed")
+    assert completed["response"]["output"][0]["content"][0]["text"] == "PONG"
+    assert completed["response"]["usage"] == {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+    }
+
+
+def test_translate_chat_stream_tool_call():
+    blob = _chat_sse(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "run", "arguments": '{"cmd":'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"ls"}'}}]}}
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    events = _parse_responses_sse(b"".join(translate_chat_stream(_reader(blob), model="m")))
+    added = [
+        data
+        for event, data in events
+        if event == "response.output_item.added" and data["item"]["type"] == "function_call"
+    ]
+    assert added[0]["item"]["call_id"] == "call_1"
+    assert added[0]["item"]["name"] == "run"
+    done = next(data for event, data in events if event == "response.function_call_arguments.done")
+    assert done["arguments"] == '{"cmd":"ls"}'
+    completed = next(data for event, data in events if event == "response.completed")
+    function_item = completed["response"]["output"][0]
+    assert function_item["type"] == "function_call"
+    assert function_item["arguments"] == '{"cmd":"ls"}'
+
+
+class _FakeChatUpstream:
+    """Replies to ``POST /chat/completions`` with a fixed Chat Completions SSE stream."""
+
+    def __init__(self, chunks):
+        self.last_body = None
+        self.last_path = None
+        self._chunks = chunks
+        handler = _make_chat_handler(self)
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self):
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _make_chat_handler(state):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            state.last_body = json.loads(self.rfile.read(length))
+            state.last_path = self.path
+            body = (
+                b"".join(f"data: {json.dumps(chunk)}\n\n".encode() for chunk in state._chunks)
+                + b"data: [DONE]\n\n"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+def test_responses_proxy_translates_text_end_to_end():
+    chunks = [
+        {"choices": [{"delta": {"content": "PONG"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+    with _FakeChatUpstream(chunks) as upstream, ResponsesToChatProxy(upstream.base_url) as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/responses",
+            data=json.dumps(
+                {"model": "deepseek-v4-pro", "instructions": "sys", "input": "ping", "stream": True}
+            ).encode(),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer sk-x"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+            frames = response.read()
+
+    # The upstream received a translated Chat Completions request at /chat/completions.
+    assert upstream.last_path == "/chat/completions"
+    assert [m["role"] for m in upstream.last_body["messages"]] == ["system", "user"]
+    assert upstream.last_body["stream"] is True
+    # codex sees the Responses-API SSE sequence carrying the text.
+    events = _parse_responses_sse(frames)
+    types = [event for event, _ in events]
+    assert types[0] == "response.created"
+    assert types[-1] == "response.completed"
+    deltas = [data["delta"] for event, data in events if event == "response.output_text.delta"]
+    assert "".join(deltas) == "PONG"
+
+
+def test_responses_proxy_get_models_returns_empty_without_upstream():
+    # codex's GET /models metadata probe is answered locally with a valid empty list — never
+    # forwarded — so an unreachable upstream is irrelevant and codex gets a clean response.
+    with ResponsesToChatProxy("http://127.0.0.1:1/v1") as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/models?client_version=0.141.0", method="GET"
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+            assert json.loads(response.read()) == {"models": []}

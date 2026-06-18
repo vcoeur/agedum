@@ -68,6 +68,7 @@ flowchart LR
   agedum -->|"--wrapper reasonix"| rx["AGENTS.md (native) + .reasonix/skills/"]
   agedum -->|"--wrapper aider"| ai["AGENTS.md via --read (no skills)"]
   agedum -->|"--wrapper pi"| pi["AGENTS.md (native) + .pi/skills/"]
+  agedum -->|"--wrapper codex"| cx["AGENTS.md (native) + .codex/skills/"]
   cl --> ns["private mount namespace<br/>(bwrap)"]
   ki --> ns
   oc --> ns
@@ -75,7 +76,8 @@ flowchart LR
   rx --> ns
   ai --> ns
   pi --> ns
-  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix / aider / pi)"]
+  cx --> ns
+  ns --> cmd["your command<br/>(claude / kimi / opencode / cline / reasonix / aider / pi / codex)"]
 ```
 
 1. [Locate the source](source-shape.md) — project root + global config.
