@@ -273,6 +273,39 @@ def test_dry_run_after_provider_does_not_launch(monkeypatch, tmp_path, capsys):
     assert "ANTHROPIC_BASE_URL" in capsys.readouterr().out
 
 
+def test_dry_run_shows_translate_proxy(monkeypatch, tmp_path, capsys):
+    # An OpenAI-only claude config: --dry-run names the interposed translator and its upstream.
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "go.json").write_text(
+        json.dumps(
+            {
+                "harness": "claude",
+                "secretEnv": "OPENCODE_GO_API_KEY",
+                "config": {
+                    "baseUrl": "https://opencode.ai/zen/go",
+                    "authStyle": "apikey",
+                    "upstreamApi": "openai-completions",
+                    "model": "kimi-k2.7-code",
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENCODE_GO_API_KEY=tok\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "go", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "translate openai-completions → https://opencode.ai/zen/go" in out
+
+
 def test_env_flag_after_provider(monkeypatch, tmp_path, capsys):
     # --env is also recognised after the provider name.
     providers = tmp_path / "providers"

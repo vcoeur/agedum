@@ -503,6 +503,13 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
     if not base_url:
+        # A proxy option without a baseUrl has nothing to sit in front of — fail loudly
+        # rather than silently run vanilla Claude against the real Anthropic API.
+        if block.get("foldSystemMessages") is True or str(block.get("upstreamApi") or "").strip():
+            raise ProviderError(
+                "claude config sets a proxy option (foldSystemMessages / upstreamApi) but no "
+                "baseUrl for it to proxy"
+            )
         # Native Claude: no provider overrides (the all-empty config). Run bare.
         return {}, [], ["claude"], ()
     if not secret_env:
@@ -552,8 +559,29 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
     # Strict Anthropic-compat endpoints (e.g. DeepSeek's /anthropic) reject a `system`
     # role inside `messages[]`. This flag makes agedum's wrapper interpose a local proxy
     # that folds those entries into the top-level `system` field — see agedum.proxy.
-    if block.get("foldSystemMessages") is True:
+    fold = block.get("foldSystemMessages") is True
+
+    # An OpenAI-only upstream (a `/v1/chat/completions` surface with no working Anthropic
+    # `/v1/messages`) needs a translating proxy, not a folding one. `upstreamApi:
+    # "openai-completions"` turns it on; "anthropic-messages" (or unset) is today's no-op.
+    upstream_api = str(block.get("upstreamApi") or "").strip()
+    if upstream_api and upstream_api not in ("anthropic-messages", "openai-completions"):
+        raise ProviderError(
+            f"claude config has an unknown upstreamApi {upstream_api!r}; expected "
+            "'anthropic-messages' or 'openai-completions'"
+        )
+    translate = upstream_api == "openai-completions"
+    if translate and fold:
+        # The translator already produces a clean top-level `system`; folding is moot, and
+        # only one proxy can sit in front of ANTHROPIC_BASE_URL at a time.
+        raise ProviderError(
+            "claude config sets both `upstreamApi: openai-completions` and "
+            "`foldSystemMessages`; use one — the translator already folds the system prompt"
+        )
+    if fold:
         env["AGEDUM_FOLD_SYSTEM_MESSAGES"] = "1"
+    if translate:
+        env["AGEDUM_TRANSLATE_OPENAI"] = "1"
 
     # Defensive: never let a stray cloud-provider switch leak into the child.
     unset += [

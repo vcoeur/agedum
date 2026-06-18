@@ -196,7 +196,7 @@ appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a rea
 `load_config` raw + `load_merged_config` resolving the `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
-per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the `foldSystemMessages` reverse proxy),
+per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (the claude reverse proxies: `FoldProxy` for `foldSystemMessages` and `TranslateProxy` for `upstreamApi: openai-completions`, sharing one `_BaseProxyHandler` transport skeleton),
 `cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config` / `_run_wrapper` /
 `_run_list_providers`).
 
