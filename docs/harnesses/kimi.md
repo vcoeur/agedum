@@ -87,3 +87,41 @@ kimi reads its API token **from the environment**, so the key goes in `requiredE
 The config above launches `kimi --model kimi-k2 --thinking`, with `MOONSHOT_API_KEY` in the
 environment. `--prompt`/`--run` add `--prompt "<text>"` (and `--print` for `--run`) — see
 the [prompt-seeding table](../provider.md#prompt-seeding).
+
+### Custom endpoint — `baseUrl` { #custom-endpoint }
+
+kimi has **no base-URL flag**, and its config does **not** interpolate `$ENV` (so a key can't
+be referenced by name the way pi's `models.json` does). To run kimi against an arbitrary
+OpenAI-/Anthropic-compatible endpoint, set `baseUrl`: agedum then **generates a kimi config
+file** with one provider (named `agedum`) and one model, bakes the resolved key into it (masked
+in `--dry-run`, like opencode's `OPENCODE_CONFIG_CONTENT`), binds it into the namespace, and
+loads it with `--config-file`. Because `--config-file` *replaces* the default config, the
+generated doc is self-sufficient; kimi fills every other setting from its own defaults.
+
+```json
+{
+  "harness": "kimi",
+  "secretEnv": "OPENCODE_GO_API_KEY",
+  "config": {
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "providerType": "openai_legacy",
+    "model": "kimi-k2.7-code",
+    "contextWindow": 262144,
+    "thinking": true
+  }
+}
+```
+
+| `config` key | Generated config field | Default |
+|---|---|---|
+| `baseUrl` | `providers.agedum.base_url` (turns this mode on) | — |
+| `providerType` | `providers.agedum.type` | `openai_legacy` |
+| `model` | `models.<model>.model` + `default_model` (required) | — |
+| `contextWindow` | `models.<model>.max_context_size` | `262144` |
+| `capabilities` | `models.<model>.capabilities` | `["thinking"]` |
+| (`secretEnv` value) | `providers.agedum.api_key` (resolved key, baked in) | — |
+
+The above launches `kimi --config-file ~/.kimi/agedum-config.json --model kimi-k2.7-code
+--thinking`. `baseUrl` requires `model` + `secretEnv` and is mutually exclusive with
+`configInline`. `providerType` accepts any kimi provider type (`openai_legacy` for an OpenAI
+Chat Completions surface, `anthropic`, `kimi`, …).

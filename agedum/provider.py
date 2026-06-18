@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agedum.harness import Sandbox, codex_config_dir, pi_agent_dir
+from agedum.harness import Sandbox, codex_config_dir, kimi_config_dir, pi_agent_dir
 
 HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "codex")
 
@@ -512,6 +512,13 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
     if not base_url:
+        # A proxy option without a baseUrl has nothing to sit in front of — fail loudly
+        # rather than silently run vanilla Claude against the real Anthropic API.
+        if block.get("foldSystemMessages") is True or str(block.get("upstreamApi") or "").strip():
+            raise ProviderError(
+                "claude config sets a proxy option (foldSystemMessages / upstreamApi) but no "
+                "baseUrl for it to proxy"
+            )
         # Native Claude: no provider overrides (the all-empty config). Run bare.
         return {}, [], ["claude"], ()
     if not secret_env:
@@ -561,8 +568,29 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
     # Strict Anthropic-compat endpoints (e.g. DeepSeek's /anthropic) reject a `system`
     # role inside `messages[]`. This flag makes agedum's wrapper interpose a local proxy
     # that folds those entries into the top-level `system` field — see agedum.proxy.
-    if block.get("foldSystemMessages") is True:
+    fold = block.get("foldSystemMessages") is True
+
+    # An OpenAI-only upstream (a `/v1/chat/completions` surface with no working Anthropic
+    # `/v1/messages`) needs a translating proxy, not a folding one. `upstreamApi:
+    # "openai-completions"` turns it on; "anthropic-messages" (or unset) is today's no-op.
+    upstream_api = str(block.get("upstreamApi") or "").strip()
+    if upstream_api and upstream_api not in ("anthropic-messages", "openai-completions"):
+        raise ProviderError(
+            f"claude config has an unknown upstreamApi {upstream_api!r}; expected "
+            "'anthropic-messages' or 'openai-completions'"
+        )
+    translate = upstream_api == "openai-completions"
+    if translate and fold:
+        # The translator already produces a clean top-level `system`; folding is moot, and
+        # only one proxy can sit in front of ANTHROPIC_BASE_URL at a time.
+        raise ProviderError(
+            "claude config sets both `upstreamApi: openai-completions` and "
+            "`foldSystemMessages`; use one — the translator already folds the system prompt"
+        )
+    if fold:
         env["AGEDUM_FOLD_SYSTEM_MESSAGES"] = "1"
+    if translate:
+        env["AGEDUM_TRANSLATE_OPENAI"] = "1"
 
     # Defensive: never let a stray cloud-provider switch leak into the child.
     unset += [
@@ -574,11 +602,86 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
     return env, unset, ["claude"], ()
 
 
+# The provider name agedum assigns to a generated custom-endpoint kimi provider in the
+# injected kimi config. The user never types it — agedum points kimi at it via --config-file
+# and selects the model by its upstream id.
+KIMI_PROVIDER_NAME = "agedum"
+
+
+def _kimi_config_doc(
+    block: dict, base_url: str, model: str, secret_env: str, base_env: dict[str, str]
+) -> dict:
+    """Build a self-sufficient kimi config doc that points at a custom endpoint.
+
+    kimi's config does not interpolate ``$ENV`` and ``--config-file`` replaces the default
+    config, so the doc carries the resolved API key verbatim (masked in ``--dry-run``) plus a
+    single provider + model; kimi fills every other setting from its ``Config`` defaults.
+    """
+    provider_type = str(block.get("providerType") or "openai_legacy").strip() or "openai_legacy"
+    context_window = block.get("contextWindow")
+    max_context_size = (
+        int(context_window)
+        if isinstance(context_window, (int, float)) and int(context_window) > 0
+        else 262144
+    )
+    capabilities = block.get("capabilities")
+    model_capabilities = (
+        [str(capability) for capability in capabilities]
+        if isinstance(capabilities, list) and capabilities
+        else ["thinking"]
+    )
+    return {
+        "default_model": model,
+        "models": {
+            model: {
+                "provider": KIMI_PROVIDER_NAME,
+                "model": model,
+                "max_context_size": max_context_size,
+                "capabilities": model_capabilities,
+            }
+        },
+        "providers": {
+            KIMI_PROVIDER_NAME: {
+                "type": provider_type,
+                "base_url": base_url,
+                "api_key": base_env.get(secret_env, ""),
+            }
+        },
+    }
+
+
 def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # kimi's provider/model knobs are appended CLI flags, not env vars. The token
     # (secret_env) reaches the child via the required-env export in build_launch.
     command = ["kimi"]
     model = str(block.get("model") or "").strip()
+    base_url = str(block.get("baseUrl") or "").strip()
+    config_inline = str(block.get("configInline") or "").strip()
+    config_files: list[tuple[str, str, bool]] = []
+
+    if base_url:
+        # kimi has no --base-url flag and its config does not interpolate $ENV, so a custom
+        # OpenAI-/Anthropic-compatible endpoint becomes a generated kimi config (provider
+        # `agedum` + model) with the resolved key baked in — like opencode's
+        # OPENCODE_CONFIG_CONTENT — bound into the namespace and loaded via --config-file
+        # (which replaces the default config, so the generated doc is self-sufficient).
+        if config_inline:
+            raise ProviderError(
+                "kimi config sets both `baseUrl` and `configInline`; use one — `baseUrl` to "
+                "generate a provider config, `configInline` to pass a raw --config string"
+            )
+        if not model:
+            raise ProviderError(
+                "kimi config sets `baseUrl` but no `model`; set `model` to the upstream model "
+                "id served at that endpoint"
+            )
+        if not secret_env:
+            raise ProviderError("kimi config has a baseUrl but no secretEnv to supply the API key")
+        config_doc = _kimi_config_doc(block, base_url, model, secret_env, base_env)
+        config_path = str(kimi_config_dir() / "agedum-config.json")
+        config_files.append((config_path, json.dumps(config_doc, indent=2) + "\n", False))
+        command += ["--config-file", config_path]
+
     if model:
         command += ["--model", model]
     thinking = block.get("thinking")
@@ -588,10 +691,9 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
         command.append("--no-thinking")
     if block.get("plan") is True:
         command.append("--plan")
-    config_inline = str(block.get("configInline") or "").strip()
     if config_inline:
         command += ["--config", config_inline]
-    return {}, [], command, ()
+    return {}, [], command, tuple(config_files)
 
 
 def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:

@@ -11,10 +11,14 @@ from urllib.parse import urlsplit
 
 from agedum.proxy import (
     FoldProxy,
+    OpenAIToAnthropicStream,
     ResponsesToChatProxy,
+    TranslateProxy,
     _FoldHandler,
     _QuietThreadingHTTPServer,
+    anthropic_to_openai_request,
     fold_system_messages,
+    openai_to_anthropic_response,
     responses_to_chat_request,
     translate_chat_stream,
 )
@@ -455,6 +459,855 @@ def test_proxy_survives_upstream_drop_mid_stream():
             with urllib.request.urlopen(request, timeout=5) as response:
                 response.read()
     assert handler_errors == []
+
+
+# ---------------------------------------------------------------------------
+# anthropic_to_openai_request — pure request transform
+# ---------------------------------------------------------------------------
+
+
+def test_request_folds_system_to_leading_message():
+    out = anthropic_to_openai_request(
+        {
+            "system": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+    assert out["messages"][0] == {"role": "system", "content": "a\n\nb"}
+    assert out["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_request_string_system_and_model_override():
+    out = anthropic_to_openai_request(
+        {"system": "be brief", "model": "claude-sonnet", "messages": []}, model="kimi-k2.7-code"
+    )
+    assert out["messages"][0] == {"role": "system", "content": "be brief"}
+    assert out["model"] == "kimi-k2.7-code"  # config model wins over the body's
+
+
+def test_request_tool_use_and_tool_result_round_trip():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "let me check"},
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "get_weather",
+                            "input": {"city": "Paris"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call_1", "content": "sunny"}
+                    ],
+                },
+            ]
+        }
+    )
+    assistant = out["messages"][0]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == "let me check"
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    assert assistant["tool_calls"][0]["function"]["name"] == "get_weather"
+    # object input is serialised to a JSON arguments string
+    assert json.loads(assistant["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+    tool = out["messages"][1]
+    assert tool == {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+
+
+def test_request_tool_result_error_and_block_content():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "x",
+                            "is_error": True,
+                            "content": [{"type": "text", "text": "boom"}],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    assert out["messages"][0]["content"] == "[tool error] boom"
+
+
+def test_request_image_block_to_data_url():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is this"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "AAAA",
+                            },
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    parts = out["messages"][0]["content"]
+    assert parts[0] == {"type": "text", "text": "what is this"}
+    assert parts[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    }
+
+
+def test_request_strips_rejected_schema_formats():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [],
+            "tools": [
+                {
+                    "name": "fetch",
+                    "description": "get a url",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string", "format": "uri"}},
+                    },
+                }
+            ],
+        }
+    )
+    function = out["tools"][0]["function"]
+    assert function["name"] == "fetch"
+    assert "format" not in function["parameters"]["properties"]["url"]
+
+
+def test_request_tool_choice_and_effort_and_stream_options():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [],
+            "tools": [{"name": "t", "input_schema": {}}],
+            "tool_choice": {"type": "any"},
+            "stream": True,
+        },
+        reasoning_effort="high",
+    )
+    assert out["tool_choice"] == "required"  # any -> required
+    assert out["reasoning_effort"] == "high"
+    assert out["stream"] is True
+    assert out["stream_options"] == {"include_usage": True}
+
+
+def test_request_tool_choice_specific_tool():
+    out = anthropic_to_openai_request(
+        {
+            "messages": [],
+            "tools": [{"name": "t", "input_schema": {}}],
+            "tool_choice": {"type": "tool", "name": "t"},
+        }
+    )
+    assert out["tool_choice"] == {"type": "function", "function": {"name": "t"}}
+
+
+# ---------------------------------------------------------------------------
+# openai_to_anthropic_response — pure non-streaming response transform
+# ---------------------------------------------------------------------------
+
+
+def test_response_tolerates_null_choice():
+    # A backend emitting `choices: [null]` must not crash the transform with AttributeError.
+    out = openai_to_anthropic_response({"choices": [None]})
+    assert out["content"] == []
+    assert out["stop_reason"] == "end_turn"
+
+
+def test_response_text_and_usage():
+    out = openai_to_anthropic_response(
+        {
+            "id": "chatcmpl-1",
+            "model": "kimi",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 4},
+            },
+        }
+    )
+    assert out["type"] == "message"
+    assert out["role"] == "assistant"
+    assert out["content"] == [{"type": "text", "text": "hello"}]
+    assert out["stop_reason"] == "end_turn"
+    assert out["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 4,
+    }
+
+
+def test_response_tool_calls_to_tool_use():
+    out = openai_to_anthropic_response(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city":"Paris"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+    assert out["stop_reason"] == "tool_use"
+    assert out["content"] == [
+        {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris"}}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# OpenAIToAnthropicStream — OpenAI SSE -> Anthropic SSE state machine
+# ---------------------------------------------------------------------------
+
+
+def _drive(chunks):
+    """Feed OpenAI chunk dicts through the stream and return parsed Anthropic events."""
+    stream = OpenAIToAnthropicStream(model="kimi")
+    raw: list[bytes] = []
+    for chunk in chunks:
+        raw += stream.feed(chunk)
+    raw += stream.finish()
+    return _parse_events(raw)
+
+
+def _parse_events(byte_events):
+    parsed = []
+    for blob in byte_events:
+        lines = blob.decode().strip().split("\n")
+        event_type = lines[0].split("event:", 1)[1].strip()
+        data = json.loads(lines[1].split("data:", 1)[1].strip())
+        parsed.append((event_type, data))
+    return parsed
+
+
+def test_stream_text_only():
+    events = _drive(
+        [
+            {
+                "id": "c1",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}],
+            },
+            {"id": "c1", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "Hello"}}]},
+            {
+                "id": "c1",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {"content": " world"}}],
+            },
+            {
+                "id": "c1",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+            {
+                "id": "c1",
+                "model": "kimi",
+                "choices": [],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 2},
+            },
+        ]
+    )
+    types = [t for t, _ in events]
+    assert types == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    # message_start carries the upstream id/model
+    assert events[0][1]["message"]["id"] == "c1"
+    assert events[1][1] == {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    }
+    assert events[2][1]["delta"] == {"type": "text_delta", "text": "Hello"}
+    delta = events[5][1]
+    assert delta["delta"]["stop_reason"] == "end_turn"
+    assert delta["usage"] == {"output_tokens": 2, "input_tokens": 7}
+
+
+def test_stream_single_tool_call_streams_fragments():
+    events = _drive(
+        [
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": ""},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"arguments": '{"city":'}}]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"arguments": '"Paris"}'}}]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+    )
+    types = [t for t, _ in events]
+    assert types == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    start = events[1][1]
+    assert start["index"] == 0
+    assert start["content_block"] == {
+        "type": "tool_use",
+        "id": "call_1",
+        "name": "get_weather",
+        "input": {},
+    }
+    # arguments arrive as streamed fragments, not one buffered dump
+    assert events[2][1]["delta"] == {"type": "input_json_delta", "partial_json": '{"city":'}
+    assert events[3][1]["delta"] == {"type": "input_json_delta", "partial_json": '"Paris"}'}
+    assert events[5][1]["delta"]["stop_reason"] == "tool_use"
+
+
+def test_stream_text_then_tool_closes_text_first():
+    events = _drive(
+        [
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {"content": "checking"}}],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "t", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+    )
+    sequence = [(t, d.get("index")) for t, d in events]
+    assert sequence == [
+        ("message_start", None),
+        ("content_block_start", 0),  # text block at index 0
+        ("content_block_delta", 0),
+        ("content_block_stop", 0),  # text closed before the tool opens
+        ("content_block_start", 1),  # tool block at index 1
+        ("content_block_delta", 1),
+        ("content_block_stop", 1),
+        ("message_delta", None),
+        ("message_stop", None),
+    ]
+
+
+def test_stream_parallel_tool_calls_distinct_indices():
+    events = _drive(
+        [
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "a",
+                                    "type": "function",
+                                    "function": {"name": "foo", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "b",
+                                    "type": "function",
+                                    "function": {"name": "bar", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+            },
+        ]
+    )
+    starts = [d for t, d in events if t == "content_block_start"]
+    assert [s["index"] for s in starts] == [0, 1]
+    assert [s["content_block"]["name"] for s in starts] == ["foo", "bar"]
+    stops = sorted(d["index"] for t, d in events if t == "content_block_stop")
+    assert stops == [0, 1]
+    # Anthropic requires one open block at a time: each start is followed by its stop
+    # before the next start — i.e. the block-lifecycle events strictly alternate.
+    lifecycle = [
+        (t, d["index"]) for t, d in events if t in ("content_block_start", "content_block_stop")
+    ]
+    assert lifecycle == [
+        ("content_block_start", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_stop", 1),
+    ]
+
+
+def test_stream_text_resumes_in_new_block_after_tool():
+    # text -> tool -> text: the resumed text must open a fresh block, never a delta against
+    # the already-stopped first text block.
+    events = _drive(
+        [
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "before"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "t", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "after"}}]},
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    lifecycle = [
+        (t, d["index"]) for t, d in events if t in ("content_block_start", "content_block_stop")
+    ]
+    # three blocks: text(0), tool(1), text(2) — each closed before the next opens
+    assert lifecycle == [
+        ("content_block_start", 0),
+        ("content_block_stop", 0),
+        ("content_block_start", 1),
+        ("content_block_stop", 1),
+        ("content_block_start", 2),
+        ("content_block_stop", 2),
+    ]
+    # the resumed text delta targets the new block (index 2), not the stopped one (index 0)
+    after = [d for t, d in events if t == "content_block_delta" and d["index"] == 2]
+    assert after[0]["delta"] == {"type": "text_delta", "text": "after"}
+
+
+def test_stream_fabricates_output_tokens_when_usage_missing():
+    events = _drive(
+        [
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {"content": "Hello world"}}],
+            },
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+    )
+    delta = next(d for t, d in events if t == "message_delta")
+    # no usage chunk arrived -> chars/4 estimate over "Hello world" (11 chars)
+    assert delta["usage"]["output_tokens"] == 2
+    assert "input_tokens" not in delta["usage"]
+
+
+# ---------------------------------------------------------------------------
+# TranslateProxy — live end-to-end against a fake OpenAI upstream
+# ---------------------------------------------------------------------------
+
+
+class _FakeOpenAIState:
+    def __init__(self, response):
+        self.response = response  # ("json", obj) | ("error", (status, obj)) | ("stream", [chunks])
+        self.last_body = None
+        self.last_path = None
+        self.last_auth = None
+        self.last_accept_encoding = None
+
+
+class _FakeOpenAI:
+    """A fake OpenAI Chat Completions endpoint that records the request and scripts a reply."""
+
+    def __init__(self, state):
+        self.state = state
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _make_openai_handler(state))
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self):
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _make_openai_handler(state):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            state.last_body = json.loads(self.rfile.read(length)) if length else {}
+            state.last_path = self.path
+            state.last_auth = self.headers.get("Authorization")
+            state.last_accept_encoding = self.headers.get("Accept-Encoding")
+            kind, payload = state.response
+            if kind == "stream":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.end_headers()
+                for chunk in payload:
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+            status, obj = payload if kind == "error" else (200, payload)
+            body = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+def _anthropic_request(proxy, body, path="/v1/messages"):
+    return urllib.request.Request(
+        proxy.base_url + path,
+        data=json.dumps(body).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": "sk-123",
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+
+def test_translate_proxy_non_streaming_text():
+    state = _FakeOpenAIState(
+        response=(
+            "json",
+            {
+                "id": "chatcmpl-x",
+                "model": "kimi-k2.7-code",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hi there"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
+        )
+    )
+    with (
+        _FakeOpenAI(state) as upstream,
+        TranslateProxy(upstream.base_url, model="kimi-k2.7-code") as proxy,
+    ):
+        request = _anthropic_request(
+            proxy,
+            {
+                "model": "claude-x",
+                "system": "be brief",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"name": "t", "input_schema": {"type": "object"}}],
+            },
+        )
+        with urllib.request.urlopen(request) as response:
+            body = json.loads(response.read())
+    # request was rewritten to the OpenAI surface, auth swapped, model overridden
+    assert state.last_path == "/v1/chat/completions"
+    assert state.last_auth == "Bearer sk-123"
+    assert state.last_body["model"] == "kimi-k2.7-code"
+    assert state.last_body["messages"][0] == {"role": "system", "content": "be brief"}
+    assert state.last_body["tools"][0]["function"]["name"] == "t"
+    # identity encoding is forced — we re-parse the body, so a gzip response would break us
+    assert state.last_accept_encoding == "identity"
+    # response was translated back to Anthropic shape
+    assert body["type"] == "message"
+    assert body["content"] == [{"type": "text", "text": "hi there"}]
+    assert body["stop_reason"] == "end_turn"
+    assert body["usage"]["input_tokens"] == 5
+
+
+def test_translate_proxy_streaming_tool_call():
+    chunks = [
+        {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        {
+            "id": "c",
+            "model": "kimi",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": ""},
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+        {
+            "id": "c",
+            "model": "kimi",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "function": {"arguments": '{"city":"Paris"}'}}]
+                    },
+                }
+            ],
+        },
+        {
+            "id": "c",
+            "model": "kimi",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        },
+    ]
+    state = _FakeOpenAIState(response=("stream", chunks))
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url, model="kimi") as proxy:
+        request = _anthropic_request(
+            proxy, {"messages": [{"role": "user", "content": "weather in Paris?"}], "stream": True}
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.headers.get("Content-Type") == "text/event-stream"
+            raw = response.read()
+    # upstream saw a streaming OpenAI request
+    assert state.last_body["stream"] is True
+    assert state.last_body["stream_options"] == {"include_usage": True}
+    events = _parse_raw_sse(raw)
+    types = [t for t, _ in events]
+    assert types[0] == "message_start"
+    assert types[-1] == "message_stop"
+    start = next(d for t, d in events if t == "content_block_start")
+    assert start["content_block"]["type"] == "tool_use"
+    assert start["content_block"]["name"] == "get_weather"
+    fragments = "".join(
+        d["delta"]["partial_json"]
+        for t, d in events
+        if t == "content_block_delta" and d["delta"]["type"] == "input_json_delta"
+    )
+    assert json.loads(fragments) == {"city": "Paris"}
+
+
+def test_translate_proxy_translates_upstream_error():
+    state = _FakeOpenAIState(
+        response=(
+            "error",
+            (
+                400,
+                {"error": {"type": "invalid_request_error", "message": "function name is invalid"}},
+            ),
+        )
+    )
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:
+        request = _anthropic_request(proxy, {"messages": [{"role": "user", "content": "hi"}]})
+        try:
+            urllib.request.urlopen(request)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            body = json.loads(exc.read())
+            assert body["type"] == "error"
+            assert body["error"]["type"] == "invalid_request_error"
+            assert "function name is invalid" in body["error"]["message"]
+        else:
+            raise AssertionError("expected a 400 from the proxy")
+
+
+def test_translate_proxy_rewrites_path_with_query_string():
+    # Claude Code appends `?beta=true` to /v1/messages. The proxy must still rewrite to the
+    # OpenAI endpoint (dropping the query) — otherwise the request hits the upstream's broken
+    # Anthropic surface and auth fails.
+    state = _FakeOpenAIState(
+        response=(
+            "json",
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+    )
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url, model="kimi") as proxy:
+        request = _anthropic_request(
+            proxy, {"messages": [{"role": "user", "content": "hi"}]}, path="/v1/messages?beta=true"
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+    assert state.last_path == "/v1/chat/completions"
+
+
+def test_translate_proxy_count_tokens_short_circuits():
+    state = _FakeOpenAIState(response=("json", {}))  # must NOT be reached
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:
+        request = _anthropic_request(
+            proxy,
+            {"messages": [{"role": "user", "content": "hello world"}]},
+            path="/v1/messages/count_tokens",
+        )
+        with urllib.request.urlopen(request) as response:
+            body = json.loads(response.read())
+    assert body["input_tokens"] >= 1
+    assert state.last_path is None  # upstream was never contacted
+
+
+def _parse_raw_sse(raw):
+    events = []
+    for blob in raw.decode().split("\n\n"):
+        blob = blob.strip()
+        if not blob:
+            continue
+        lines = blob.split("\n")
+        event_type = lines[0].split("event:", 1)[1].strip()
+        data = json.loads(lines[1].split("data:", 1)[1].strip())
+        events.append((event_type, data))
+    return events
 
 
 # ---------------------------------------------------------------------------

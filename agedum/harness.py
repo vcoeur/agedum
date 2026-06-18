@@ -372,9 +372,15 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
         agent_file = dest / "agent.yaml"
         agent_file.parent.mkdir(parents=True, exist_ok=True)
         agent_file.write_text(_kimi_agent_file_yaml(instructions))
-        plan.extra_args += ["--agent-file", str(agent_file)]
+        # Bind the agent-file to a stable ~/.kimi path (like the skills binds) and pass that
+        # to --agent-file, rather than the dest path directly: under write-confinement the
+        # sandbox replaces /tmp with a private tmpfs, which would hide an agent-file referenced
+        # at its dest (/tmp/agedum-…) path. The bind makes it visible regardless.
+        target = kimi_config_dir() / "agedum-agent.yaml"
+        plan.binds.append((agent_file, target))
+        plan.extra_args += ["--agent-file", str(target)]
         if global_ is not None and global_.agents_md is not None:
-            plan.origins[agent_file] = str(global_.agents_md)
+            plan.origins[target] = str(global_.agents_md)
 
     # Global skills -> ~/.kimi/skills (read by default; merge_all_available_skills).
     if global_ is not None and global_.skills_dir is not None:

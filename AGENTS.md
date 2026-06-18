@@ -219,11 +219,14 @@ appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a rea
 `load_config` raw + `load_merged_config` resolving the `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
-per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (two localhost reverse
-proxies: the claude `foldSystemMessages` `FoldProxy` and the codex `ResponsesToChatProxy` that
-translates the Responses API ↔ Chat Completions), `cli/main.py` (parse + `_COMPILERS` dispatch +
-`_run_config` / `_run_wrapper` / `_run_list_providers`; `_maybe_fold_proxy` / `_maybe_codex_proxy`
-interpose the proxies).
+per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (three localhost reverse
+proxies sharing one `_BaseProxyHandler` transport skeleton + `_LocalProxy` lifecycle: the claude
+`FoldProxy` (`foldSystemMessages`) and `TranslateProxy` (`upstreamApi: openai-completions`,
+Anthropic⇄OpenAI), and the codex `ResponsesToChatProxy` that translates the Responses API ⇄ Chat
+Completions for chat-only providers), `cli/main.py` (parse + `_COMPILERS` dispatch + `_run_config`
+/ `_run_wrapper` / `_run_list_providers`; `_maybe_proxy` interposes the claude proxies via
+`ANTHROPIC_BASE_URL`, `_maybe_codex_proxy` interposes the codex proxy by rewriting the `base_url`
+override).
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 

@@ -163,7 +163,10 @@ def test_compile_kimi(tmp_path, monkeypatch):
     # Instructions -> --agent-file holds ONLY the global AGENTS.md. The project
     # AGENTS.md is read natively by kimi (./AGENTS.md), so it is NOT injected here.
     assert "--agent-file" in plan.extra_args
-    yaml_text = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1]).read_text()
+    # The agent-file is bound to a stable ~/.kimi target; its content lives at the bind source.
+    agent_file_target = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1])
+    assert agent_file_target == home / ".kimi" / "agedum-agent.yaml"
+    yaml_text = _src_for(plan, agent_file_target).read_text()
     assert "ROLE_ADDITIONAL:" in yaml_text
     assert "GLOBAL-INSTR" in yaml_text
     assert "PROJECT-INSTR" not in yaml_text
@@ -317,7 +320,8 @@ def test_compile_kimi_global_agents_harness_overlay_merged(tmp_path, monkeypatch
     dest.mkdir()
     plan = compile_kimi(load_source(tmp_path / "noproj"), global_, dest)
 
-    yaml_text = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1]).read_text()
+    agent_file_target = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1])
+    yaml_text = _src_for(plan, agent_file_target).read_text()
     assert "GLOBAL-BASE" in yaml_text
     assert "KIMI-EXTRA" in yaml_text
     assert "CLAUDE-EXTRA" not in yaml_text  # wrong-harness overlay ignored

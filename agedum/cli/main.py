@@ -297,26 +297,55 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print(f"env file   {_abs_display(env_path)}")
     print()
     _print_environment(launch)
+    _print_proxy(launch)
     _print_config_files(launch)
     extra_args = _print_plan_sections(launch.harness, launch.sandbox)
     _print_command(command, extra_args, _secret_values(launch))
 
 
+def _print_proxy(launch) -> None:
+    """Show the local proxy interposed in front of the harness's endpoint, if any.
+
+    The env table alone doesn't make it obvious that the harness will talk to a localhost
+    address rather than the configured ``baseUrl``, so name the proxy and its real upstream.
+    """
+    codex_upstream = launch.env.get("AGEDUM_CODEX_CHAT_UPSTREAM")
+    if codex_upstream:
+        print("proxy")
+        print(f"  responses→chat-completions → {codex_upstream}")
+        print()
+        return
+    upstream = launch.env.get("ANTHROPIC_BASE_URL")
+    if not upstream:
+        return
+    if launch.env.get("AGEDUM_TRANSLATE_OPENAI") == "1":
+        print("proxy")
+        print(f"  translate openai-completions → {upstream}")
+        print()
+    elif launch.env.get("AGEDUM_FOLD_SYSTEM_MESSAGES") == "1":
+        print("proxy")
+        print(f"  fold-system-messages → {upstream}")
+        print()
+
+
 def _print_config_files(launch) -> None:
     """Show any agedum-generated config files (reasonix's ``reasonix.toml``, pi's user-scope
-    ``models.json`` / ``settings.json``).
+    ``models.json`` / ``settings.json``, kimi's ``--config-file``).
 
-    Each is bound inside the namespace at its target (project-root-relative or absolute). The
-    content carries no secret value — keys are referenced by env-var name — so it is printed
-    verbatim; a merged file shows the agedum fragment with a note.
+    Each is bound inside the namespace at its target (project-root-relative or absolute). Most
+    content references keys by env-var name, but some endpoints can't (kimi's config does not
+    interpolate ``$ENV``, so its api_key is baked in verbatim), so secret values are redacted
+    here just as they are in the environment and command output; a merged file shows the agedum
+    fragment with a note.
     """
     if not launch.config_files:
         return
+    secret_values = _secret_values(launch)
     print("generated config files")
     for target, content, merge_json in launch.config_files:
         note = "   (merged onto any existing file)" if merge_json else ""
         print(f"  {target}{note}")
-        for line in content.splitlines():
+        for line in _redact(content, secret_values).splitlines():
             print(f"    {line}")
     print()
 
@@ -591,7 +620,7 @@ def _run(
     try:
         plan = _COMPILERS[mode](project, global_, dest)
         _inject_config_files(plan, project.root, dest, config_files)
-        with _maybe_fold_proxy(mode), _maybe_codex_proxy(mode, command) as run_command:
+        with _maybe_proxy(mode), _maybe_codex_proxy(mode, command) as run_command:
             return run_virtualfs(
                 project.root, plan, run_command, close_stdin=close_stdin, sandbox=sandbox
             )
@@ -631,23 +660,41 @@ def _inject_config_files(
 
 
 @contextmanager
-def _maybe_fold_proxy(mode: str) -> Iterator[None]:
-    """Interpose the system-role fold proxy when the provider opted in.
+def _maybe_proxy(mode: str) -> Iterator[None]:
+    """Interpose a local proxy in front of ``ANTHROPIC_BASE_URL`` when the provider opted in.
 
-    Enabled by ``AGEDUM_FOLD_SYSTEM_MESSAGES=1`` (set by a provider config's
-    ``foldSystemMessages`` flag) for the claude harness. The child's
-    ``ANTHROPIC_BASE_URL`` is repointed at a local proxy that folds ``system``-role
-    messages into the top-level ``system`` field before forwarding to the real upstream.
-    A no-op otherwise.
+    Two mutually-exclusive proxies, both claude-only and both repointing the child's
+    ``ANTHROPIC_BASE_URL`` at a localhost address for the duration of the wrapped command:
+
+    * ``AGEDUM_FOLD_SYSTEM_MESSAGES=1`` (config ``foldSystemMessages``) → a ``FoldProxy``
+      that folds ``system``-role messages into the top-level ``system`` field.
+    * ``AGEDUM_TRANSLATE_OPENAI=1`` (config ``upstreamApi: openai-completions``) → a
+      ``TranslateProxy`` that translates Anthropic⇄OpenAI so Claude Code can drive an
+      OpenAI ``/v1/chat/completions`` upstream.
+
+    A no-op for other harnesses and when neither flag is set.
     """
     upstream = os.environ.get("ANTHROPIC_BASE_URL", "")
-    if mode != "claude" or os.environ.get("AGEDUM_FOLD_SYSTEM_MESSAGES") != "1" or not upstream:
+    translate = os.environ.get("AGEDUM_TRANSLATE_OPENAI") == "1"
+    fold = os.environ.get("AGEDUM_FOLD_SYSTEM_MESSAGES") == "1"
+    if mode != "claude" or not upstream or not (translate or fold):
         yield
         return
 
-    from agedum.proxy import FoldProxy
+    if translate:
+        from agedum.proxy import TranslateProxy
 
-    with FoldProxy(upstream) as proxy:
+        proxy = TranslateProxy(
+            upstream,
+            model=os.environ.get("ANTHROPIC_MODEL", ""),
+            reasoning_effort=os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", ""),
+        )
+    else:
+        from agedum.proxy import FoldProxy
+
+        proxy = FoldProxy(upstream)
+
+    with proxy:
         os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
         try:
             yield
