@@ -1283,6 +1283,66 @@ def test_translate_proxy_rewrites_path_with_query_string():
     assert state.last_path == "/v1/chat/completions"
 
 
+def _ok_json_state():
+    return _FakeOpenAIState(
+        response=(
+            "json",
+            {
+                "id": "c",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+    )
+
+
+def test_translate_proxy_config_key_overrides_stale_client_auth():
+    # Claude Code can send a good x-api-key AND a stale Authorization (a cached OAuth token).
+    # The config-resolved key must win, or the wrong token is forwarded and the upstream 401s.
+    state = _ok_json_state()
+    with (
+        _FakeOpenAI(state) as upstream,
+        TranslateProxy(upstream.base_url, api_key="sk-config") as proxy,
+    ):
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": "sk-client",
+                "Authorization": "Bearer sk-stale-oauth",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+    assert state.last_auth == "Bearer sk-config"
+
+
+def test_translate_proxy_falls_back_to_client_key_without_config_key():
+    # With no configured key, relay the client's x-api-key (and never the stale Authorization).
+    state = _ok_json_state()
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:
+        request = urllib.request.Request(
+            proxy.base_url + "/v1/messages",
+            data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": "sk-client",
+                "Authorization": "Bearer sk-stale-oauth",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+    assert state.last_auth == "Bearer sk-client"
+
+
 def test_translate_proxy_count_tokens_short_circuits():
     state = _FakeOpenAIState(response=("json", {}))  # must NOT be reached
     with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:

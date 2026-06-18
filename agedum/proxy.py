@@ -897,6 +897,7 @@ class _TranslateHandler(_BaseProxyHandler):
 
     model = ""
     reasoning_effort = ""
+    api_key = ""
 
     def short_circuit(self, path: str, raw: bytes) -> dict | None:
         if not path.split("?", 1)[0].rstrip("/").endswith("/count_tokens"):
@@ -932,15 +933,17 @@ class _TranslateHandler(_BaseProxyHandler):
         return json.dumps(translated, separators=(",", ":")).encode("utf-8")
 
     def _translate_headers(self, headers: dict[str, str]) -> dict[str, str]:
-        """Drop Anthropic-only auth/version headers; carry the key as a Bearer token."""
+        """Drop Anthropic-only auth/version headers; carry the resolved key as a Bearer token."""
         out: dict[str, str] = {}
-        token = ""
+        incoming = ""
         for name, value in headers.items():
             lowered = name.lower()
             if lowered == "x-api-key":
-                token = value
+                incoming = value or incoming
             elif lowered == "authorization":
-                token = value[7:].strip() if value.lower().startswith("bearer ") else value
+                # Only a fallback (see below); never let it override an x-api-key.
+                if not incoming:
+                    incoming = value[7:].strip() if value.lower().startswith("bearer ") else value
             elif lowered in ("anthropic-version", "anthropic-beta"):
                 continue
             elif lowered == "accept-encoding":
@@ -950,6 +953,11 @@ class _TranslateHandler(_BaseProxyHandler):
                 continue
             else:
                 out[name] = value
+        # Prefer the key agedum resolved from the config. Claude Code can send BOTH an
+        # x-api-key and a stale Authorization (a cached OAuth token in ~/.claude); relaying
+        # whichever it sent last would forward the wrong one and 401. The config key is
+        # authoritative; the incoming header is only a fallback when no key was configured.
+        token = self.api_key or incoming
         if token:
             out["Authorization"] = f"Bearer {token}"
         out["Content-Type"] = "application/json"
@@ -1080,10 +1088,14 @@ class TranslateProxy(_LocalProxy):
 
     Use as a context manager; :attr:`base_url` is the address to point
     ``ANTHROPIC_BASE_URL`` at while the ``with`` block is open. ``model`` overrides the
-    request model with the upstream's id; ``reasoning_effort`` is injected when set.
+    request model with the upstream's id; ``reasoning_effort`` is injected when set;
+    ``api_key`` is the resolved upstream key, sent as ``Authorization: Bearer`` (authoritative
+    over whatever auth headers the client sends).
     """
 
-    def __init__(self, upstream: str, *, model: str = "", reasoning_effort: str = "") -> None:
+    def __init__(
+        self, upstream: str, *, model: str = "", reasoning_effort: str = "", api_key: str = ""
+    ) -> None:
         super().__init__(
             type(
                 "_BoundTranslateHandler",
@@ -1092,6 +1104,7 @@ class TranslateProxy(_LocalProxy):
                     "upstream": upstream,
                     "model": model or "",
                     "reasoning_effort": reasoning_effort or "",
+                    "api_key": api_key or "",
                 },
             )
         )

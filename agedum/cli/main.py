@@ -688,6 +688,11 @@ def _maybe_proxy(mode: str) -> Iterator[None]:
             upstream,
             model=os.environ.get("ANTHROPIC_MODEL", ""),
             reasoning_effort=os.environ.get("CLAUDE_CODE_EFFORT_LEVEL", ""),
+            # The key agedum resolved from the config (apikey or bearer style); the proxy
+            # sends it as Bearer, ignoring any stale auth header Claude Code may also emit.
+            api_key=os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or "",
         )
     else:
         from agedum.proxy import FoldProxy
