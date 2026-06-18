@@ -301,19 +301,22 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
 
 def _print_config_files(launch) -> None:
     """Show any agedum-generated config files (reasonix's ``reasonix.toml``, pi's user-scope
-    ``models.json`` / ``settings.json``).
+    ``models.json`` / ``settings.json``, kimi's ``--config-file``).
 
-    Each is bound inside the namespace at its target (project-root-relative or absolute). The
-    content carries no secret value — keys are referenced by env-var name — so it is printed
-    verbatim; a merged file shows the agedum fragment with a note.
+    Each is bound inside the namespace at its target (project-root-relative or absolute). Most
+    content references keys by env-var name, but some endpoints can't (kimi's config does not
+    interpolate ``$ENV``, so its api_key is baked in verbatim), so secret values are redacted
+    here just as they are in the environment and command output; a merged file shows the agedum
+    fragment with a note.
     """
     if not launch.config_files:
         return
+    secret_values = _secret_values(launch)
     print("generated config files")
     for target, content, merge_json in launch.config_files:
         note = "   (merged onto any existing file)" if merge_json else ""
         print(f"  {target}{note}")
-        for line in content.splitlines():
+        for line in _redact(content, secret_values).splitlines():
             print(f"    {line}")
     print()
 

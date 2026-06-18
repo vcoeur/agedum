@@ -322,6 +322,84 @@ def test_kimi_native_empty_config():
     assert launch.env == {}
 
 
+def test_kimi_base_url_generates_config_file():
+    config_path = str(Path.home() / ".kimi" / "agedum-config.json")
+    launch = build_launch(
+        {
+            "harness": "kimi",
+            "secretEnv": "OPENCODE_GO_API_KEY",
+            "config": {
+                "baseUrl": "https://opencode.ai/zen/go/v1",
+                "model": "kimi-k2.7-code",
+                "thinking": True,
+            },
+        },
+        base_env={"OPENCODE_GO_API_KEY": "sk-go"},
+    )
+    assert launch.command == [
+        "kimi",
+        "--config-file",
+        config_path,
+        "--model",
+        "kimi-k2.7-code",
+        "--thinking",
+    ]
+    assert len(launch.config_files) == 1
+    target, content, merge_json = launch.config_files[0]
+    assert target == config_path
+    assert merge_json is False
+    doc = json.loads(content)
+    assert doc["default_model"] == "kimi-k2.7-code"
+    assert doc["models"]["kimi-k2.7-code"]["provider"] == "agedum"
+    assert doc["models"]["kimi-k2.7-code"]["max_context_size"] == 262144
+    provider = doc["providers"]["agedum"]
+    assert provider["type"] == "openai_legacy"
+    assert provider["base_url"] == "https://opencode.ai/zen/go/v1"
+    assert provider["api_key"] == "sk-go"  # resolved key baked in; masked in --dry-run
+
+
+def test_kimi_base_url_requires_model():
+    with pytest.raises(ProviderError, match="no `model`"):
+        build_launch(
+            {
+                "harness": "kimi",
+                "secretEnv": "OPENCODE_GO_API_KEY",
+                "config": {"baseUrl": "https://opencode.ai/zen/go/v1"},
+            },
+            base_env={"OPENCODE_GO_API_KEY": "sk-go"},
+        )
+
+
+def test_kimi_base_url_requires_secret_env():
+    with pytest.raises(ProviderError, match="secretEnv"):
+        build_launch(
+            {
+                "harness": "kimi",
+                "config": {
+                    "baseUrl": "https://opencode.ai/zen/go/v1",
+                    "model": "kimi-k2.7-code",
+                },
+            },
+            base_env={},
+        )
+
+
+def test_kimi_base_url_rejects_config_inline():
+    with pytest.raises(ProviderError, match="configInline"):
+        build_launch(
+            {
+                "harness": "kimi",
+                "secretEnv": "OPENCODE_GO_API_KEY",
+                "config": {
+                    "baseUrl": "https://opencode.ai/zen/go/v1",
+                    "model": "kimi-k2.7-code",
+                    "configInline": "default_thinking=true",
+                },
+            },
+            base_env={"OPENCODE_GO_API_KEY": "sk-go"},
+        )
+
+
 # --- opencode env mapping ---
 
 
