@@ -35,6 +35,7 @@ the config envelope, prompt-seeding, and `--dry-run`. The **`config` block is pe
 | reasonix | [recipe + mapping](harnesses/reasonix.md#provider-config) |
 | aider | [recipe + mapping](harnesses/aider.md#provider-config) |
 | pi | [recipe + mapping](harnesses/pi.md#provider-config) |
+| codex | [recipe + mapping](harnesses/codex.md#provider-config) |
 
 ## Resolving the provider
 
@@ -84,8 +85,8 @@ The config is the condash-style agent envelope:
 
 | Field | Meaning |
 |---|---|
-| `harness` | `claude`, `kimi`, `opencode`, `cline`, `reasonix`, `aider`, or `pi`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
-| `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` / `reasonix` / `aider` / `pi` pass it through under its own name (reasonix reads it via the provider's `api_key_env`, aider via litellm, pi by the conventional var name or a `$VAR` reference in a generated `models.json`); `cline` passes it as `--key`. |
+| `harness` | `claude`, `kimi`, `opencode`, `cline`, `reasonix`, `aider`, `pi`, or `codex`. Selects the translation **and** the harness to launch; read from the file (there is no `--harness` flag). |
+| `secretEnv` | The env var holding the API token. Per harness: `claude` maps it to `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`; `kimi` / `opencode` / `reasonix` / `aider` / `pi` / `codex` pass it through under its own name (reasonix reads it via the provider's `api_key_env`, aider via litellm, pi by the conventional var name or a `$VAR` reference in a generated `models.json`, codex by the provider's `env_key`); `cline` passes it as `--key`. |
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so a harness that reads it from the environment sees it. |
 | `config` | The per-harness option block — see the harness page table above. |
 | `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
@@ -177,6 +178,7 @@ agedum maps the flag to the harness named in the config:
 | reasonix | *(unsupported — fail-loud)* | `reasonix run "<text>"` |
 | aider | *(unsupported — fail-loud)* | `aider --message "<text>"` |
 | pi | positional prompt: `pi "<text>"` | `pi --print "<text>"` |
+| codex | positional prompt: `codex "<text>"` | `codex exec "<text>"` |
 
 For cline the prompt is a positional argument either way; `--tui` is what opens the
 interactive TUI (seeded with the prompt), and a bare positional runs the task once in act

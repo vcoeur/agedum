@@ -31,8 +31,8 @@ agedum --wrapper cline    -- cline task "…"    # render for Cline, run cline
 The invocation has two halves split by a literal `--`:
 
 - **before `--`** — `--wrapper <harness>` picks the **format** to compile to
-  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi`), plus the optional
-  `--dry-run`.
+  (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi` / `codex`), plus the
+  optional `--dry-run`.
 - **after `--`** — the **command**, run verbatim, including its own binary and flags.
   agedum does not parse or rewrite it (a harness may get extra flags *appended* — see its
   page). `--wrapper=claude` is also accepted; an unknown harness or option is an error.
@@ -73,6 +73,10 @@ harness page documents:
 | kimi | [details](harnesses/kimi.md#wrapper-resolution) | [details](harnesses/kimi.md#provider-config) |
 | opencode | [details](harnesses/opencode.md#wrapper-resolution) | [details](harnesses/opencode.md#provider-config) |
 | Cline | [details](harnesses/cline.md#wrapper-resolution) | [details](harnesses/cline.md#provider-config) |
+| reasonix | [details](harnesses/reasonix.md#wrapper-resolution) | [details](harnesses/reasonix.md#provider-config) |
+| aider | [details](harnesses/aider.md#wrapper-resolution) | [details](harnesses/aider.md#provider-config) |
+| pi | [details](harnesses/pi.md#wrapper-resolution) | [details](harnesses/pi.md#provider-config) |
+| codex | [details](harnesses/codex.md#wrapper-resolution) | [details](harnesses/codex.md#provider-config) |
 
 ## Inspect without running — `--dry-run` { #dry-run }
 

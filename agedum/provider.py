@@ -22,9 +22,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agedum.harness import Sandbox, pi_agent_dir
+from agedum.harness import Sandbox, codex_config_dir, pi_agent_dir
 
-HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi")
+HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "codex")
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
@@ -362,6 +362,7 @@ def build_launch(config: dict, base_env: dict[str, str], *, label: str | None = 
         "reasonix": _reasonix_env,
         "aider": _aider_env,
         "pi": _pi_env,
+        "codex": _codex_env,
     }
     extra, unset, command, config_files = builders[harness](block, secret_env, base_env)
     env.update(extra)
@@ -489,6 +490,14 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
         # non-interactive (process-and-exit). Text stays last so pi reads it as the positional.
         mode_flags = [] if interactive else ["--print"]
         return [binary, *base_flags, *rest, *mode_flags, text]
+    if harness == "codex":
+        # codex takes a positional prompt to seed an interactive session; the `exec`
+        # subcommand runs it once non-interactively and exits. `exec` must lead, before the
+        # -m/-c flags and the prompt (`codex "<text>"` vs `codex exec "<text>"`), the opencode
+        # `run` shape. base_flags are codex's -m/-c provider flags from _codex_env.
+        if interactive:
+            return [binary, *base_flags, *rest, text]
+        return [binary, "exec", *base_flags, *rest, text]
     raise ProviderError(
         f"harness {harness!r} has no known prompt-seeding flags; "
         "agedum --prompt/--run is not supported for it"
@@ -1329,3 +1338,85 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+# The provider id agedum assigns to a custom-endpoint codex provider, passed via
+# `-c model_provider=…` / `-c model_providers.<id>.…`. Must not collide with codex's reserved
+# built-in ids (openai / ollama / lmstudio / amazon-bedrock); the user never types it.
+CODEX_PROVIDER_NAME = "agedum"
+
+
+def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
+    # codex selects its model and provider from CLI flags, so an endpoint is passed via
+    # repeatable `-c key=value` overrides (codex parses each value as TOML), winning over
+    # ~/.codex/config.toml. The API key reaches codex by its conventional env-var name (the
+    # provider's `secretEnv`, referenced as the provider's `env_key`) via the required-env
+    # export in build_launch — never written to a file or argv.
+    env: dict[str, str] = {}
+    command = ["codex"]
+    model = str(block.get("model") or "").strip()
+    base_url = str(block.get("baseUrl") or "").strip()
+    # Recent codex has REMOVED Chat Completions support (`wire_api = "chat"` is rejected); it
+    # speaks only the Responses API. `chatCompletions: true` declares the endpoint is
+    # Chat-Completions-only (e.g. DeepSeek direct), so agedum interposes a Responses↔Chat
+    # translation proxy at launch (AGEDUM_CODEX_CHAT_UPSTREAM signals the CLI; see
+    # cli.main._maybe_codex_proxy). codex then speaks Responses to the proxy — no wire_api
+    # override — and the `base_url` below is rewritten to the proxy address at launch.
+    chat_completions = block.get("chatCompletions") is True
+
+    if base_url:
+        # A custom endpoint becomes a provider named `agedum`, selected with
+        # `-c model_provider=agedum`. The key is referenced by env_key NAME, never its value.
+        overrides = [
+            ("model_provider", CODEX_PROVIDER_NAME),
+            (f"model_providers.{CODEX_PROVIDER_NAME}.name", CODEX_PROVIDER_NAME),
+            (f"model_providers.{CODEX_PROVIDER_NAME}.base_url", base_url),
+        ]
+        if chat_completions:
+            env["AGEDUM_CODEX_CHAT_UPSTREAM"] = base_url
+        else:
+            # A real Responses endpoint: emit wire_api only when explicitly set (else codex's
+            # own default applies).
+            wire_api = str(block.get("wireApi") or "").strip()
+            if wire_api:
+                overrides.append((f"model_providers.{CODEX_PROVIDER_NAME}.wire_api", wire_api))
+        if secret_env:
+            overrides.append((f"model_providers.{CODEX_PROVIDER_NAME}.env_key", secret_env))
+        for key, value in overrides:
+            command += ["-c", f'{key}="{_toml_escape(value)}"']
+
+    if model:
+        command += ["-m", model]
+
+    # `subagentModel` has no codex flag: codex routes nothing to a fast model globally
+    # (openai/codex#19482), so agedum generates a custom-agent file the primary can delegate
+    # to — ~/.codex/agents/flash.toml running the fast model. It is INERT unless the primary
+    # is asked to spawn it (codex spawns subagents only on explicit request); see
+    # docs/harnesses/codex.md.
+    config_files: list[tuple[str, str, bool]] = []
+    subagent_model = str(block.get("subagentModel") or "").strip()
+    if subagent_model:
+        target = str(codex_config_dir() / "agents" / "flash.toml")
+        config_files.append((target, _codex_flash_agent_toml(subagent_model), False))
+
+    return env, [], command, tuple(config_files)
+
+
+def _codex_flash_agent_toml(model: str) -> str:
+    """A codex custom-agent definition (``~/.codex/agents/flash.toml``) the primary can delegate
+    to: a fast, low-cost worker running ``model``.
+
+    codex custom agents are standalone TOML files keyed by ``name``; ``description`` and
+    ``developer_instructions`` are required, ``model`` overrides the parent session's model.
+    The ``model`` id is the only dynamic value (escaped); the rest is a fixed template.
+    """
+    return (
+        'name = "flash"\n'
+        'description = "Fast, low-cost worker for routine, well-scoped subtasks. '
+        'Delegate mechanical work here to keep the primary model free for harder reasoning."\n'
+        'developer_instructions = """\n'
+        "You are a fast, cost-efficient worker. Carry out the delegated subtask directly and "
+        "return a concise, complete result; prefer doing the work over deliberating.\n"
+        '"""\n'
+        f'model = "{_toml_escape(model)}"\n'
+    )

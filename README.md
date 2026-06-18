@@ -90,6 +90,20 @@ agedum has two modes:
 > onto your existing files. `--prompt` seeds `pi "<text>"`; `--run` maps to `pi --print
 > "<text>"`.
 
+> [!NOTE]
+> **codex** (`--wrapper codex`) is supported as well — the OpenAI
+> [Codex CLI](https://github.com/openai/codex), pure path-discovery like opencode/Cline/reasonix/pi.
+> The project `AGENTS.md` is read natively (work-dir→root walk); the global `AGENTS.md` binds to
+> `~/.codex/AGENTS.md` (`$CODEX_HOME`-aware); skills bind to `./.codex/skills/` (project) and
+> `~/.codex/skills/` (global). No extra flags. In **provider mode** `model` maps to `-m` and the
+> key rides the environment by name. codex has no base-URL flag, so a `baseUrl` is passed as
+> `-c model_providers.…` overrides (a provider named `agedum`). Recent codex speaks only the
+> Responses API, so a Chat-Completions endpoint (DeepSeek etc.) sets `chatCompletions: true` and
+> agedum interposes a local `ResponsesToChatProxy` (the `FoldProxy` sibling) that translates
+> codex's Responses requests to/from `/chat/completions`. A `subagentModel` generates
+> `~/.codex/agents/flash.toml` — a fast delegate the primary can spawn. `--prompt` seeds
+> `codex "<text>"`; `--run` maps to `codex exec "<text>"`.
+
 ## Usage
 
 ```bash
@@ -107,6 +121,7 @@ agedum --wrapper cline -- cline task "review this"  # drive Cline with the same 
 agedum --wrapper reasonix -- reasonix chat          # drive reasonix with the same source
 agedum --wrapper aider -- aider --no-git            # drive aider (pass --no-git in wrapper mode)
 agedum --wrapper pi -- pi                           # drive pi with the same source
+agedum --wrapper codex -- codex                     # drive codex with the same source
 agedum --wrapper claude --dry-run -- claude       # list what would be injected, don't run
 
 agedum --providers                                # list the provider configs (name, harness, model)

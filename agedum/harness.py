@@ -790,3 +790,79 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
             plan.origins[target] = str(global_.skills_dir)
 
     return plan
+
+
+# ---------------------------------------------------------------------------
+# codex harness (OpenAI Codex CLI)
+# ---------------------------------------------------------------------------
+
+
+def codex_config_dir() -> Path:
+    """codex's home/state dir — ``$CODEX_HOME`` or ``~/.codex``.
+
+    codex stores all local state here (``config.toml``, ``auth.json``, sessions, logs)
+    and reads its user-scope ``AGENTS.md``, ``skills/``, and custom-agent ``agents/``
+    from it (codex's ``CODEX_HOME``, default ``~/.codex``).
+    """
+    override = os.environ.get("CODEX_HOME")
+    return Path(override) if override else Path.home() / ".codex"
+
+
+def compile_codex(project: Source, global_: Source | None, dest: Path) -> Plan:
+    """Render the source for codex (OpenAI Codex CLI). Like opencode/pi, codex is pure
+    path-discovery (no appended flags), so every scope is a bind or a native read:
+
+    * **project instructions** — codex walks the work dir up to the project root collecting
+      ``AGENTS.md`` and folds it into the first turn, so the project-root ``./AGENTS.md`` is
+      read **natively** — that is exactly the agent-neutral source file, so agedum injects
+      nothing for it (and could not — it is git-tracked);
+    * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an optional
+      ``AGENTS.codex.md`` overlay) → ``<codex-home>/AGENTS.md`` where ``<codex-home>`` is
+      ``~/.codex`` (:func:`codex_config_dir`), the user-scope rules file codex reads at boot
+      (``$CODEX_HOME/AGENTS.md``; an ``AGENTS.override.md`` would take precedence, but agedum
+      writes the base name);
+    * **project skills** → ``./.codex/skills/``; **global skills** → ``<codex-home>/skills/``.
+      codex auto-discovers ``SKILL.md`` folders from its home ``skills/`` and the project
+      ``.codex/skills/``; each skill carries ``name``/``description`` frontmatter — the neutral
+      source shape — with a ``SKILL.codex.md`` overlay merged in.
+
+    No ``extra_args`` — codex discovers everything from disk; the provider's model + custom
+    endpoint ride ``-c``/``-m`` flags built in :func:`agedum.provider._codex_env`.
+    """
+    plan = Plan()
+    config = codex_config_dir()
+
+    # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
+    # --dry-run can show it rather than leave it invisible.
+    if project.agents_md is not None:
+        plan.native_reads.append(project.agents_md)
+
+    # Global instructions (base + AGENTS.codex.md overlay) -> <codex-home>/AGENTS.md
+    # (project ./AGENTS.md is read natively).
+    global_instructions = _instructions(global_, "codex") if global_ is not None else None
+    if global_instructions is not None:
+        out = dest / "global" / "AGENTS.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(global_instructions)
+        target = config / "AGENTS.md"
+        plan.binds.append((out, target))
+        if global_ is not None and global_.agents_md is not None:
+            plan.origins[target] = str(global_.agents_md)
+
+    # Project skills -> ./.codex/skills.
+    if project.skills_dir is not None:
+        out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.codex.md")
+        if out is not None:
+            target = project.root / ".codex" / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(project.skills_dir)
+
+    # Global skills -> <codex-home>/skills.
+    if global_ is not None and global_.skills_dir is not None:
+        out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.codex.md")
+        if out is not None:
+            target = config / "skills"
+            plan.binds.append((out, target))
+            plan.origins[target] = str(global_.skills_dir)
+
+    return plan

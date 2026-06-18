@@ -91,6 +91,7 @@ nav:
     - reasonix: harnesses/reasonix.md
     - aider: harnesses/aider.md
     - pi: harnesses/pi.md
+    - codex: harnesses/codex.md
   - CLI reference: cli.md
   - Internals: internals.md
   - Legal: legal.md

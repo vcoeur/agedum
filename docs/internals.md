@@ -14,7 +14,7 @@ process. The real working tree and `$HOME` are never written to.
 
 ```mermaid
 flowchart TD
-  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix / compile_aider / compile_pi<br/>→ Plan(binds, extra_args, safe_overrides)"]
+  a["load_source() + load_global_source()"] --> b["compile_claude / compile_kimi / compile_opencode / compile_cline / compile_reasonix / compile_aider / compile_pi / compile_codex<br/>→ Plan(binds, extra_args, safe_overrides)"]
   b --> c["assert_safe(): refuse git-tracked targets"]
   c --> d["bwrap --dev-bind / / --tmpfs shadow … --ro-bind src target … -- command extra_args"]
   d --> e["child runs, sees injected files"]
@@ -26,13 +26,18 @@ Internally this is three modules:
 - **`sources.py`** — locates the project root and the project/global source files into
   a `Source` (`root`, `agents_md`, `skills_dir`).
 - **`harness.py`** — `compile_claude` / `compile_kimi` / `compile_opencode` / `compile_cline` /
-  `compile_reasonix` / `compile_aider` / `compile_pi` render a `Source` pair into a
+  `compile_reasonix` / `compile_aider` / `compile_pi` / `compile_codex` render a `Source` pair into a
   `Plan`: a list of absolute `(compiled-file → mount-target)` binds, **plus**
   `extra_args` to append to the command, plus `safe_overrides` — targets to shadow with
   an empty tmpfs instead of binding content (pi uses one to hide the raw
   `.agents/skills/` so it does not collide with the compiled `.pi/skills/` copies).
 - **`launcher.py`** — `assert_safe`, `build_bwrap_argv`, and `run_virtualfs` validate,
   compose the `bwrap` argv, run the command, and clean up.
+- **`proxy.py`** — two per-session localhost reverse proxies the CLI interposes for a launch
+  (the child reaches them at `127.0.0.1`, shared into the bwrap namespace): `FoldProxy` folds
+  `system`-role messages into the top-level `system` for strict Anthropic endpoints (claude
+  `foldSystemMessages`), and `ResponsesToChatProxy` translates the codex Responses API ↔ Chat
+  Completions for chat-only providers like DeepSeek (codex `chatCompletions`).
 
 Provider mode adds one more injection channel on top of the same pipeline:
 `Launch.config_files` — agedum-*generated* config files a harness needs on disk
@@ -90,7 +95,7 @@ the repo), injected content could be committed by accident.
 `assert_safe` therefore **refuses to inject over any git-tracked path**. Targets must
 be untracked and gitignored. Targets outside the project repo (e.g. `~/.claude/...`)
 are never tracked by this repo, so they are allowed. In practice: list `CLAUDE.md`,
-`.claude/`, `.kimi/`, `.opencode/`, `.cline/`, `.reasonix/`, and `.pi/` in your `.gitignore`.
+`.claude/`, `.kimi/`, `.opencode/`, `.cline/`, `.reasonix/`, `.pi/`, and `.codex/` in your `.gitignore`.
 
 The check runs over the **effective, per-child** binds — the exact paths the namespace
 will mount. A tracked but unrelated sibling inside a skills target dir (say a
