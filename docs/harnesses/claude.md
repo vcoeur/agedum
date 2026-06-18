@@ -81,9 +81,12 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
 | `disableErrorReporting` | `DISABLE_ERROR_REPORTING=1` |
 | `disableClaudeApiSkill` | `CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL=1` |
 | `foldSystemMessages` | `AGEDUM_FOLD_SYSTEM_MESSAGES=1` — see [below](#fold-proxy) |
+| `upstreamApi` | `openai-completions` → `AGEDUM_TRANSLATE_OPENAI=1` (see [below](#translate-proxy)); `anthropic-messages` / unset → no translation |
 
 - `secretEnv` (mapped to the auth token) must be present in the [env file](../provider.md#the-env-file);
   `baseUrl` without a `secretEnv` is an error.
+- `upstreamApi: "openai-completions"` and `foldSystemMessages` are mutually exclusive (the
+  translator already produces a clean top-level `system`); setting both is an error.
 - `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,MANTLE}` are always unset defensively. Empty
   strings, zero, and `false` are omitted.
 - `--prompt`/`--run` seed an interactive vs `--print` run — see the
@@ -109,3 +112,52 @@ request bodies are de-chunked before forwarding, and a hung upstream is bounded 
 generous per-socket-op timeout (300 s — far above the API's streaming ping cadence, so it
 only ever fires on a genuinely dead peer). The proxy lives only for the duration of the
 wrapped command, and is a no-op for other harnesses and when the flag is unset.
+
+## OpenAI-only upstream — translation proxy { #translate-proxy }
+
+Claude Code only speaks the Anthropic Messages protocol, but some gateways expose only an
+OpenAI `/v1/chat/completions` surface — or their Anthropic `/v1/messages` surface is broken
+for the traffic Claude Code sends. (OpenCode Go is the motivating case: its `/messages`
+translation drops the tool-function `name`, so any request carrying tools — which Claude
+Code always sends — fails with a 400, while its `/chat/completions` works.)
+
+Setting `upstreamApi: "openai-completions"` sets `AGEDUM_TRANSLATE_OPENAI=1`. At run time the
+claude launch interposes a local `127.0.0.1` reverse proxy in front of `ANTHROPIC_BASE_URL`
+that **translates between the two protocols**, reusing the same threading/lifecycle skeleton
+as the fold proxy:
+
+- **Request** — Anthropic Messages → OpenAI Chat Completions: top-level `system` becomes a
+  leading system message; content blocks, `tool_use`/`tool_result`, and images (base64 data
+  URLs) are mapped; `tools[].input_schema` → `function.parameters` (rejected JSON-Schema
+  `format` keywords stripped); the path `/v1/messages` → `/v1/chat/completions`; and the
+  `x-api-key` key is resent as `Authorization: Bearer`. The config's `model` overrides the
+  request model and `effortLevel` is injected as `reasoning_effort`.
+- **Response** — OpenAI → Anthropic, streaming and non-streaming. A streamed OpenAI SSE
+  response is re-serialised to the Anthropic event sequence (`message_start` →
+  `content_block_*` → `message_delta` → `message_stop`), with tool-call arguments streamed as
+  `input_json_delta` fragments. Upstream errors are translated to the Anthropic error
+  envelope with the status preserved, so the real cause still surfaces in Claude Code.
+
+Example config (OpenCode Go, `kimi-k2.7-code`):
+
+```json
+{
+  "harness": "claude",
+  "secretEnv": "OPENCODE_GO_API_KEY",
+  "requiredEnv": ["OPENCODE_GO_API_KEY"],
+  "config": {
+    "baseUrl": "https://opencode.ai/zen/go",
+    "authStyle": "apikey",
+    "upstreamApi": "openai-completions",
+    "model": "kimi-k2.7-code",
+    "effortLevel": "high"
+  }
+}
+```
+
+Scope and limits (v1): the translation covers the subset Claude Code actually emits, not the
+full Anthropic API. `cache_control`/prompt caching and extended `thinking` have no OpenAI
+equivalent and are dropped; `/v1/messages/count_tokens` is answered locally with a coarse
+chars/4 estimate; input-token usage in `message_start` is best-effort. `--dry-run` shows the
+interposed translator and its real upstream. The proxy lives only for the duration of the
+wrapped command, and is a no-op for other harnesses and when `upstreamApi` is unset.
