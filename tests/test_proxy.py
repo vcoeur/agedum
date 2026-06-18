@@ -1251,6 +1251,35 @@ def test_translate_proxy_translates_upstream_error():
             raise AssertionError("expected a 400 from the proxy")
 
 
+def test_translate_proxy_rewrites_path_with_query_string():
+    # Claude Code appends `?beta=true` to /v1/messages. The proxy must still rewrite to the
+    # OpenAI endpoint (dropping the query) — otherwise the request hits the upstream's broken
+    # Anthropic surface and auth fails.
+    state = _FakeOpenAIState(
+        response=(
+            "json",
+            {
+                "id": "c",
+                "model": "kimi",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+    )
+    with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url, model="kimi") as proxy:
+        request = _anthropic_request(
+            proxy, {"messages": [{"role": "user", "content": "hi"}]}, path="/v1/messages?beta=true"
+        )
+        with urllib.request.urlopen(request) as response:
+            assert response.status == 200
+    assert state.last_path == "/v1/chat/completions"
+
+
 def test_translate_proxy_count_tokens_short_circuits():
     state = _FakeOpenAIState(response=("json", {}))  # must NOT be reached
     with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:

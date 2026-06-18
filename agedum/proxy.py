@@ -897,7 +897,7 @@ class _TranslateHandler(_BaseProxyHandler):
     reasoning_effort = ""
 
     def short_circuit(self, path: str, raw: bytes) -> dict | None:
-        if not path.rstrip("/").endswith("/count_tokens"):
+        if not path.split("?", 1)[0].rstrip("/").endswith("/count_tokens"):
             return None
         # No OpenAI token-count endpoint exists; a cheap chars/4 estimate keeps Claude Code's
         # context budgeting working. Imprecise by design — documented as a v1 limitation.
@@ -911,7 +911,13 @@ class _TranslateHandler(_BaseProxyHandler):
     def transform_request(
         self, raw: bytes, path: str, headers: dict[str, str]
     ) -> tuple[bytes, str, dict[str, str]]:
-        new_path = "/v1/chat/completions" if path.rstrip("/").endswith("/v1/messages") else path
+        # Claude Code appends a query string (e.g. `?beta=true`) to /v1/messages. Match on the
+        # path component only, and drop the query — it is Anthropic-specific and meaningless to
+        # the OpenAI endpoint. (A non-/v1/messages path is forwarded verbatim, defensively.)
+        path_only = path.split("?", 1)[0]
+        new_path = (
+            "/v1/chat/completions" if path_only.rstrip("/").endswith("/v1/messages") else path
+        )
         return self._translate_body(raw), new_path, self._translate_headers(headers)
 
     def _translate_body(self, raw: bytes) -> bytes:
