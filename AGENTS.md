@@ -119,11 +119,15 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   `_codex_env` emits `AGEDUM_CODEX_CHAT_UPSTREAM`, and at launch `cli.main._maybe_codex_proxy`
   interposes a `ResponsesToChatProxy` (`proxy.py`, the `FoldProxy` sibling) — codex speaks
   Responses to the proxy, which translates to/from `/chat/completions` upstream — rewriting the
-  `base_url` override to the proxy address. A `subagentModel` generates a codex custom-agent file
-  `~/.codex/agents/flash.toml` (the fast model) the primary can delegate to — codex has no global
-  subagent-model knob ([codex#19482]), so it is **inert unless explicitly invoked** (the most
-  faithful mapping codex's subagent model allows). `agedum --prompt` seeds `codex "<text>"`
-  (interactive); `--run` maps to `codex exec "<text>"`.
+  `base_url` override to the proxy address. codex custom agents are standalone TOML files the
+  primary delegates to — agedum binds them three ways: `subagentModel` (sugar for one fast
+  `~/.codex/agents/flash.toml`), `codexAgents: <dir>` (bind every `*.toml` in a providers-root
+  dir into `~/.codex/agents/`, **personal** scope), and `codexProjectAgents: <dir>` (into
+  `.codex/agents/`, **project** scope, git-tracked-target-guarded). agedum injects a default
+  `sandbox_mode = "workspace-write"` when a source omits it; duplicate targets are rejected. codex
+  has no global subagent-model knob ([codex#19482]), so agents are **inert unless explicitly
+  invoked**. `agedum --prompt` seeds `codex "<text>"` (interactive); `--run` maps to
+  `codex exec "<text>"`.
 
   [codex#19482]: https://github.com/openai/codex/issues/19482
 - **Global instructions overlay** — the user-scope `AGENTS.md` is merged with an optional

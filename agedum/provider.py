@@ -1490,18 +1490,82 @@ def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
     if model:
         command += ["-m", model]
 
-    # `subagentModel` has no codex flag: codex routes nothing to a fast model globally
-    # (openai/codex#19482), so agedum generates a custom-agent file the primary can delegate
-    # to — ~/.codex/agents/flash.toml running the fast model. It is INERT unless the primary
-    # is asked to spawn it (codex spawns subagents only on explicit request); see
-    # docs/harnesses/codex.md.
+    # codex has no global "route subagents to a fast model" knob (openai/codex#19482) and no
+    # inline agent config — custom agents are standalone TOML files under ~/.codex/agents/
+    # (personal) or .codex/agents/ (project) the primary delegates to on explicit request. So
+    # agedum binds agent source files into those dirs: `subagentModel` is sugar for one fast
+    # `flash` worker; `codexAgents` / `codexProjectAgents` bind every *.toml in a source dir.
+    # All are INERT unless the primary is asked to spawn them; see docs/harnesses/codex.md.
     config_files: list[tuple[str, str, bool]] = []
+    seen_targets: set[str] = set()
+
+    def _add_agent(target: str, content: str) -> None:
+        if target in seen_targets:
+            raise ProviderError(f"duplicate codex agent target {target!r}")
+        seen_targets.add(target)
+        config_files.append((target, _render_codex_agent(content), False))
+
     subagent_model = str(block.get("subagentModel") or "").strip()
     if subagent_model:
-        target = str(codex_config_dir() / "agents" / "flash.toml")
-        config_files.append((target, _codex_flash_agent_toml(subagent_model), False))
+        _add_agent(
+            str(codex_config_dir() / "agents" / "flash.toml"),
+            _codex_flash_agent_toml(subagent_model),
+        )
+    for source in _codex_agent_sources(block.get("codexAgents"), "codexAgents"):
+        _add_agent(str(codex_config_dir() / "agents" / source.name), source.read_text())
+    for source in _codex_agent_sources(block.get("codexProjectAgents"), "codexProjectAgents"):
+        _add_agent(f".codex/agents/{source.name}", source.read_text())
 
     return env, [], command, tuple(config_files)
+
+
+# codex custom agents inherit this sandbox unless their source sets `sandbox_mode`. agedum
+# launches are write-confined (the bwrap mount namespace + the conception-sandbox base), so
+# `workspace-write` is the codex mode that matches: codex may write the workspace, the mount
+# confines it to the sandbox's readWrite set.
+DEFAULT_CODEX_AGENT_SANDBOX_MODE = "workspace-write"
+
+
+def _codex_agent_sources(value: object, key: str) -> list[Path]:
+    """Resolve a ``codexAgents`` / ``codexProjectAgents`` directory ref to its ``*.toml`` files.
+
+    ``value`` is a directory path anchored at the providers root (or absolute when it starts
+    with ``/``); every ``*.toml`` directly inside it is an agent source, returned sorted by
+    name. ``None`` → no sources. Raises :class:`ProviderError` when set to a non-string or to a
+    path that is not an existing directory.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderError(f"`{key}` must be a non-empty directory path string")
+    ref = value.strip()
+    directory = (Path(ref) if ref.startswith("/") else providers_dir() / ref).expanduser()
+    if not directory.is_dir():
+        raise ProviderError(f"`{key}` {ref!r} is not a directory (resolved {directory})")
+    return sorted(directory.glob("*.toml"))
+
+
+def _render_codex_agent(content: str) -> str:
+    """Return a codex custom-agent TOML, injecting agedum's default ``sandbox_mode`` when the
+    source omits it; an explicit ``sandbox_mode`` is passed through unchanged.
+
+    The check is a flat-key line scan — agent TOMLs are flat tables, so it does not parse
+    nested structure. The source must end as valid TOML (all blocks closed) for the appended
+    top-level key to stay valid.
+    """
+    if _toml_sets_key(content, "sandbox_mode"):
+        return content
+    body = content if content.endswith("\n") else content + "\n"
+    return f'{body}sandbox_mode = "{DEFAULT_CODEX_AGENT_SANDBOX_MODE}"\n'
+
+
+def _toml_sets_key(content: str, key: str) -> bool:
+    """True when flat TOML ``content`` assigns top-level ``key`` (a ``key = ...`` line)."""
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(key) and stripped[len(key) :].lstrip().startswith("="):
+            return True
+    return False
 
 
 def _codex_flash_agent_toml(model: str) -> str:
@@ -1510,7 +1574,8 @@ def _codex_flash_agent_toml(model: str) -> str:
 
     codex custom agents are standalone TOML files keyed by ``name``; ``description`` and
     ``developer_instructions`` are required, ``model`` overrides the parent session's model.
-    The ``model`` id is the only dynamic value (escaped); the rest is a fixed template.
+    The ``model`` id is the only dynamic value (escaped); the rest is a fixed template, rendered
+    through :func:`_render_codex_agent` (which adds the default sandbox) by the caller.
     """
     return (
         'name = "flash"\n'
