@@ -100,9 +100,11 @@ agedum has two modes:
 > `-c model_providers.…` overrides (a provider named `agedum`). Recent codex speaks only the
 > Responses API, so a Chat-Completions endpoint (DeepSeek etc.) sets `chatCompletions: true` and
 > agedum interposes a local `ResponsesToChatProxy` (the `FoldProxy` sibling) that translates
-> codex's Responses requests to/from `/chat/completions`. A `subagentModel` generates
-> `~/.codex/agents/flash.toml` — a fast delegate the primary can spawn. `--prompt` seeds
-> `codex "<text>"`; `--run` maps to `codex exec "<text>"`.
+> codex's Responses requests to/from `/chat/completions`. codex custom agents are bound three
+> ways: `subagentModel` (one fast `~/.codex/agents/flash.toml`), `codexAgents: <dir>` (bind every
+> `*.toml` into `~/.codex/agents/`, personal scope), and `codexProjectAgents: <dir>` (into
+> `.codex/agents/`, project scope) — sandbox defaulted by agedum, delegates the primary can spawn.
+> `--prompt` seeds `codex "<text>"`; `--run` maps to `codex exec "<text>"`.
 
 ## Usage
 

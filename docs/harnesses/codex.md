@@ -138,12 +138,24 @@ codex's `Authorization: Bearer <key>` header to the upstream unchanged.
     `description` exceeds **1024 chars** and skips it — trim long agedum skill descriptions to
     surface them under codex.
 
-### Fast subagent tier (`subagentModel`) { #subagent-routing }
+### Custom subagents (`subagentModel`, `codexAgents`, `codexProjectAgents`) { #subagent-routing }
 
-codex has **no global "route all subagents to a fast model" knob** (openai/codex#19482). What
-it does have is **custom subagents** — standalone TOML files under `~/.codex/agents/` the
-primary delegates to on request. So `subagentModel` makes agedum **generate
-`~/.codex/agents/flash.toml`**, a fast, low-cost worker agent running that model:
+codex has **no global "route all subagents to a fast model" knob** (openai/codex#19482) and no
+inline agent config. What it does have is **custom subagents** — standalone TOML files under
+`~/.codex/agents/` (personal) or `.codex/agents/` (project) the primary delegates to on request.
+agedum binds agent definitions into those dirs three ways:
+
+- **`subagentModel: <id>`** — sugar for one fast `flash` worker; agedum generates
+  `~/.codex/agents/flash.toml` running that model (the template below).
+- **`codexAgents: <dir>`** — bind every `*.toml` in `<dir>` (a path under the providers root)
+  into `~/.codex/agents/<name>.toml` (**personal** scope — available in every project).
+- **`codexProjectAgents: <dir>`** — same, into `.codex/agents/<name>.toml` (**project** scope —
+  only in the launch's working tree; overrides a personal agent of the same name).
+
+Source files are bound verbatim, except agedum injects a default **`sandbox_mode = "workspace-write"`**
+when the source omits it (matching agedum's write-confined launch; an explicit `sandbox_mode` is
+passed through). Two agents resolving to the same target — e.g. a `flash.toml` source colliding
+with `subagentModel`'s flash — is a hard error.
 
 ```json
 {
@@ -153,12 +165,14 @@ primary delegates to on request. So `subagentModel` makes agedum **generate
   "config": {
     "baseUrl": "https://api.deepseek.com/v1",
     "model": "deepseek-v4-pro",
-    "subagentModel": "deepseek-v4-flash"
+    "codexAgents": "codex/agents"
   }
 }
 ```
 
-→ the same `deepseek-v4-pro` launch as above, plus a generated `~/.codex/agents/flash.toml`:
+→ the same `deepseek-v4-pro` launch as above, plus every `*.toml` in
+`<providers-root>/codex/agents/` bound under `~/.codex/agents/`. The `flash` worker as a source
+file:
 
 ```toml
 name = "flash"
@@ -167,17 +181,18 @@ developer_instructions = """
 You are a fast, cost-efficient worker. Carry out the delegated subtask directly and return a concise, complete result; prefer doing the work over deliberating.
 """
 model = "deepseek-v4-flash"
+# source omits sandbox_mode → agedum injects sandbox_mode = "workspace-write"
 ```
 
-!!! note "`subagentModel` is inert unless the primary delegates"
+!!! note "inert unless the primary delegates"
     codex spawns subagents only when **explicitly asked** ("spawn an agent to do X"), and it
-    has no global default that routes work to one automatically. So the generated `flash`
-    agent gives the primary a fast delegate to *choose*, but the fast model is **not** used
-    unless you (or the primary's plan) invoke it — unlike opencode's `agentOptions` or pi's
-    `subagents.agentOverrides`, which route built-in roles. This is the most faithful mapping
-    codex's subagent model allows today; revisit if codex#19482 lands a default-model knob.
-    The file is bound through the normal launcher path, so it is refused over a git-tracked
-    target.
+    has no global default that routes work to one automatically. So a bound agent gives the
+    primary a delegate to *choose*, but its model is **not** used unless you (or the primary's
+    plan) invoke it — unlike opencode's `agentOptions` or pi's `subagents.agentOverrides`, which
+    route built-in roles. This is the most faithful mapping codex's subagent model allows today;
+    revisit if codex#19482 lands a default-model knob. Every agent file is bound through the
+    normal launcher path, so a **project-scope** target is refused over a git-tracked path (it
+    must be untracked + gitignored).
 
 **`--prompt`/`--run`.** codex takes a positional prompt to seed an interactive session; the
 `exec` subcommand runs it once non-interactively and exits. So `--prompt` seeds the TUI

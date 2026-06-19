@@ -1858,8 +1858,95 @@ def test_codex_subagent_model_generates_flash_agent_file(monkeypatch, tmp_path):
     assert 'name = "flash"' in content
     assert 'model = "deepseek-v4-flash"' in content
     assert "developer_instructions" in content
+    # agedum injects its confined-launch sandbox default when the agent omits sandbox_mode.
+    assert 'sandbox_mode = "workspace-write"' in content
     # The executor still launches on the primary model.
     assert launch.command[-2:] == ["-m", "deepseek-v4-pro"]
+
+
+def _write_codex_agent(directory, name, body):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.toml"
+    path.write_text(body)
+    return path
+
+
+def test_codex_agents_bind_personal_scope(monkeypatch, tmp_path):
+    # codexAgents -> every *.toml in the source dir is bound into ~/.codex/agents/<name>.toml.
+    # sandbox_mode is injected when the source omits it, passed through when set.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    src = tmp_path / "agents"
+    _write_codex_agent(src, "worker", 'name = "worker"\nmodel = "deepseek-v4-flash"\n')
+    reviewer_body = 'name = "reviewer"\nmodel = "deepseek-v4-pro"\nsandbox_mode = "read-only"\n'
+    _write_codex_agent(src, "reviewer", reviewer_body)
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-v4-pro", "codexAgents": str(src)},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    by_target = {target: content for target, content, _ in launch.config_files}
+    agents_dir = tmp_path / "codex-home" / "agents"
+    assert set(by_target) == {str(agents_dir / "worker.toml"), str(agents_dir / "reviewer.toml")}
+    # injected default for the agent that omitted sandbox_mode:
+    assert 'sandbox_mode = "workspace-write"' in by_target[str(agents_dir / "worker.toml")]
+    # explicit sandbox_mode passed through, not doubled:
+    reviewer = by_target[str(agents_dir / "reviewer.toml")]
+    assert 'sandbox_mode = "read-only"' in reviewer
+    assert "workspace-write" not in reviewer
+
+
+def test_codex_project_agents_bind_relative_target(tmp_path):
+    # codexProjectAgents -> a project-relative target (.codex/agents/<name>.toml) so the bind
+    # lands in the working tree and assert_safe's git-tracked-target guard applies.
+    src = tmp_path / "proj-agents"
+    _write_codex_agent(src, "tester", 'name = "tester"\nmodel = "deepseek-v4-flash"\n')
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"model": "deepseek-v4-pro", "codexProjectAgents": str(src)},
+        },
+        base_env={"DEEPSEEK_API_KEY": "sk-x"},
+    )
+    assert len(launch.config_files) == 1
+    target, _, merge_json = launch.config_files[0]
+    assert target == ".codex/agents/tester.toml"
+    assert merge_json is False
+
+
+def test_codex_agents_duplicate_target_raises(monkeypatch, tmp_path):
+    # A codexAgents flash.toml colliding with the subagentModel flash.toml is a hard error.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    src = tmp_path / "agents"
+    _write_codex_agent(src, "flash", 'name = "flash"\nmodel = "deepseek-v4-flash"\n')
+    with pytest.raises(ProviderError, match="duplicate codex agent target"):
+        build_launch(
+            {
+                "harness": "codex",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {
+                    "model": "deepseek-v4-pro",
+                    "subagentModel": "deepseek-v4-flash",
+                    "codexAgents": str(src),
+                },
+            },
+            base_env={"DEEPSEEK_API_KEY": "sk-x"},
+        )
+
+
+def test_codex_agents_missing_dir_raises():
+    with pytest.raises(ProviderError, match="is not a directory"):
+        build_launch(
+            {
+                "harness": "codex",
+                "secretEnv": "DEEPSEEK_API_KEY",
+                "config": {"model": "deepseek-v4-pro", "codexAgents": "/no/such/agents/dir"},
+            },
+            base_env={"DEEPSEEK_API_KEY": "sk-x"},
+        )
 
 
 def test_codex_chat_completions_interposes_proxy_upstream():
