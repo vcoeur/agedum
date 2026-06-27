@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 /**
  * opencode plugin (shipped + auto-injected by agedum): emit the session
@@ -22,13 +23,19 @@ import fs from "node:fs";
  *   { "v":1, "t":"msg", "sid", "mid", "role":"user"|"assistant", "text" }
  *   { "v":1, "t":"end", "sid" }
  *
- * Writes go to /dev/tty (the controlling terminal = the capturer's pty),
- * independent of however opencode wires the plugin's own stdout.
+ * Two transports, same neutral frame:
+ *   - /dev/tty (in-band OSC): the controlling terminal = the capturer's pty,
+ *     for `script` / tmux / asciinema. Needs a controlling tty to land.
+ *   - $CONDASH_TRANSCRIPT_FILE (sidecar): condash sets this per-tab when it
+ *     spawns the tab; we append one NDJSON frame per line. Reliable where
+ *     /dev/tty is not, and what condash reads for the dashboard.
  */
 
 const PREFIX = "\x1b]7373;agent-transcript;";
 const BEL = "\x07";
 const MAX_PIECE = 1024;
+/** Per-tab sidecar path condash sets when it spawns the tab; unset otherwise. */
+const SIDECAR = process.env.CONDASH_TRANSCRIPT_FILE;
 
 let frameCounter = 0;
 const roles = new Map();
@@ -42,7 +49,19 @@ function ttyWrite(str) {
   }
 }
 
+/** Append one neutral frame as NDJSON to condash's per-tab sidecar, when set. */
+function fileWrite(frame) {
+  if (!SIDECAR) return;
+  try {
+    fs.mkdirSync(path.dirname(SIDECAR), { recursive: true });
+    fs.appendFileSync(SIDECAR, JSON.stringify(frame) + "\n");
+  } catch {
+    /* sidecar is best-effort — never disrupt the session over capture */
+  }
+}
+
 function emitFrame(frame) {
+  fileWrite(frame);
   const b64 = Buffer.from(JSON.stringify(frame), "utf8").toString("base64");
   const id = (frameCounter++).toString(36);
   const n = Math.ceil(b64.length / MAX_PIECE) || 1;

@@ -148,7 +148,11 @@ ESC ] 7373 ; agent-transcript ; <frameId> ; <i> ; <n> ; <base64piece> BEL
 A capturer recovers a clean transcript by reassembling the base64 pieces and decoding the
 JSON frames (`{v,t:"msg",sid,mid,role,text}` / `{v,t:"end"}`, where `role` is `user`,
 `assistant`, or `reasoning`). The protocol **names no viewer**, so agedum stays
-viewer-agnostic. The plugin path is appended to `OPENCODE_CONFIG_CONTENT.plugin` (unioned
+viewer-agnostic. The same frames are also appended as newline-delimited JSON to the
+per-tab **sidecar** file named by `$CONDASH_TRANSCRIPT_FILE` when a capturer (condash) sets
+it — a reliable transport for a capturer that reads a file rather than the pty's `/dev/tty`
+echo, which a TUI's controlling terminal can hide. The plugin path is appended to
+`OPENCODE_CONFIG_CONTENT.plugin` (unioned
 with any `opencodeConfig.plugin`); agedum's bwrap launch binds the whole filesystem, so the
 bundled path resolves inside the namespace. Set `"emitTranscript": false` to disable.
 

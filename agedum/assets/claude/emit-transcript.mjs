@@ -20,14 +20,25 @@ import path from "node:path";
  *   { "v":1, "t":"msg", "sid", "role":"user"|"assistant"|"reasoning", "text" }
  * so condash's harness-blind extractor decodes Claude exactly like opencode.
  *
- * Writes go ONLY to /dev/tty (the capturer's pty). Critically, a UserPromptSubmit
- * hook's stdout is injected into Claude's context — so this script never writes to
- * stdout, and always exits 0, so a logging hiccup can never disrupt the session.
+ * Two transports, same neutral frame:
+ *   - /dev/tty (in-band OSC): for a terminal capturer (`script`, tmux, asciinema)
+ *     reading the pty stream. Works only when the hook inherits a controlling tty.
+ *   - $CONDASH_TRANSCRIPT_FILE (sidecar): when condash spawns the tab it hands a
+ *     per-tab file path here; we append one NDJSON frame per line. This is
+ *     reliable where /dev/tty is not — a Claude hook may run without condash's
+ *     controlling terminal, so the OSC echo silently never reaches the pty. The
+ *     file always does. condash reads it (harness-blind) for the dashboard.
+ *
+ * Critically, a UserPromptSubmit hook's stdout is injected into Claude's context
+ * — so this script never writes to stdout, and always exits 0, so a logging
+ * hiccup can never disrupt the session.
  */
 
 const PREFIX = "\x1b]7373;agent-transcript;";
 const BEL = "\x07";
 const MAX_PIECE = 1024;
+/** Per-tab sidecar path condash sets when it spawns the tab; unset otherwise. */
+const SIDECAR = process.env.CONDASH_TRANSCRIPT_FILE;
 
 let frameCounter = 0;
 
@@ -39,7 +50,19 @@ function ttyWrite(str) {
   }
 }
 
+/** Append one neutral frame as NDJSON to condash's per-tab sidecar, when set. */
+function fileWrite(frame) {
+  if (!SIDECAR) return;
+  try {
+    fs.mkdirSync(path.dirname(SIDECAR), { recursive: true });
+    fs.appendFileSync(SIDECAR, JSON.stringify(frame) + "\n");
+  } catch {
+    /* sidecar is best-effort — never disrupt the session over capture */
+  }
+}
+
 function emitFrame(frame) {
+  fileWrite(frame);
   const b64 = Buffer.from(JSON.stringify(frame), "utf8").toString("base64");
   const id = (frameCounter++).toString(36);
   const n = Math.ceil(b64.length / MAX_PIECE) || 1;
