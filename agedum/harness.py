@@ -139,8 +139,11 @@ def _transcript_hook_settings() -> dict:
 
     ``UserPromptSubmit`` frames the prompt as a ``[user]`` message; ``Stop`` tails
     the session JSONL after each assistant turn and frames the new assistant +
-    thinking content. Both speak the neutral OSC 7373 protocol condash decodes (the
-    same one the opencode plugin emits) — see ``assets/claude/emit-transcript.mjs``.
+    thinking content. Both speak the neutral protocol condash decodes (the same one
+    the opencode plugin emits), over two transports: the in-band OSC 7373 echo on
+    ``/dev/tty`` and, when condash sets ``$CONDASH_TRANSCRIPT_FILE``, a per-tab
+    sidecar file the hook appends to — reliable even when the hook runs without
+    condash's controlling terminal. See ``assets/claude/emit-transcript.mjs``.
     """
     emitter = shlex.quote(_claude_emitter_path())
     return {
