@@ -83,6 +83,7 @@ kimi reads its API token **from the environment**, so the key goes in `requiredE
 | `thinking` | `--thinking` (true) / `--no-thinking` (false) |
 | `plan` | `--plan` (true) |
 | `configInline` | `--config <value>` |
+| `binary` | overrides the launched CLI name (default `kimi`; Moonshot's Kimi Code CLI ships as `kimi-cli`) |
 
 The config above launches `kimi --model kimi-k2 --thinking`, with `MOONSHOT_API_KEY` in the
 environment. `--prompt`/`--run` add `--prompt "<text>"` (and `--print` for `--run`) — see

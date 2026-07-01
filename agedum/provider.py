@@ -680,7 +680,10 @@ def _kimi_config_doc(
 def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # kimi's provider/model knobs are appended CLI flags, not env vars. The token
     # (secret_env) reaches the child via the required-env export in build_launch.
-    command = ["kimi"]
+    # The CLI binary is overridable: Moonshot's Kimi Code CLI ships as `kimi-cli`, while
+    # other packagings expose `kimi`. Default to `kimi` for backward compatibility.
+    binary = str(block.get("binary") or "kimi").strip() or "kimi"
+    command = [binary]
     model = str(block.get("model") or "").strip()
     base_url = str(block.get("baseUrl") or "").strip()
     config_inline = str(block.get("configInline") or "").strip()
