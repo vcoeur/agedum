@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -684,6 +685,11 @@ def _maybe_proxy(mode: str) -> Iterator[None]:
     if translate:
         from agedum.proxy import TranslateProxy
 
+        # One agedum launch ≈ one Claude Code conversation; a stable per-launch key, reused on
+        # every request, lets Moonshot pin the prefix cache to one cluster and raises hit rate.
+        prompt_cache_key = (
+            uuid.uuid4().hex if os.environ.get("AGEDUM_OPENAI_PROMPT_CACHE_KEY") == "1" else ""
+        )
         proxy = TranslateProxy(
             upstream,
             model=os.environ.get("ANTHROPIC_MODEL", ""),
@@ -693,6 +699,8 @@ def _maybe_proxy(mode: str) -> Iterator[None]:
             api_key=os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN")
             or "",
+            prompt_cache_key=prompt_cache_key,
+            thinking_mode=os.environ.get("AGEDUM_OPENAI_THINKING", ""),
         )
     else:
         from agedum.proxy import FoldProxy

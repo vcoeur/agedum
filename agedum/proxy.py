@@ -314,19 +314,29 @@ def _convert_tool_choice(choice: object) -> object | None:
 
 
 def anthropic_to_openai_request(
-    body: dict, *, model: str | None = None, reasoning_effort: str | None = None
+    body: dict,
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    prompt_cache_key: str | None = None,
+    thinking_mode: str = "",
 ) -> dict:
     """Translate a Claude Code Anthropic Messages request into an OpenAI Chat Completions one.
 
     :param body: the parsed Anthropic ``/v1/messages`` request body.
     :param model: when set, overrides the body's model (the config's upstream model id).
     :param reasoning_effort: when set, injected as OpenAI ``reasoning_effort``.
+    :param prompt_cache_key: when set, injected as a top-level ``prompt_cache_key`` — a
+        prefix-cache routing hint honoured by Moonshot/Kimi and other OpenAI-compatible backends.
+    :param thinking_mode: ``"toggle"`` maps Anthropic ``thinking`` to Moonshot's on/off
+        ``thinking: {"type": "enabled"|"disabled"}`` param; empty leaves ``thinking`` dropped.
     :returns: an OpenAI ``/v1/chat/completions`` request body.
 
     Scoped to what Claude Code emits: ``system`` (folded to a leading system message),
     text/image/tool_use/tool_result content, ``tools``/``tool_choice``, and the common
-    sampling params. ``thinking``/``metadata``/``cache_control`` have no OpenAI equivalent
-    and are dropped.
+    sampling params. ``metadata`` and per-block ``cache_control`` have no OpenAI equivalent and
+    are dropped; ``thinking`` is dropped unless ``thinking_mode`` maps it (above), and
+    session-level prefix caching is hinted via ``prompt_cache_key`` when supplied.
     """
     messages: list[dict] = []
     system_text = _system_to_text(body.get("system"))
@@ -358,6 +368,21 @@ def anthropic_to_openai_request(
 
     if reasoning_effort:
         result["reasoning_effort"] = reasoning_effort
+
+    if prompt_cache_key:
+        # A prefix-cache routing hint: reusing one value across a conversation raises the
+        # cache-hit rate on Moonshot/Kimi. Purely an optimization — an absent or non-matching
+        # key only lowers the hit rate, it never changes the result or errors.
+        result["prompt_cache_key"] = prompt_cache_key
+
+    if thinking_mode == "toggle":
+        # Moonshot exposes an on/off reasoning toggle (`thinking: {"type": ...}`); pass an
+        # explicit enabled/disabled straight through. Absent thinking (or a `budget_tokens`,
+        # which has no equivalent) is left to the model default. Never enable this mode for an
+        # always-think model (e.g. kimi-k2.7-code) — it errors on "disabled".
+        thinking = body.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "disabled"):
+            result["thinking"] = {"type": thinking["type"]}
 
     stream = bool(body.get("stream"))
     result["stream"] = stream
@@ -413,7 +438,11 @@ def openai_to_anthropic_response(data: dict, *, model: str | None = None) -> dic
         "usage": {
             "input_tokens": usage.get("prompt_tokens") or 0,
             "output_tokens": usage.get("completion_tokens") or 0,
-            "cache_read_input_tokens": details.get("cached_tokens") or 0,
+            # Standard OpenAI nests it under prompt_tokens_details; some backends (Moonshot)
+            # may report it flat on usage — accept either.
+            "cache_read_input_tokens": details.get("cached_tokens")
+            or usage.get("cached_tokens")
+            or 0,
         },
     }
 
@@ -493,7 +522,9 @@ class OpenAIToAnthropicStream:
         self.input_tokens = usage.get("prompt_tokens") or self.input_tokens
         self.output_tokens = usage.get("completion_tokens") or self.output_tokens
         details = usage.get("prompt_tokens_details") or {}
-        self.cache_read = details.get("cached_tokens") or self.cache_read
+        self.cache_read = (
+            details.get("cached_tokens") or usage.get("cached_tokens") or self.cache_read
+        )
 
     def _close_current(self) -> list[bytes]:
         """Stop the currently-open content block, if any (enforces one-open-at-a-time)."""
@@ -897,6 +928,8 @@ class _TranslateHandler(_BaseProxyHandler):
 
     model = ""
     reasoning_effort = ""
+    prompt_cache_key = ""
+    thinking_mode = ""
     api_key = ""
 
     def short_circuit(self, path: str, raw: bytes) -> dict | None:
@@ -928,7 +961,11 @@ class _TranslateHandler(_BaseProxyHandler):
         if body is None:
             return raw
         translated = anthropic_to_openai_request(
-            body, model=self.model or None, reasoning_effort=self.reasoning_effort or None
+            body,
+            model=self.model or None,
+            reasoning_effort=self.reasoning_effort or None,
+            prompt_cache_key=self.prompt_cache_key or None,
+            thinking_mode=self.thinking_mode or "",
         )
         return json.dumps(translated, separators=(",", ":")).encode("utf-8")
 
@@ -1090,11 +1127,20 @@ class TranslateProxy(_LocalProxy):
     ``ANTHROPIC_BASE_URL`` at while the ``with`` block is open. ``model`` overrides the
     request model with the upstream's id; ``reasoning_effort`` is injected when set;
     ``api_key`` is the resolved upstream key, sent as ``Authorization: Bearer`` (authoritative
-    over whatever auth headers the client sends).
+    over whatever auth headers the client sends). ``prompt_cache_key`` is injected as a
+    prefix-cache routing hint; ``thinking_mode`` maps Anthropic ``thinking`` on/off (see
+    :func:`anthropic_to_openai_request`).
     """
 
     def __init__(
-        self, upstream: str, *, model: str = "", reasoning_effort: str = "", api_key: str = ""
+        self,
+        upstream: str,
+        *,
+        model: str = "",
+        reasoning_effort: str = "",
+        api_key: str = "",
+        prompt_cache_key: str = "",
+        thinking_mode: str = "",
     ) -> None:
         super().__init__(
             type(
@@ -1105,6 +1151,8 @@ class TranslateProxy(_LocalProxy):
                     "model": model or "",
                     "reasoning_effort": reasoning_effort or "",
                     "api_key": api_key or "",
+                    "prompt_cache_key": prompt_cache_key or "",
+                    "thinking_mode": thinking_mode or "",
                 },
             )
         )

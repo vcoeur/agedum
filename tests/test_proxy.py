@@ -619,6 +619,56 @@ def test_request_tool_choice_specific_tool():
     assert out["tool_choice"] == {"type": "function", "function": {"name": "t"}}
 
 
+def test_request_injects_prompt_cache_key_when_set():
+    out = anthropic_to_openai_request({"messages": []}, prompt_cache_key="sess-abc")
+    assert out["prompt_cache_key"] == "sess-abc"
+
+
+def test_request_omits_prompt_cache_key_when_unset():
+    out = anthropic_to_openai_request({"messages": []})
+    assert "prompt_cache_key" not in out
+
+
+def test_request_thinking_toggle_maps_enabled_and_disabled():
+    enabled = anthropic_to_openai_request(
+        {"messages": [], "thinking": {"type": "enabled", "budget_tokens": 4096}},
+        thinking_mode="toggle",
+    )
+    assert enabled["thinking"] == {"type": "enabled"}  # budget_tokens has no equivalent, dropped
+    disabled = anthropic_to_openai_request(
+        {"messages": [], "thinking": {"type": "disabled"}}, thinking_mode="toggle"
+    )
+    assert disabled["thinking"] == {"type": "disabled"}
+
+
+def test_request_thinking_dropped_without_toggle_mode():
+    # Default (no thinking_mode) keeps the historical drop — an always-think model must never
+    # receive a `disabled`, so its provider leaves the mode unset.
+    out = anthropic_to_openai_request({"messages": [], "thinking": {"type": "enabled"}})
+    assert "thinking" not in out
+
+
+def test_request_thinking_toggle_ignores_absent_or_unknown_type():
+    absent = anthropic_to_openai_request({"messages": []}, thinking_mode="toggle")
+    assert "thinking" not in absent
+    unknown = anthropic_to_openai_request(
+        {"messages": [], "thinking": {"type": "auto"}}, thinking_mode="toggle"
+    )
+    assert "thinking" not in unknown
+
+
+def test_response_reads_flat_cached_tokens_fallback():
+    # Standard OpenAI nests cached_tokens under prompt_tokens_details; a backend that reports it
+    # flat on usage (e.g. Moonshot) is still surfaced as Anthropic cache_read_input_tokens.
+    out = openai_to_anthropic_response(
+        {
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 6},
+        }
+    )
+    assert out["usage"]["cache_read_input_tokens"] == 6
+
+
 # ---------------------------------------------------------------------------
 # openai_to_anthropic_response — pure non-streaming response transform
 # ---------------------------------------------------------------------------

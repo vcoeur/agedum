@@ -82,6 +82,9 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
 | `disableClaudeApiSkill` | `CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL=1` |
 | `foldSystemMessages` | `AGEDUM_FOLD_SYSTEM_MESSAGES=1` — see [below](#fold-proxy) |
 | `upstreamApi` | `openai-completions` → `AGEDUM_TRANSLATE_OPENAI=1` (see [below](#translate-proxy)); `anthropic-messages` / unset → no translation |
+| `openaiPromptCacheKey` | `AGEDUM_OPENAI_PROMPT_CACHE_KEY=1` — inject a per-launch `prompt_cache_key` (translate proxy only; see [below](#translate-proxy)) |
+| `openaiThinking` | `AGEDUM_OPENAI_THINKING=<mode>` — `"toggle"` maps Anthropic `thinking` on/off (translate proxy only) |
+| `autoCompactWindow` (> 0) | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
 
 - `secretEnv` (mapped to the auth token) must be present in the [env file](../provider.md#the-env-file);
   `baseUrl` without a `secretEnv` is an error.
@@ -131,7 +134,10 @@ as the fold proxy:
   URLs) are mapped; `tools[].input_schema` → `function.parameters` (rejected JSON-Schema
   `format` keywords stripped); the path `/v1/messages` → `/v1/chat/completions`; and the
   `x-api-key` key is resent as `Authorization: Bearer`. The config's `model` overrides the
-  request model and `effortLevel` is injected as `reasoning_effort`.
+  request model and `effortLevel` is injected as `reasoning_effort`. With `openaiPromptCacheKey`,
+  a per-launch `prompt_cache_key` is added to every request (a prefix-cache routing hint honoured
+  by Moonshot/Kimi); with `openaiThinking: "toggle"`, Anthropic `thinking` is mapped to an on/off
+  `thinking: {"type": …}` param instead of being dropped.
 - **Response** — OpenAI → Anthropic, streaming and non-streaming. A streamed OpenAI SSE
   response is re-serialised to the Anthropic event sequence (`message_start` →
   `content_block_*` → `message_delta` → `message_stop`), with tool-call arguments streamed as
@@ -156,8 +162,12 @@ Example config (OpenCode Go, `kimi-k2.7-code`):
 ```
 
 Scope and limits (v1): the translation covers the subset Claude Code actually emits, not the
-full Anthropic API. `cache_control`/prompt caching and extended `thinking` have no OpenAI
-equivalent and are dropped; `/v1/messages/count_tokens` is answered locally with a coarse
+full Anthropic API. Per-block `cache_control` has no OpenAI equivalent and is dropped, but
+session-level prefix caching is hinted via `openaiPromptCacheKey` (above) and OpenAI
+`cached_tokens` are surfaced as Anthropic `cache_read_input_tokens`. Extended `thinking` is
+dropped by default but can be mapped on/off with `openaiThinking: "toggle"` (for endpoints that
+accept a `thinking: {"type": …}` param — do not enable it against an always-think model, which
+errors on `"disabled"`). `/v1/messages/count_tokens` is answered locally with a coarse
 chars/4 estimate; input-token usage in `message_start` is best-effort. `--dry-run` shows the
 interposed translator and its real upstream. The proxy lives only for the duration of the
 wrapped command, and is a no-op for other harnesses and when `upstreamApi` is unset.
