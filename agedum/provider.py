@@ -626,6 +626,15 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
         "CLAUDE_CODE_USE_FOUNDRY",
         "CLAUDE_CODE_USE_MANTLE",
     ]
+
+    # Escape hatch: arbitrary extra env for the claude child (e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+    # DISABLE_COMPACT) — applied last so it can override the modeled keys above; values stringified.
+    extra_env = block.get("extraEnv")
+    if isinstance(extra_env, dict):
+        for name, value in extra_env.items():
+            if value is not None:
+                env[str(name)] = str(value)
+
     return env, unset, ["claude"], ()
 
 

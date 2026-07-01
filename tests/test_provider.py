@@ -395,6 +395,25 @@ def test_claude_context_window_env():
     )
 
 
+def test_claude_extra_env_passthrough():
+    # `extraEnv` is a general escape hatch — arbitrary Claude env vars, stringified, applied last.
+    launch = build_launch(
+        {
+            "harness": "claude",
+            "secretEnv": "K",
+            "config": {
+                "baseUrl": "https://x/y",
+                "authStyle": "apikey",
+                "model": "m",
+                "extraEnv": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": 32768, "FOO": "bar"},
+            },
+        },
+        base_env={"K": "v"},
+    )
+    assert launch.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32768"  # int value stringified
+    assert launch.env["FOO"] == "bar"
+
+
 def test_claude_openai_thinking_rejects_unknown_mode():
     config = _kimi_code_config()
     config["config"]["openaiThinking"] = "deep"

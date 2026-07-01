@@ -85,6 +85,7 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
 | `openaiPromptCacheKey` | `AGEDUM_OPENAI_PROMPT_CACHE_KEY=1` — inject a per-launch `prompt_cache_key` (translate proxy only; see [below](#translate-proxy)) |
 | `openaiThinking` | `AGEDUM_OPENAI_THINKING=<mode>` — `"toggle"` maps Anthropic `thinking` on/off (translate proxy only) |
 | `autoCompactWindow` (> 0) | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
+| `extraEnv` (object) | arbitrary env for the claude child, stringified + applied last (escape hatch, e.g. `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `DISABLE_COMPACT`) |
 
 - `secretEnv` (mapped to the auth token) must be present in the [env file](../provider.md#the-env-file);
   `baseUrl` without a `secretEnv` is an error.
