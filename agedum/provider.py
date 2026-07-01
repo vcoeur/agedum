@@ -550,6 +550,12 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
     if isinstance(max_tokens, (int, float)) and int(max_tokens) > 0:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(int(max_tokens))
 
+    # The context-window size Claude Code auto-compacts against — set it to a non-Anthropic
+    # upstream's real window (e.g. Kimi Code's 262144) so compaction fires at the right point.
+    auto_compact = block.get("autoCompactWindow") or 0
+    if isinstance(auto_compact, (int, float)) and int(auto_compact) > 0:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(int(auto_compact))
+
     effort = str(block.get("effortLevel") or "").strip()
     if effort:
         env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
@@ -587,10 +593,31 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
             "claude config sets both `upstreamApi: openai-completions` and "
             "`foldSystemMessages`; use one — the translator already folds the system prompt"
         )
+
+    # OpenAI-translate refinements — only meaningful when the translating proxy is on:
+    #  - openaiPromptCacheKey: inject a per-launch `prompt_cache_key` prefix-cache routing hint.
+    #  - openaiThinking "toggle": map Anthropic `thinking` to an on/off `thinking:{type}` param
+    #    (for models that support it, e.g. Kimi K2.6; NOT always-think models like k2.7-code).
+    cache_hint = block.get("openaiPromptCacheKey") is True
+    thinking_mode = str(block.get("openaiThinking") or "").strip()
+    if (cache_hint or thinking_mode) and not translate:
+        raise ProviderError(
+            "claude config sets an OpenAI-translate option (openaiPromptCacheKey / "
+            "openaiThinking) but not `upstreamApi: openai-completions`"
+        )
+    if thinking_mode and thinking_mode != "toggle":
+        raise ProviderError(
+            f"claude config has an unknown openaiThinking {thinking_mode!r}; expected 'toggle'"
+        )
+
     if fold:
         env["AGEDUM_FOLD_SYSTEM_MESSAGES"] = "1"
     if translate:
         env["AGEDUM_TRANSLATE_OPENAI"] = "1"
+        if cache_hint:
+            env["AGEDUM_OPENAI_PROMPT_CACHE_KEY"] = "1"
+        if thinking_mode:
+            env["AGEDUM_OPENAI_THINKING"] = thinking_mode
 
     # Defensive: never let a stray cloud-provider switch leak into the child.
     unset += [

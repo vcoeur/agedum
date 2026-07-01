@@ -343,6 +343,66 @@ def test_claude_upstream_api_and_fold_are_mutually_exclusive():
         )
 
 
+# ---------------------------------------------------------------------------
+# claude / Kimi Code subscription — endpoint guard + caching/thinking/compact
+# ---------------------------------------------------------------------------
+
+_KIMI_ENV = {"KIMI_API_KEY": "sk-kimi-test"}
+
+
+def _kimi_code_config() -> dict:
+    """The claude/kimi-code launcher shape (mirrors agentsconf providers/claude/kimi-code.json)."""
+    return {
+        "harness": "claude",
+        "secretEnv": "KIMI_API_KEY",
+        "config": {
+            "baseUrl": "https://api.kimi.com/coding",
+            "authStyle": "apikey",
+            "upstreamApi": "openai-completions",
+            "openaiPromptCacheKey": True,
+            "openaiThinking": "toggle",
+            "model": "kimi-for-coding",
+            "autoCompactWindow": 262144,
+        },
+    }
+
+
+def test_kimi_code_targets_subscription_endpoint_not_moonshot():
+    launch = build_launch(_kimi_code_config(), base_env=_KIMI_ENV)
+    base_url = launch.env["ANTHROPIC_BASE_URL"]
+    # Must be the Kimi *subscription* (coding) endpoint, never the metered Moonshot platform API.
+    assert base_url == "https://api.kimi.com/coding"
+    assert "moonshot" not in base_url
+    assert launch.env["ANTHROPIC_API_KEY"] == "sk-kimi-test"  # resolved from KIMI_API_KEY
+    assert launch.env["ANTHROPIC_MODEL"] == "kimi-for-coding"
+
+
+def test_kimi_code_enables_cache_thinking_and_translate():
+    launch = build_launch(_kimi_code_config(), base_env=_KIMI_ENV)
+    assert launch.env["AGEDUM_TRANSLATE_OPENAI"] == "1"
+    assert launch.env["AGEDUM_OPENAI_PROMPT_CACHE_KEY"] == "1"
+    assert launch.env["AGEDUM_OPENAI_THINKING"] == "toggle"
+
+
+def test_claude_auto_compact_window_sets_env():
+    launch = build_launch(_kimi_code_config(), base_env=_KIMI_ENV)
+    assert launch.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "262144"
+
+
+def test_claude_openai_thinking_rejects_unknown_mode():
+    config = _kimi_code_config()
+    config["config"]["openaiThinking"] = "deep"
+    with pytest.raises(ProviderError, match="unknown openaiThinking"):
+        build_launch(config, base_env=_KIMI_ENV)
+
+
+def test_claude_openai_cache_option_requires_translate():
+    config = _kimi_code_config()
+    config["config"].pop("upstreamApi")  # cache/thinking options with no translating proxy
+    with pytest.raises(ProviderError, match="OpenAI-translate option"):
+        build_launch(config, base_env=_KIMI_ENV)
+
+
 def test_claude_apikey_auth_style():
     launch = build_launch(
         {
@@ -438,6 +498,35 @@ def test_kimi_base_url_generates_config_file():
     assert provider["type"] == "openai_legacy"
     assert provider["base_url"] == "https://opencode.ai/zen/go/v1"
     assert provider["api_key"] == "sk-go"  # resolved key baked in; masked in --dry-run
+
+
+def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
+    # `agedum kimi` → kimi-cli (kimi harness) against the Kimi Code *subscription* endpoint,
+    # keyed by KIMI_API_KEY — never the metered moonshot platform API.
+    launch = build_launch(
+        {
+            "harness": "kimi",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "providerType": "kimi",
+                "model": "kimi-for-coding",
+                "contextWindow": 262144,
+                "thinking": True,
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-kimi-test"},
+    )
+    assert launch.command[0] == "kimi"  # the kimi-cli, not claude
+    assert "--model" in launch.command and "kimi-for-coding" in launch.command
+    doc = json.loads(launch.config_files[0][1])
+    assert doc["default_model"] == "kimi-for-coding"
+    assert doc["models"]["kimi-for-coding"]["max_context_size"] == 262144
+    provider = doc["providers"]["agedum"]
+    assert provider["type"] == "kimi"  # native Kimi Code type, not openai_legacy
+    assert provider["base_url"] == "https://api.kimi.com/coding/v1"
+    assert "moonshot" not in provider["base_url"]
+    assert provider["api_key"] == "sk-kimi-test"
 
 
 def test_kimi_base_url_requires_model():
