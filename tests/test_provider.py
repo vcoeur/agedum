@@ -362,7 +362,8 @@ def _kimi_code_config() -> dict:
             "openaiPromptCacheKey": True,
             "openaiThinking": "toggle",
             "model": "kimi-for-coding",
-            "autoCompactWindow": 262144,
+            "maxContextTokens": 262144,
+            "autoCompactWindow": 230000,
         },
     }
 
@@ -384,9 +385,14 @@ def test_kimi_code_enables_cache_thinking_and_translate():
     assert launch.env["AGEDUM_OPENAI_THINKING"] == "toggle"
 
 
-def test_claude_auto_compact_window_sets_env():
+def test_claude_context_window_env():
     launch = build_launch(_kimi_code_config(), base_env=_KIMI_ENV)
-    assert launch.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "262144"
+    # auto-compact fires below the max-context ceiling, leaving headroom.
+    assert launch.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144"
+    assert launch.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "230000"
+    assert int(launch.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) < int(
+        launch.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+    )
 
 
 def test_claude_openai_thinking_rejects_unknown_mode():
@@ -508,6 +514,7 @@ def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
             "harness": "kimi",
             "secretEnv": "KIMI_API_KEY",
             "config": {
+                "binary": "kimi-cli",
                 "baseUrl": "https://api.kimi.com/coding/v1",
                 "providerType": "kimi",
                 "model": "kimi-for-coding",
@@ -517,7 +524,7 @@ def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
         },
         base_env={"KIMI_API_KEY": "sk-kimi-test"},
     )
-    assert launch.command[0] == "kimi"  # the kimi-cli, not claude
+    assert launch.command[0] == "kimi-cli"  # the Kimi Code CLI binary, not `kimi`
     assert "--model" in launch.command and "kimi-for-coding" in launch.command
     doc = json.loads(launch.config_files[0][1])
     assert doc["default_model"] == "kimi-for-coding"
@@ -527,6 +534,17 @@ def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
     assert provider["base_url"] == "https://api.kimi.com/coding/v1"
     assert "moonshot" not in provider["base_url"]
     assert provider["api_key"] == "sk-kimi-test"
+
+
+def test_kimi_binary_override_and_default():
+    # `binary` overrides the CLI name (Kimi Code CLI ships as `kimi-cli`); default is `kimi`.
+    overridden = build_launch(
+        {"harness": "kimi", "config": {"binary": "kimi-cli", "model": "kimi-for-coding"}},
+        base_env={},
+    )
+    assert overridden.command == ["kimi-cli", "--model", "kimi-for-coding"]
+    default = build_launch({"harness": "kimi", "config": {"model": "m"}}, base_env={})
+    assert default.command[0] == "kimi"
 
 
 def test_kimi_base_url_requires_model():
