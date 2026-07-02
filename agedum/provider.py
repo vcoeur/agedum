@@ -1270,6 +1270,18 @@ def _toml_escape(value: str) -> str:
     return "".join(f"\\u{ord(char):04X}" if ord(char) < 0x20 else char for char in escaped)
 
 
+def _toml_scalar(value: object) -> str:
+    """Render a JSON scalar as a TOML value for a codex ``-c key=<value>`` override: a bool as
+    ``true`` / ``false``, an int/float bare, everything else as a quoted basic string. codex
+    parses each ``-c`` value as TOML, so a context window must go bare (``262144``) and a flag
+    bare (``true``) — quoting them would type-mismatch the setting."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return f'"{_toml_escape(str(value))}"'
+
+
 def _reasonix_provider_block_from_def(provider_def: dict) -> str:
     """Render one ``[[providers]]`` block from a reasonix ``providerDef`` entry.
 
@@ -1528,6 +1540,18 @@ def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
 
     if model:
         command += ["-m", model]
+
+    # `codexConfig` is a passthrough of arbitrary codex config keys as `-c key=<toml>` overrides
+    # (they win over ~/.codex/config.toml). It carries the model metadata codex can't learn from
+    # a translated custom endpoint — `model_context_window` (the context-meter denominator, since
+    # the /models probe is answered empty) and `model_supports_reasoning_summaries` /
+    # `model_reasoning_summary` (so codex renders the reasoning the Responses↔Chat proxy surfaces).
+    codex_config = block.get("codexConfig")
+    if codex_config is not None:
+        if not isinstance(codex_config, dict):
+            raise ProviderError("codex config `codexConfig` must be a table of key → value")
+        for key, value in codex_config.items():
+            command += ["-c", f"{key}={_toml_scalar(value)}"]
 
     # codex has no global "route subagents to a fast model" knob (openai/codex#19482) and no
     # inline agent config — custom agents are standalone TOML files under ~/.codex/agents/

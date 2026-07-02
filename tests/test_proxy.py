@@ -1584,6 +1584,96 @@ def test_translate_chat_stream_tool_call():
     assert function_item["arguments"] == '{"cmd":"ls"}'
 
 
+def test_translate_chat_stream_reasoning_before_message():
+    # A `delta.reasoning_content` stream becomes a Responses reasoning item at index 0; the
+    # assistant message follows at index 1.
+    blob = _chat_sse(
+        {"choices": [{"delta": {"reasoning_content": "Let me "}}]},
+        {"choices": [{"delta": {"reasoning_content": "think."}}]},
+        {"choices": [{"delta": {"content": "42"}}]},
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        },
+    )
+    events = _parse_responses_sse(
+        b"".join(translate_chat_stream(_reader(blob), model="kimi-for-coding"))
+    )
+    types = [event for event, _ in events]
+    assert "response.reasoning_summary_part.added" in types
+    reasoning_deltas = [
+        data["delta"] for event, data in events if event == "response.reasoning_summary_text.delta"
+    ]
+    assert "".join(reasoning_deltas) == "Let me think."
+    reasoning_done = next(
+        data for event, data in events if event == "response.reasoning_summary_text.done"
+    )
+    assert reasoning_done["text"] == "Let me think."
+    # Reasoning is output item 0; the message is item 1.
+    added = [
+        (data["output_index"], data["item"]["type"])
+        for event, data in events
+        if event == "response.output_item.added"
+    ]
+    assert (0, "reasoning") in added
+    assert (1, "message") in added
+    text_deltas = [data["delta"] for event, data in events if event == "response.output_text.delta"]
+    assert "".join(text_deltas) == "42"
+    completed = next(data for event, data in events if event == "response.completed")
+    output = completed["response"]["output"]
+    assert output[0]["type"] == "reasoning"
+    assert output[0]["summary"][0]["text"] == "Let me think."
+    assert output[1]["type"] == "message"
+    assert output[1]["content"][0]["text"] == "42"
+
+
+def test_translate_chat_stream_reasoning_only():
+    # A thinking-only turn (no assistant text) still closes its reasoning item.
+    blob = _chat_sse(
+        {"choices": [{"delta": {"reasoning_content": "hmm"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+    events = _parse_responses_sse(b"".join(translate_chat_stream(_reader(blob), model="m")))
+    completed = next(data for event, data in events if event == "response.completed")
+    output = completed["response"]["output"]
+    assert len(output) == 1
+    assert output[0]["type"] == "reasoning"
+    assert output[0]["summary"][0]["text"] == "hmm"
+
+
+def test_translate_chat_stream_reasoning_then_tool_call():
+    # Reasoning (index 0) followed by a tool call (index 1, no message between).
+    blob = _chat_sse(
+        {"choices": [{"delta": {"reasoning_content": "plan it"}}]},
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "run", "arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    events = _parse_responses_sse(b"".join(translate_chat_stream(_reader(blob), model="m")))
+    completed = next(data for event, data in events if event == "response.completed")
+    output = completed["response"]["output"]
+    assert [item["type"] for item in output] == ["reasoning", "function_call"]
+    fc_added = next(
+        data
+        for event, data in events
+        if event == "response.output_item.added" and data["item"]["type"] == "function_call"
+    )
+    assert fc_added["output_index"] == 1
+
+
 class _FakeChatUpstream:
     """Replies to ``POST /chat/completions`` with a fixed Chat Completions SSE stream."""
 

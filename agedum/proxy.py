@@ -1360,6 +1360,13 @@ def translate_chat_stream(read, *, model: str) -> object:
     """Yield Responses-API SSE frames (bytes) translated from an upstream Chat Completions
     SSE stream read via ``read`` (a ``response.read``-style callable).
 
+    A Chat ``delta.reasoning_content`` (Moonshot/Kimi thinking models stream the chain-of-thought
+    on this field) becomes a Responses ``reasoning`` output item at index 0, streamed as
+    reasoning-summary events (``output_item.added`` → ``reasoning_summary_part.added`` →
+    ``reasoning_summary_text.delta``* → ``...done`` → ``output_item.done``) so codex renders the
+    model's thinking. Reasoning always precedes the assistant message in the stream; the message
+    (and any tool calls) then follow at the next index.
+
     Text sequence: ``response.created`` → ``response.output_item.added`` (message) →
     ``response.output_text.delta``* → ``response.output_text.done`` →
     ``response.output_item.done`` → ``response.completed``. Tool calls accumulate from the Chat
@@ -1369,6 +1376,7 @@ def translate_chat_stream(read, *, model: str) -> object:
     seq = count()
     response_id = "resp_" + uuid.uuid4().hex
     msg_item_id = "msg_" + uuid.uuid4().hex
+    reasoning_item_id = "rs_" + uuid.uuid4().hex
     yield _sse_frame(
         "response.created",
         {
@@ -1385,9 +1393,82 @@ def translate_chat_stream(read, *, model: str) -> object:
     )
 
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     message_started = False
+    reasoning_started = False
+    reasoning_closed = False
     tool_calls: dict[int, dict] = {}
     usage: dict | None = None
+    output: list[dict] = []
+
+    def _open_reasoning():
+        # The reasoning item is always the first output item (index 0).
+        yield _sse_frame(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "sequence_number": next(seq),
+                "output_index": 0,
+                "item": {
+                    "id": reasoning_item_id,
+                    "type": "reasoning",
+                    "status": "in_progress",
+                    "summary": [],
+                },
+            },
+        )
+        yield _sse_frame(
+            "response.reasoning_summary_part.added",
+            {
+                "type": "response.reasoning_summary_part.added",
+                "sequence_number": next(seq),
+                "item_id": reasoning_item_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""},
+            },
+        )
+
+    def _close_reasoning():
+        summary = "".join(reasoning_parts)
+        yield _sse_frame(
+            "response.reasoning_summary_text.done",
+            {
+                "type": "response.reasoning_summary_text.done",
+                "sequence_number": next(seq),
+                "item_id": reasoning_item_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "text": summary,
+            },
+        )
+        yield _sse_frame(
+            "response.reasoning_summary_part.done",
+            {
+                "type": "response.reasoning_summary_part.done",
+                "sequence_number": next(seq),
+                "item_id": reasoning_item_id,
+                "output_index": 0,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": summary},
+            },
+        )
+        reasoning_item = {
+            "id": reasoning_item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": summary}],
+        }
+        yield _sse_frame(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "sequence_number": next(seq),
+                "output_index": 0,
+                "item": reasoning_item,
+            },
+        )
+        output.append(reasoning_item)
 
     for data in _iter_chat_sse(read):
         if not isinstance(data, dict):
@@ -1398,8 +1479,29 @@ def translate_chat_stream(read, *, model: str) -> object:
         if not choices:
             continue
         delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning_content")
+        # Reasoning precedes the message; ignore any stray reasoning once real output has begun.
+        if isinstance(reasoning, str) and reasoning and not message_started and not tool_calls:
+            if not reasoning_started:
+                reasoning_started = True
+                yield from _open_reasoning()
+            reasoning_parts.append(reasoning)
+            yield _sse_frame(
+                "response.reasoning_summary_text.delta",
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "sequence_number": next(seq),
+                    "item_id": reasoning_item_id,
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "delta": reasoning,
+                },
+            )
         content = delta.get("content")
         if isinstance(content, str) and content:
+            if reasoning_started and not reasoning_closed:
+                reasoning_closed = True
+                yield from _close_reasoning()
             if not message_started:
                 message_started = True
                 yield _sse_frame(
@@ -1407,7 +1509,7 @@ def translate_chat_stream(read, *, model: str) -> object:
                     {
                         "type": "response.output_item.added",
                         "sequence_number": next(seq),
-                        "output_index": 0,
+                        "output_index": 1 if reasoning_started else 0,
                         "item": {
                             "id": msg_item_id,
                             "type": "message",
@@ -1424,7 +1526,7 @@ def translate_chat_stream(read, *, model: str) -> object:
                     "type": "response.output_text.delta",
                     "sequence_number": next(seq),
                     "item_id": msg_item_id,
-                    "output_index": 0,
+                    "output_index": 1 if reasoning_started else 0,
                     "content_index": 0,
                     "delta": content,
                 },
@@ -1440,7 +1542,12 @@ def translate_chat_stream(read, *, model: str) -> object:
             if function.get("arguments"):
                 accumulator["arguments"] += function["arguments"]
 
-    output: list[dict] = []
+    # A reasoning-only turn (thinking but no assistant text) still needs its item closed.
+    if reasoning_started and not reasoning_closed:
+        reasoning_closed = True
+        yield from _close_reasoning()
+
+    msg_index = 1 if reasoning_started else 0
     if message_started:
         full_text = "".join(text_parts)
         yield _sse_frame(
@@ -1449,7 +1556,7 @@ def translate_chat_stream(read, *, model: str) -> object:
                 "type": "response.output_text.done",
                 "sequence_number": next(seq),
                 "item_id": msg_item_id,
-                "output_index": 0,
+                "output_index": msg_index,
                 "content_index": 0,
                 "text": full_text,
             },
@@ -1466,13 +1573,13 @@ def translate_chat_stream(read, *, model: str) -> object:
             {
                 "type": "response.output_item.done",
                 "sequence_number": next(seq),
-                "output_index": 0,
+                "output_index": msg_index,
                 "item": message_item,
             },
         )
         output.append(message_item)
 
-    base_index = 1 if message_started else 0
+    base_index = (1 if reasoning_started else 0) + (1 if message_started else 0)
     for relative_index, key in enumerate(sorted(tool_calls)):
         accumulator = tool_calls[key]
         output_index = base_index + relative_index

@@ -1945,6 +1945,47 @@ def test_codex_wire_api_override():
     assert 'model_providers.agedum.wire_api="responses"' in launch.command
 
 
+def test_codex_config_passthrough_typed_scalars():
+    # codexConfig -> `-c key=<toml>` overrides: int bare, bool bare, string quoted — so codex
+    # parses each value at the type the setting expects.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "chatCompletions": True,
+                "model": "kimi-for-coding",
+                "codexConfig": {
+                    "model_context_window": 262144,
+                    "model_supports_reasoning_summaries": True,
+                    "model_reasoning_summary": "auto",
+                },
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-x"},
+    )
+    command = launch.command
+    assert "model_context_window=262144" in command
+    assert "model_supports_reasoning_summaries=true" in command
+    assert 'model_reasoning_summary="auto"' in command
+    # The overrides land after -m, each preceded by its own -c.
+    for token in (
+        "model_context_window=262144",
+        "model_supports_reasoning_summaries=true",
+        'model_reasoning_summary="auto"',
+    ):
+        assert command[command.index(token) - 1] == "-c"
+
+
+def test_codex_config_rejects_non_table():
+    with pytest.raises(ProviderError, match="codexConfig"):
+        build_launch(
+            {"harness": "codex", "config": {"model": "m", "codexConfig": ["nope"]}},
+            base_env={},
+        )
+
+
 def test_codex_key_via_env_export_not_argv():
     # The key reaches codex via the required-env export (its conventional name, referenced as
     # the provider's env_key), never argv.
