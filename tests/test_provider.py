@@ -1986,6 +1986,82 @@ def test_codex_config_rejects_non_table():
         )
 
 
+_FAKE_CATALOG = {
+    "models": [
+        {
+            "slug": "gpt-tmpl",
+            "display_name": "Template",
+            "description": "d",
+            "base_instructions": "You are a coding agent.",
+            "context_window": 272000,
+            "max_context_window": 272000,
+            "supports_reasoning_summaries": True,
+            "default_reasoning_summary": "none",
+            "availability_nux": {"message": "new!"},
+            "upgrade": {"to": "x"},
+        }
+    ]
+}
+
+
+def test_codex_model_catalog_clones_template_and_wires_flag(monkeypatch):
+    # codexModelCatalog -> agedum clones the live catalog's first entry as the config's model,
+    # applies contextWindow/displayName, writes a model_catalog_json file, and points codex at it.
+    monkeypatch.setattr("agedum.provider._codex_debug_models", lambda: _FAKE_CATALOG)
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "chatCompletions": True,
+                "model": "kimi-for-coding",
+                "codexModelCatalog": {"contextWindow": 262144, "displayName": "Kimi K2.7 (Code)"},
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-x"},
+    )
+    catalog_files = [
+        cf for cf in launch.config_files if cf[0].endswith("agedum-model-catalog.json")
+    ]
+    assert len(catalog_files) == 1
+    target, content, is_project = catalog_files[0]
+    assert is_project is False
+    doc = json.loads(content)
+    entry = doc["models"][0]
+    assert entry["slug"] == "kimi-for-coding"
+    assert entry["display_name"] == "Kimi K2.7 (Code)"
+    assert entry["context_window"] == 262144
+    assert entry["max_context_window"] == 262144
+    assert entry["base_instructions"] == "You are a coding agent."  # version-correct template field
+    assert "availability_nux" not in entry and "upgrade" not in entry
+    assert f'model_catalog_json="{target}"' in " ".join(launch.command)
+
+
+def test_codex_model_catalog_skipped_when_codex_unavailable(monkeypatch):
+    # If `codex debug models` can't be queried, the catalog is skipped — the launch still works
+    # (codex falls back to its own metadata), no file, no flag.
+    monkeypatch.setattr("agedum.provider._codex_debug_models", lambda: None)
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "config": {"model": "kimi-for-coding", "codexModelCatalog": {"contextWindow": 262144}},
+        },
+        base_env={},
+    )
+    assert not any(cf[0].endswith("agedum-model-catalog.json") for cf in launch.config_files)
+    assert not any("model_catalog_json" in token for token in launch.command)
+
+
+def test_codex_model_catalog_rejects_non_table(monkeypatch):
+    monkeypatch.setattr("agedum.provider._codex_debug_models", lambda: _FAKE_CATALOG)
+    with pytest.raises(ProviderError, match="codexModelCatalog"):
+        build_launch(
+            {"harness": "codex", "config": {"model": "m", "codexModelCatalog": "nope"}},
+            base_env={},
+        )
+
+
 def test_codex_key_via_env_export_not_argv():
     # The key reaches codex via the required-env export (its conventional name, referenced as
     # the provider's env_key), never argv.

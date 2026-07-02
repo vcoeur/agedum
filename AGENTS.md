@@ -125,7 +125,12 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   bare, else quoted) — carries metadata codex can't learn from a translated endpoint, chiefly
   `model_context_window` (context-meter denominator; the `/models` probe is answered empty) and
   `model_supports_reasoning_summaries` / `model_reasoning_summary` (enable reasoning rendering).
-  codex custom agents are standalone TOML files the
+  **`codexModelCatalog`** (`{contextWindow, displayName?, description?}`) makes codex fully
+  *recognise* a custom model: agedum runs `codex debug models`, clones its first entry (for
+  version-correct `base_instructions`) as this `model`, writes `~/.codex/agedum-model-catalog.json`,
+  and passes `-c model_catalog_json=<path>` — silencing the "metadata not found" warning and
+  lighting the context meter (which reads the window from the *catalog*, not `model_context_window`).
+  Skipped gracefully if `codex debug models` can't be queried. codex custom agents are standalone TOML files the
   primary delegates to — agedum binds them three ways: `subagentModel` (sugar for one fast
   `~/.codex/agents/flash.toml`), `codexAgents: <dir>` (bind every `*.toml` in a providers-root
   dir into `~/.codex/agents/`, **personal** scope), and `codexProjectAgents: <dir>` (into
