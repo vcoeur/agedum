@@ -119,7 +119,13 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   `_codex_env` emits `AGEDUM_CODEX_CHAT_UPSTREAM`, and at launch `cli.main._maybe_codex_proxy`
   interposes a `ResponsesToChatProxy` (`proxy.py`, the `FoldProxy` sibling) — codex speaks
   Responses to the proxy, which translates to/from `/chat/completions` upstream — rewriting the
-  `base_url` override to the proxy address. codex custom agents are standalone TOML files the
+  `base_url` override to the proxy address. The proxy surfaces a thinking model's streamed
+  `delta.reasoning_content` (Kimi K2.7) as a Responses `reasoning` item so codex renders it.
+  **`codexConfig`** is a table of arbitrary codex config keys → `-c key=<toml>` overrides (bool/int
+  bare, else quoted) — carries metadata codex can't learn from a translated endpoint, chiefly
+  `model_context_window` (context-meter denominator; the `/models` probe is answered empty) and
+  `model_supports_reasoning_summaries` / `model_reasoning_summary` (enable reasoning rendering).
+  codex custom agents are standalone TOML files the
   primary delegates to — agedum binds them three ways: `subagentModel` (sugar for one fast
   `~/.codex/agents/flash.toml`), `codexAgents: <dir>` (bind every `*.toml` in a providers-root
   dir into `~/.codex/agents/`, **personal** scope), and `codexProjectAgents: <dir>` (into

@@ -93,6 +93,7 @@ built-in ids (`openai`, `ollama`, `lmstudio`, `amazon-bedrock`), so agedum names
 | `chatCompletions` | `true` ⇒ the endpoint speaks **Chat Completions**, so agedum interposes a translation proxy — see below |
 | `wireApi` | codex's wire protocol for a **Responses** endpoint — emitted only when set (else codex's default applies). `chat` is **rejected by recent codex** (removed Feb 2026); use `chatCompletions` for a chat endpoint |
 | `secretEnv` | referenced as `model_providers.agedum.env_key` (its **name**, never its value) |
+| `codexConfig` | a table of arbitrary codex config keys → `-c key=<toml>` overrides (bool bare, int/float bare, everything else quoted). Carries the model metadata codex can't learn from a translated endpoint — chiefly `model_context_window` (the context-meter denominator, since the `/models` probe is answered empty) and `model_supports_reasoning_summaries` / `model_reasoning_summary` (so codex renders the reasoning the proxy surfaces — see [chat proxy](#chat-proxy)) |
 
 **The key never lands on disk or in argv** — codex reads it from the env var named by
 `env_key`, which agedum exports from the [env file](../provider.md#the-env-file) at launch and
@@ -106,7 +107,9 @@ Completions, so codex cannot reach them directly. Setting **`chatCompletions: tr
 agedum interpose a localhost [`ResponsesToChatProxy`](../internals.md) for the session (the
 [`FoldProxy`](claude.md) sibling): codex's `base_url` is pointed at the proxy, which translates
 codex's `POST /responses` into a `/chat/completions` call upstream and the streamed Chat
-deltas back into the Responses SSE events codex consumes (text + function calls).
+deltas back into the Responses SSE events codex consumes (text, function calls, and — for a
+thinking model that streams `delta.reasoning_content`, e.g. Kimi K2.7 — a `reasoning` output
+item streamed as reasoning-summary events, so codex renders the model's thinking).
 
 ```json
 {
@@ -130,13 +133,17 @@ codex's `Authorization: Bearer <key>` header to the upstream unchanged.
 !!! note "Proxy scope + watchpoints"
     The proxy covers the codex loop verified live against DeepSeek — streamed text and
     function-call (tool) turns, single and multi-turn, on both `deepseek-v4-pro` and
-    `deepseek-v4-flash`. Known limits: (1) the stateful **reasoning round-trip** some thinking
-    models use across tool turns is **not** replayed (dropped on input) — not needed for the
-    flows tested, revisit if a provider errors on missing `reasoning_content`; (2) codex's
-    `GET /models` metadata probe is answered with an empty list, so codex uses **fallback
-    model metadata** (a benign "metadata not found" warning); (3) codex rejects a skill whose
-    `description` exceeds **1024 chars** and skips it — trim long agedum skill descriptions to
-    surface them under codex.
+    `deepseek-v4-flash` — and against Kimi K2.7 for **reasoning display** (the model's
+    `reasoning_content` rendered by codex as a thinking summary). Known limits: (1) the stateful
+    **reasoning round-trip** across tool turns is **not** replayed on *input* (inbound
+    `reasoning` items are dropped) — the response-side reasoning *display* above is separate and
+    works; revisit if a provider errors on missing `reasoning_content`; (2) codex's `GET /models`
+    metadata probe is answered with an empty list, so codex logs a benign "metadata not found"
+    warning and falls back to default metadata — set the real window (and reasoning-summary
+    support) explicitly with `codexConfig` (`model_context_window`,
+    `model_supports_reasoning_summaries`), which overrides the fallback; (3) codex rejects a skill
+    whose `description` exceeds **1024 chars** and skips it — trim long agedum skill descriptions
+    to surface them under codex.
 
 ### Custom subagents (`subagentModel`, `codexAgents`, `codexProjectAgents`) { #subagent-routing }
 
