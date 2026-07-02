@@ -94,6 +94,7 @@ built-in ids (`openai`, `ollama`, `lmstudio`, `amazon-bedrock`), so agedum names
 | `wireApi` | codex's wire protocol for a **Responses** endpoint — emitted only when set (else codex's default applies). `chat` is **rejected by recent codex** (removed Feb 2026); use `chatCompletions` for a chat endpoint |
 | `secretEnv` | referenced as `model_providers.agedum.env_key` (its **name**, never its value) |
 | `codexConfig` | a table of arbitrary codex config keys → `-c key=<toml>` overrides (bool bare, int/float bare, everything else quoted). Carries the model metadata codex can't learn from a translated endpoint — chiefly `model_context_window` (the context-meter denominator, since the `/models` probe is answered empty) and `model_supports_reasoning_summaries` / `model_reasoning_summary` (so codex renders the reasoning the proxy surfaces — see [chat proxy](#chat-proxy)) |
+| `codexModelCatalog` | a table (`{contextWindow, displayName?, description?}`) that makes codex fully **recognise** the custom `model` — see [model catalog](#model-catalog) |
 
 **The key never lands on disk or in argv** — codex reads it from the env var named by
 `env_key`, which agedum exports from the [env file](../provider.md#the-env-file) at launch and
@@ -144,6 +145,47 @@ codex's `Authorization: Bearer <key>` header to the upstream unchanged.
     `model_supports_reasoning_summaries`), which overrides the fallback; (3) codex rejects a skill
     whose `description` exceeds **1024 chars** and skips it — trim long agedum skill descriptions
     to surface them under codex.
+
+### Model catalog (`codexModelCatalog`) { #model-catalog }
+
+A custom model isn't in codex's bundled catalog, so codex logs *"model metadata … not found"*,
+falls back to default metadata, and — crucially — can't populate its **context-usage meter** (the
+`X/262k` readout), because the meter reads the window from the *catalog* entry, not from the
+`model_context_window` override. `codexConfig` alone therefore can't light up the meter.
+
+**`codexModelCatalog`** closes that gap. When set, agedum runs the installed **`codex debug
+models`** to read codex's own catalog, clones its first entry (so the required, version-specific
+`base_instructions` and capability flags are correct), renames it to this config's `model`, applies
+the table's overrides, writes a one-model catalog to `~/.codex/agedum-model-catalog.json`, and
+passes `-c model_catalog_json=<that file>`. codex then recognises the model — warning gone, context
+meter live.
+
+| `codexModelCatalog` key | Effect |
+|---|---|
+| `contextWindow` | `context_window` + `max_context_window` on the cloned entry — the meter denominator |
+| `displayName` | the entry's `display_name` (defaults to `model`) |
+| `description` | the entry's `description` (optional) |
+
+```json
+{
+  "harness": "codex",
+  "slug": "codex-kimi-code",
+  "secretEnv": "KIMI_API_KEY",
+  "config": {
+    "baseUrl": "https://api.kimi.com/coding/v1",
+    "chatCompletions": true,
+    "model": "kimi-for-coding",
+    "codexModelCatalog": { "contextWindow": 262144, "displayName": "Kimi K2.7 (Code)" }
+  }
+}
+```
+
+!!! note "Graceful + robust"
+    Cloning from the **live** `codex debug models` keeps `base_instructions` correct across codex
+    versions — nothing codex-internal is hardcoded. If codex can't be queried (absent, error,
+    unparseable output), agedum **skips** the catalog and codex uses its fallback metadata — the
+    launch never fails on it. The generated catalog carries only the one custom model, so pair it
+    with a launcher that pins `-m <model>` (the other bundled models aren't selectable under it).
 
 ### Custom subagents (`subagentModel`, `codexAgents`, `codexProjectAgents`) { #subagent-routing }
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -1282,6 +1283,58 @@ def _toml_scalar(value: object) -> str:
     return f'"{_toml_escape(str(value))}"'
 
 
+def _codex_debug_models() -> dict | None:
+    """codex's resolved model catalog (``codex debug models``), or ``None`` if unavailable.
+
+    Runs the installed codex to read its **own** bundled catalog — the source of a
+    version-correct template entry (``base_instructions`` and capability flags) to clone for a
+    custom model. Any failure (codex absent, non-zero exit, unparseable / empty output) returns
+    ``None`` so the caller degrades to codex's fallback metadata instead of failing the launch.
+    """
+    try:
+        result = subprocess.run(
+            ["codex", "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("models"), list) and data["models"]:
+        return data
+    return None
+
+
+def _codex_synthesized_catalog(model: str, catalog: dict, overrides: dict) -> str:
+    """A one-entry ``model_catalog_json`` document for ``model``, cloned from ``catalog``'s first
+    entry so codex recognises the custom model (silencing the "metadata not found" warning and
+    driving the context-usage meter from ``context_window``).
+
+    The template supplies the version-correct required fields (chiefly ``base_instructions``);
+    ``overrides`` sets the values codex can't infer — ``contextWindow`` →
+    ``context_window`` + ``max_context_window``, plus optional ``displayName`` / ``description``.
+    """
+    entry = json.loads(json.dumps(catalog["models"][0]))
+    entry["slug"] = model
+    entry["display_name"] = str(overrides.get("displayName") or model)
+    if overrides.get("description"):
+        entry["description"] = str(overrides["description"])
+    context_window = overrides.get("contextWindow")
+    if isinstance(context_window, int) and not isinstance(context_window, bool):
+        entry["context_window"] = context_window
+        entry["max_context_window"] = context_window
+    entry["visibility"] = "list"
+    # Drop template UI hooks that would misfire for the cloned model.
+    entry.pop("availability_nux", None)
+    entry.pop("upgrade", None)
+    return json.dumps({"models": [entry]}, separators=(",", ":"))
+
+
 def _reasonix_provider_block_from_def(provider_def: dict) -> str:
     """Render one ``[[providers]]`` block from a reasonix ``providerDef`` entry.
 
@@ -1578,6 +1631,29 @@ def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
         _add_agent(str(codex_config_dir() / "agents" / source.name), source.read_text())
     for source in _codex_agent_sources(block.get("codexProjectAgents"), "codexProjectAgents"):
         _add_agent(f".codex/agents/{source.name}", source.read_text())
+
+    # `codexModelCatalog` teaches codex about a custom model it doesn't ship in its bundled
+    # catalog: agedum clones a real catalog entry (via `codex debug models`, for version-correct
+    # `base_instructions`) as this `model`, applying the table's overrides (chiefly
+    # `contextWindow`), writes it to a generated `model_catalog_json` file, and points codex at
+    # it. That silences the "metadata not found" warning and drives the context-usage meter. If
+    # codex can't be queried, the catalog is skipped and codex uses its fallback metadata — the
+    # launch never fails on it.
+    catalog_config = block.get("codexModelCatalog")
+    if catalog_config is not None:
+        if not isinstance(catalog_config, dict):
+            raise ProviderError("codex config `codexModelCatalog` must be a table")
+        if not model:
+            raise ProviderError("codex config `codexModelCatalog` needs a `model` to name")
+        catalog = _codex_debug_models()
+        if catalog is not None:
+            target = str(codex_config_dir() / "agedum-model-catalog.json")
+            content = _codex_synthesized_catalog(model, catalog, catalog_config)
+            if target in seen_targets:
+                raise ProviderError(f"duplicate codex config target {target!r}")
+            seen_targets.add(target)
+            config_files.append((target, content, False))
+            command += ["-c", f'model_catalog_json="{_toml_escape(target)}"']
 
     return env, [], command, tuple(config_files)
 
