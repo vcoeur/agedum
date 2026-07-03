@@ -82,6 +82,7 @@ kimi reads its API token **from the environment**, so the key goes in `requiredE
 | `model` | `--model <model>` |
 | `thinking` | `--thinking` (true) / `--no-thinking` (false) |
 | `plan` | `--plan` (true) |
+| `yolo` | `--yolo` (true) |
 | `configInline` | `--config <value>` |
 | `binary` | overrides the launched CLI name (default `kimi`; Moonshot's Kimi Code CLI ships as `kimi-cli`) |
 

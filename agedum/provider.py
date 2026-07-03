@@ -731,6 +731,8 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
         command.append("--no-thinking")
     if block.get("plan") is True:
         command.append("--plan")
+    if block.get("yolo") is True:
+        command.append("--yolo")
     if config_inline:
         command += ["--config", config_inline]
     return {}, [], command, tuple(config_files)
