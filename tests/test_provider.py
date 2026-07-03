@@ -483,6 +483,11 @@ def test_kimi_no_thinking_flag():
     assert launch.command == ["kimi", "--no-thinking"]
 
 
+def test_kimi_yolo_flag():
+    launch = build_launch({"harness": "kimi", "config": {"yolo": True}}, base_env={})
+    assert launch.command == ["kimi", "--yolo"]
+
+
 def test_kimi_native_empty_config():
     launch = build_launch({"harness": "kimi", "config": {}}, base_env={})
     assert launch.command == ["kimi"]
