@@ -75,7 +75,9 @@ rides the `requiredEnv` export so the `environment` block masks it too.
 fail-loud `ProviderError`, not a silent no-op. Configure a custom endpoint once as a named
 Cline provider (`cline auth`, stored in `~/.cline/data/settings/providers.json`) and select
 it with `provider`. So the provider `id` in the config must match a provider Cline already
-knows — a built-in (e.g. `deepseek`) or one you set up via `cline auth`.
+knows — a built-in (e.g. `deepseek`) or one you set up via `cline auth`. Under a
+[sandbox](../provider.md#sandbox) launch agedum makes `~/.cline` writable, so Cline can still
+persist that `providers.json` (and its task state) rather than hitting a read-only filesystem.
 
 **No subagent-model tiering.** Cline runs a single model per session, so there is no
 agedum equivalent of opencode's `agentOptions[]` or reasonix's `subagentModel`, and a

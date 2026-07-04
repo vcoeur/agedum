@@ -8,6 +8,7 @@ from agedum.harness import Plan, Sandbox, compile_claude
 from agedum.launcher import (
     LauncherError,
     _effective_binds,
+    _ensure_writable_dirs,
     _resolve_rw,
     assert_safe,
     build_bwrap_argv,
@@ -342,6 +343,38 @@ def test_writable_roots_expands_glob_read_write(tmp_path):
     assert src not in roots
 
 
+def test_writable_roots_includes_harness_state_dirs(tmp_path):
+    # A harness's own state dir (Plan.writable_dirs) is writable even with no bind landing under
+    # it and no matching read_write entry — this is what keeps ~/.cline/data writable for Cline.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state = tmp_path / "home" / ".cline"
+    sandbox = Sandbox(enabled=True, read_write=())
+    roots = writable_roots(Plan(writable_dirs=[state]), sandbox, proj)
+    assert state in roots
+
+
+def test_writable_roots_drops_state_dir_under_a_broader_rw_grant(tmp_path):
+    # A harness config dir nested under a config-granted parent (e.g. ~/.config/opencode under a
+    # readWrite ~/.config) is redundant and folded out — the parent bind already covers it.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    config = tmp_path / "home" / ".config"
+    opencode = config / "opencode"
+    sandbox = Sandbox(enabled=True, read_write=(str(config),))
+    roots = writable_roots(Plan(writable_dirs=[opencode]), sandbox, proj)
+    assert config in roots
+    assert opencode not in roots
+
+
+def test_ensure_writable_dirs_creates_missing(tmp_path):
+    # bwrap can't bind a missing path; the launcher pre-creates each declared state dir.
+    missing = tmp_path / "home" / ".cline"
+    assert not missing.exists()
+    _ensure_writable_dirs(Plan(writable_dirs=[missing]))
+    assert missing.is_dir()
+
+
 def test_resolve_rw_expands_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("AGEDUM_RW_TEST_DIR", "/env/dir")
     # A plain (non-glob) template resolves to a single literal path, kept whether or not it
@@ -393,3 +426,19 @@ def test_virtualfs_sandbox_allows_declared_rw_dir(tmp_path):
     rc = run_virtualfs(proj, Plan(), ["touch", str(data / "ok.txt")], sandbox=sandbox)
     assert rc == 0
     assert (data / "ok.txt").exists()  # a write into a declared rw dir reached the host
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+def test_virtualfs_sandbox_allows_harness_state_write(tmp_path):
+    # The Cline repro in miniature: a harness state dir that does not yet exist is created and
+    # made writable, so the harness can persist state (e.g. providers.json) instead of EROFS.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state = tmp_path / "home" / ".cline"  # missing before the run
+    sandbox = Sandbox(enabled=True)
+    plan = Plan(writable_dirs=[state])
+
+    rc = run_virtualfs(proj, plan, ["touch", str(state / "providers.json")], sandbox=sandbox)
+    assert rc == 0
+    assert state.is_dir()  # the state dir was pre-created on the host
+    assert (state / "providers.json").exists()  # a write into the state dir reached the host

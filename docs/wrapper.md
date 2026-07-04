@@ -99,7 +99,11 @@ namespace isolates only *what the harness reads as config*, not where it can wri
 command can write only to
 
 - the **project root** — the working tree it was launched in;
-- the dirs agedum injects into, so the harness can persist its own state (e.g. `~/.claude`);
+- the **harness's own state/config dir** — so it can persist sessions, settings, and auth
+  (e.g. `~/.claude` for Claude Code, `~/.cline` for Cline, `~/.codex` for Codex); agedum knows
+  each harness's dir and grants it write access (creating it if missing), whether or not the
+  harness injects anything under it;
+- the nearest existing ancestor of every file agedum injects (so bwrap can create the mount point);
 - a private **`/tmp`** (a fresh tmpfs, discarded on exit);
 - any directory you add with **`--rw-dir DIR`** (repeatable; passing it implies `--sandbox`).
   A `DIR` holding a shell glob (`*`, `?`, `[…]`) is expanded to each existing match, so

@@ -18,6 +18,7 @@ from agedum.harness import (
     compile_reasonix,
     kimi_config_dir,
     opencode_config_dir,
+    opencode_data_dir,
     pi_agent_dir,
     reasonix_home_skills_dir,
     reasonix_user_config_dir,
@@ -401,6 +402,10 @@ def test_compile_cline(tmp_path, monkeypatch):
     assert data_dir / "skills" in targets
     assert (_src_for(plan, data_dir / "skills") / "gskill" / "SKILL.md").exists()
 
+    # Cline's state dir is granted write access under a sandbox — the fix for the EROFS on
+    # ~/.cline/data/settings/providers.json.
+    assert data_dir in plan.writable_dirs
+
 
 def test_compile_cline_project_only_injects_skills_not_instructions(tmp_path):
     # No global scope: project AGENTS.md is native (no bind), only project skills bind.
@@ -438,6 +443,50 @@ def test_compile_cline_global_agents_harness_overlay_merged(tmp_path, monkeypatc
     assert "GLOBAL-BASE" in merged
     assert "CLINE-EXTRA" in merged
     assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored
+
+
+def test_compile_declares_harness_state_dirs(tmp_path, monkeypatch):
+    # Each harness declares its own state/config dir in Plan.writable_dirs so a sandbox launch
+    # can persist runtime state (sessions/settings/auth) — independent of what it injects.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in (
+        "CLAUDE_CONFIG_DIR",
+        "CLINE_DATA_DIR",
+        "CODEX_HOME",
+        "PI_CODING_AGENT_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    project = load_source(proj)
+
+    expected = {
+        compile_claude: [claude_config_dir()],
+        compile_kimi: [kimi_config_dir()],
+        compile_opencode: [opencode_config_dir(), opencode_data_dir()],
+        compile_cline: [cline_config_dir()],
+        compile_reasonix: [reasonix_user_config_dir(), home / ".reasonix"],
+        compile_pi: [pi_agent_dir()],
+        compile_codex: [codex_config_dir()],
+    }
+    for index, (compile_fn, dirs) in enumerate(expected.items()):
+        dest = tmp_path / f"out-{index}"
+        dest.mkdir()
+        plan = compile_fn(project, None, dest)
+        for path in dirs:
+            assert path in plan.writable_dirs, f"{compile_fn.__name__} missing {path}"
+
+    # aider has no home-scope state dir — it writes its state in-cwd (the project root, always
+    # writable), so it declares none.
+    aider_dest = tmp_path / "out-aider"
+    aider_dest.mkdir()
+    assert compile_aider(project, None, aider_dest).writable_dirs == []
 
 
 def test_compile_reasonix(tmp_path, monkeypatch):

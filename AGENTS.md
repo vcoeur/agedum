@@ -258,10 +258,13 @@ override).
 - **Write-confinement** (`--sandbox` / a provider `sandbox` block) replaces the default
   `--dev-bind / /` (full read-write host) with `--ro-bind / /` + `--dev /dev` + `--proc /proc`
   + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (project root + the nearest existing
-  ancestor of every injection target + the declared `read_write` paths, each glob-expanded —
-  `*`/`?`/`[` resolves to every existing match, so `~/src/*` binds each child of `~/src`). Two facts the recipe
-  depends on, both validated empirically: bwrap **cannot create a mount point on a read-only
-  parent** (so every injection target's parent must be writable — hence `~/.claude` is
-  auto-writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its
+  ancestor of every injection target + **each harness's own state/config dir** (`Plan.writable_dirs`,
+  e.g. `~/.cline`, `~/.claude` — `run_virtualfs` `mkdir`s any that are missing so the bind lands)
+  + the declared `read_write` paths, each glob-expanded — `*`/`?`/`[` resolves to every existing
+  match, so `~/src/*` binds each child of `~/src`). Each harness declares its state dir in its
+  `compile_*` so persistence (sessions/settings/auth) works **by design**, not by an injection
+  happening to land under it. Two facts the recipe depends on, both validated empirically: bwrap
+  **cannot create a mount point on a read-only parent** (so every injection target's parent must
+  be writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its
   path is tmpfs-shadowed in the namespace (so agedum's compiled files under `/tmp` still bind
   with `--tmpfs /tmp` active). Off by default — every existing launch is unchanged.

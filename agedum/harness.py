@@ -60,6 +60,12 @@ class Plan:
     # Targets the launcher should tmpfs-shadow (mask with empty) rather than bind into.
     # Exempt from the git-tracked safety check (they are read-only shadows).
     safe_overrides: set[Path] = field(default_factory=set)
+    # The harness's own state/config dir(s) — where it persists settings, sessions, auth, and
+    # caches at run time. Under a sandbox launch these are mounted read-write (and created if
+    # missing) so the harness can function, independent of what it happens to inject or what the
+    # config's readWrite grants. Nothing is injected here — agedum only grants write access.
+    # Ignored without a sandbox (the whole host is already read-write then).
+    writable_dirs: list[Path] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -68,8 +74,9 @@ class Sandbox:
 
     When ``enabled``, the launcher mounts the whole host **read-only** and makes
     writable only the project root, the nearest existing ancestor of each injected
-    file (so bwrap can create the mount point, and the harness can persist its own
-    state — e.g. ``~/.claude``), every path in ``read_write``, and a private
+    file (so bwrap can create the mount point), the harness's own state/config dir
+    (``Plan.writable_dirs`` — so it can persist sessions/settings/auth, e.g.
+    ``~/.cline`` or ``~/.claude``), every path in ``read_write``, and a private
     ``/tmp``. Everything else is read-only, so the agent cannot modify files outside
     its working set. When disabled (the default), the legacy full read-write host
     bind is used — the namespace then isolates only *what the harness reads as
@@ -218,6 +225,10 @@ def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
+    # Claude persists sessions/todos/statsig + OAuth cache under its config dir — writable
+    # under a sandbox so the session works (see Plan.writable_dirs).
+    plan.writable_dirs.append(claude_config_dir())
+
     # Project scope -> in-tree Claude paths. No instructions overlay (user scope only).
     _compile_scope(
         plan,
@@ -361,6 +372,9 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
 
+    # kimi persists its state under ~/.kimi — writable under a sandbox (see Plan.writable_dirs).
+    plan.writable_dirs.append(kimi_config_dir())
+
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
     if project.agents_md is not None:
@@ -443,6 +457,17 @@ def opencode_config_dir() -> Path:
     return base / "opencode"
 
 
+def opencode_data_dir() -> Path:
+    """opencode's user-scope data dir — ``$XDG_DATA_HOME/opencode`` or
+    ``~/.local/share/opencode`` (auth, sessions, logs).
+
+    Separate from :func:`opencode_config_dir`: opencode writes its runtime state (the login
+    token, conversation history) here, so a sandbox launch must make it writable too."""
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "opencode"
+
+
 def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Plan:
     """Render the source for opencode. opencode is pure path-discovery (no flags
     needed), so every scope is a bind:
@@ -464,6 +489,10 @@ def compile_opencode(project: Source, global_: Source | None, dest: Path) -> Pla
     """
     plan = Plan()
     config = opencode_config_dir()
+
+    # opencode writes config under <config> and runtime state (auth, sessions) under its data
+    # dir — both writable under a sandbox (see Plan.writable_dirs).
+    plan.writable_dirs += [config, opencode_data_dir()]
 
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
@@ -542,6 +571,11 @@ def compile_cline(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
     config = cline_config_dir()
+
+    # Cline persists provider selection + task state under ~/.cline/data — writable under a
+    # sandbox so it doesn't hit EROFS on ~/.cline/data/settings/providers.json (see
+    # Plan.writable_dirs).
+    plan.writable_dirs.append(config)
 
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
@@ -631,6 +665,10 @@ def compile_reasonix(project: Source, global_: Source | None, dest: Path) -> Pla
     No ``extra_args`` — reasonix discovers everything from disk.
     """
     plan = Plan()
+
+    # reasonix keeps its memory/config under ~/.config/reasonix and its home skills/state under
+    # ~/.reasonix — both writable under a sandbox (see Plan.writable_dirs).
+    plan.writable_dirs += [reasonix_user_config_dir(), Path.home() / ".reasonix"]
 
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
@@ -760,6 +798,10 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
     plan = Plan()
     agent_dir = pi_agent_dir()
 
+    # pi persists settings/models/session state under its agent dir — writable under a sandbox
+    # (see Plan.writable_dirs).
+    plan.writable_dirs.append(agent_dir)
+
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
     if project.agents_md is not None:
@@ -840,6 +882,10 @@ def compile_codex(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
     config = codex_config_dir()
+
+    # codex stores all local state (config.toml, auth.json, sessions, logs) under its home dir —
+    # writable under a sandbox (see Plan.writable_dirs).
+    plan.writable_dirs.append(config)
 
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
     # --dry-run can show it rather than leave it invisible.
