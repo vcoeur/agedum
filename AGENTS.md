@@ -29,11 +29,21 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   under the config dir); skills → `./.cline/skills/` (project) + `<cline-config>/skills/`
   (global), where `<cline-config>` is `$CLINE_DATA_DIR` (default `~/.cline`). Skills use
   the `SKILL.cline.md` overlay; no `extra_args`. **Provider mode** (`_cline_env`) maps the
-  config to Cline CLI flags (`--model` / `--provider` / `--thinking` / `--plan`) and passes
-  the token via `--key` — so the secret lands in argv (Cline's documented mechanism), which
-  the dry-run masks. `baseUrl` is rejected (Cline has no base-URL flag). `agedum
-  --prompt`/`--run` map to `cline --tui "<text>"` (interactive TUI, seeded) and
-  `cline "<text>"` (positional, run-once act mode).
+  config to Cline CLI flags (`--model` / `--provider` / `--thinking` / `--plan`, plus
+  `autoApprove` → `--auto-approve <bool>`) and passes the token via `--key` — so the secret
+  lands in argv (Cline's documented mechanism), which the dry-run masks. A **`baseUrl`**
+  (custom OpenAI-compatible endpoint — Kimi coding subscription, OpenCode-Go, …) takes a
+  different path: Cline has no run-time base-URL flag and a `--provider`/`--model` flag set
+  rebuilds the provider from flags, silently dropping the stored base URL (posting to the
+  OpenAI default). So agedum **generates a single-provider `providers.json`** (Cline's generic
+  `openai-compatible` provider, `baseUrl` + `model`, `lastUsedProvider`; the key is *not*
+  written — it rides `--key`) and injects it via `Launch.config_files` under an isolated
+  **`CLINE_DATA_DIR`** (`~/.cache/agedum/cline/<endpoint-slug>`, one per endpoint+model so
+  there's no Cline account to fall back to), then launches with **no** `--provider`/`--model`
+  so Cline selects the stored provider (base URL intact) via `lastUsedProvider`. `baseUrl` and
+  a named `provider` are mutually exclusive. `agedum --prompt`/`--run` map to
+  `cline --tui "<text>"` (interactive TUI, seeded) and `cline "<text>"` (positional, run-once
+  act mode).
 - **reasonix** — pure path-discovery (no flags), same shape as opencode/cline.
   [DeepSeek-Reasonix](https://github.com/esengine/DeepSeek-Reasonix) reads the project
   `AGENTS.md` natively (one of its memory docs `REASONIX.md` / `AGENTS.md` / `CLAUDE.md`),
