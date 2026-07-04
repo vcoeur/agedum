@@ -1011,6 +1011,70 @@ def test_cline_base_url_rejects_named_provider():
         )
 
 
+def test_cline_compaction_flag():
+    # compaction → --compaction <mode>, on both the named-provider and baseUrl paths.
+    named = build_launch(
+        {"harness": "cline", "config": {"provider": "opencode", "compaction": "agentic"}},
+        base_env={},
+    )
+    assert named.command == ["cline", "--provider", "opencode", "--compaction", "agentic"]
+    with pytest.raises(ProviderError, match="compaction` must be agentic"):
+        build_launch(
+            {"harness": "cline", "config": {"provider": "x", "compaction": "smart"}}, base_env={}
+        )
+
+
+def test_cline_base_url_context_window_becomes_models_array():
+    # contextWindow / maxTokens teach cline's catalogue-less openai-compatible provider the
+    # model's window (compaction threshold + X/N meter) and output cap via a one-entry models[].
+    launch = build_launch(
+        {
+            "harness": "cline",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "model": "kimi-for-coding",
+                "contextWindow": 262144,
+                "maxTokens": 32768,
+                "compaction": "agentic",
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-kimi-xyz"},
+    )
+    assert "--compaction" in launch.command and "agentic" in launch.command
+    settings = json.loads(launch.config_files[0][1])["providers"]["openai-compatible"]["settings"]
+    assert settings["models"] == [
+        {"id": "kimi-for-coding", "contextWindow": 262144, "maxTokens": 32768}
+    ]
+    # No window fields → no models array (cline keeps its default window).
+    bare = build_launch(
+        {
+            "harness": "cline",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {"baseUrl": "https://api.kimi.com/coding/v1", "model": "kimi-for-coding"},
+        },
+        base_env={"KIMI_API_KEY": "tok"},
+    )
+    bare_doc = json.loads(bare.config_files[0][1])
+    assert "models" not in bare_doc["providers"]["openai-compatible"]["settings"]
+
+
+def test_cline_context_window_rejects_junk():
+    with pytest.raises(ProviderError, match="`contextWindow` must be a positive integer"):
+        build_launch(
+            {
+                "harness": "cline",
+                "secretEnv": "KIMI_API_KEY",
+                "config": {
+                    "baseUrl": "https://api.kimi.com/coding/v1",
+                    "model": "kimi-for-coding",
+                    "contextWindow": -5,
+                },
+            },
+            base_env={"KIMI_API_KEY": "tok"},
+        )
+
+
 # --- reasonix env/command mapping ---
 
 
