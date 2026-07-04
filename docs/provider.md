@@ -91,7 +91,7 @@ The config is the condash-style agent envelope:
 | `config` | The per-harness option block — see the harness page table above. |
 | `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
 | `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
-| `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, agedum's injection dirs, `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
+| `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, its own state/config dir (e.g. `~/.cline`), `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
 
 A config's **identity and label are its path** under the providers root — there is no `name`
 field. Save the config at the path you want to launch it by (e.g.
@@ -129,9 +129,10 @@ with `/`:
 An optional top-level `sandbox` block confines what the launched harness can **write**.
 Without it, the harness shares your whole filesystem read-write — the namespace isolates only
 *what the harness reads as config*, not where it can write. With it, the host is mounted
-**read-only** and the harness can write only to the **project root**, the dirs agedum injects
-into so the harness keeps its own state (e.g. `~/.claude`), a private `/tmp`, and each path in
-**`readWrite`**:
+**read-only** and the harness can write only to the **project root**, its own **state/config
+dir** (agedum knows each harness's dir — `~/.claude`, `~/.cline`, `~/.codex`, … — and always
+makes it writable so the harness can persist sessions/settings/auth), a private `/tmp`, and each
+path in **`readWrite`**:
 
 ```json
 {

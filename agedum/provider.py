@@ -396,8 +396,9 @@ def _parse_sandbox(config: dict) -> Sandbox | None:
     Presence of ``sandbox`` enables write-confinement (the launcher mounts the host
     read-only). ``readWrite`` is a list of path templates the agent may modify (``~`` /
     ``$VAR`` / ``${PROJECT_ROOT}`` resolved at launch). Absent ``sandbox`` → ``None`` (the
-    legacy full read-write launch). The project root and agedum's own injection dirs are
-    always writable, so they need not be listed.
+    legacy full read-write launch). The project root, agedum's own injection dirs, and the
+    harness's own state/config dir (e.g. ``~/.cline``, ``~/.claude``) are always writable, so
+    they need not be listed.
     """
     raw = config.get("sandbox")
     if raw is None:

@@ -84,14 +84,17 @@ def _nearest_existing_dir(path: Path) -> Path:
 def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Path]:
     """The directories a write-confinement launch mounts read-write.
 
-    The union of three sources, de-duplicated with descendants dropped (a parent bind
+    The union of four sources, de-duplicated with descendants dropped (a parent bind
     already makes them writable):
 
     * the **project root** — the agent's working tree, and where project-scope files are
       injected;
     * the **nearest existing ancestor of every injected file** — so bwrap can create the
-      mount point (it cannot on a read-only parent), and so the harness can persist its own
-      state (e.g. ``~/.claude`` for Claude Code's sessions);
+      mount point (it cannot on a read-only parent);
+    * the **harness's own state/config dir(s)** (``plan.writable_dirs``) — so it can persist
+      sessions/settings/auth (e.g. ``~/.cline`` for Cline, ``~/.claude`` for Claude Code)
+      whether or not an injection happens to land under it (:func:`run_virtualfs` creates any
+      that are missing so the bind can land);
     * each ``sandbox.read_write`` entry, resolved (and glob-expanded) to zero or more paths —
       extra data the agent may modify.
 
@@ -100,6 +103,7 @@ def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Pat
     roots: list[Path] = [project_root]
     for _, target in _effective_binds(plan):
         roots.append(_nearest_existing_dir(target.parent))
+    roots += plan.writable_dirs
     for raw in sandbox.read_write:
         roots += _resolve_rw(raw, project_root)
     return _dedupe_roots(roots)
@@ -216,6 +220,18 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
     return candidates
 
 
+def _ensure_writable_dirs(plan: Plan) -> None:
+    """Create each harness state/config dir so its read-write bind can land.
+
+    bwrap cannot ``--bind`` a path that does not exist, so a harness whose state dir has never
+    been created (a fresh machine) would fail to mount it writable. The harness would create
+    its own config dir on first run anyway, so pre-creating it is benign. Only called on the
+    real-run path under an enabled sandbox — never from :func:`writable_roots`, so ``--dry-run``
+    stays side-effect-free."""
+    for path in plan.writable_dirs:
+        path.mkdir(parents=True, exist_ok=True)
+
+
 def run_virtualfs(
     project_root: Path,
     plan: Plan,
@@ -236,6 +252,8 @@ def run_virtualfs(
     read-only and only the working set is writable (see :func:`build_bwrap_argv`).
     """
     assert_safe(project_root, plan)
+    if sandbox is not None and sandbox.enabled:
+        _ensure_writable_dirs(plan)
     argv = build_bwrap_argv(
         plan, [*command, *plan.extra_args], sandbox=sandbox, project_root=project_root
     )
