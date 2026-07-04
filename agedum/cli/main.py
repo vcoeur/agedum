@@ -272,13 +272,17 @@ def _run_config(argv: list[str]) -> int:
     for warning in launch.warnings:
         _err.print(f"[yellow]agedum:[/] {warning}")
 
+    # Apply the resolved provider env before computing the plan — a harness whose compile
+    # targets depend on it (cline reads CLINE_DATA_DIR via cline_config_dir) then resolves to
+    # the same paths in the dry-run preview as in the real launch.
+    os.environ.update(launch.env)
+    for var in launch.unset:
+        os.environ.pop(var, None)
+
     if dry_run:
         _print_dry_run(launch, env_path, command)
         return 0
 
-    os.environ.update(launch.env)
-    for var in launch.unset:
-        os.environ.pop(var, None)
     # `--run` is non-interactive: the prompt is in argv, so the harness must not inherit a
     # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
     non_interactive = prompt_text is not None and not prompt_interactive

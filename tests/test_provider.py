@@ -926,17 +926,88 @@ def test_cline_no_key_flag_without_secret_env():
     assert "--key" not in launch.command
 
 
-def test_cline_base_url_is_rejected():
-    # Cline has no base-URL flag; a baseUrl would launch against the wrong endpoint
-    # silently, so it is rejected rather than ignored.
-    with pytest.raises(ProviderError, match="cline has no base-URL flag"):
+def test_cline_auto_approve_flag():
+    # autoApprove maps to cline's --auto-approve <boolean>; absent leaves cline's own default.
+    on = build_launch(
+        {"harness": "cline", "config": {"provider": "deepseek", "autoApprove": True}},
+        base_env={},
+    )
+    assert on.command == ["cline", "--provider", "deepseek", "--auto-approve", "true"]
+    off = build_launch(
+        {"harness": "cline", "config": {"provider": "deepseek", "autoApprove": False}},
+        base_env={},
+    )
+    assert off.command == ["cline", "--provider", "deepseek", "--auto-approve", "false"]
+    bare = build_launch({"harness": "cline", "config": {"provider": "deepseek"}}, base_env={})
+    assert "--auto-approve" not in bare.command
+
+
+def test_cline_base_url_generates_isolated_providers_config():
+    # A custom OpenAI-compatible endpoint: cline honours a custom base URL only from a stored
+    # provider, so agedum writes a single-provider providers.json under an isolated
+    # CLINE_DATA_DIR and launches with no --provider/--model (which would rebuild the provider
+    # and drop the base URL). The key rides --key and is masked; nothing secret is on disk.
+    launch = build_launch(
+        {
+            "harness": "cline",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {
+                "baseUrl": "https://api.kimi.com/coding/v1",
+                "model": "kimi-for-coding",
+                "autoApprove": True,
+            },
+        },
+        base_env={"KIMI_API_KEY": "sk-kimi-xyz"},
+    )
+    slug = "https-api-kimi-com-coding-v1-kimi-for-coding"
+    data_dir = str(Path.home() / ".cache" / "agedum" / "cline" / slug)
+    assert launch.env["CLINE_DATA_DIR"] == data_dir
+    # No --provider/--model on the command; the key is the only secret and rides --key.
+    assert launch.command == ["cline", "--auto-approve", "true", "--key", "sk-kimi-xyz"]
+    assert "--provider" not in launch.command and "--model" not in launch.command
+    assert "KIMI_API_KEY" in launch.secrets
+
+    # One generated config file: the single-provider providers.json (no key baked in).
+    assert len(launch.config_files) == 1
+    target, content, merge_json = launch.config_files[0]
+    assert target == f"{data_dir}/settings/providers.json"
+    assert merge_json is False
+    doc = json.loads(content)
+    assert doc["lastUsedProvider"] == "openai-compatible"
+    settings = doc["providers"]["openai-compatible"]["settings"]
+    assert settings["baseUrl"] == "https://api.kimi.com/coding/v1"
+    assert settings["model"] == "kimi-for-coding"
+    assert settings["apiKey"] == ""  # key is never written to disk
+    assert "sk-kimi-xyz" not in content
+
+
+def test_cline_base_url_requires_model():
+    with pytest.raises(ProviderError, match="baseUrl` but no `model`"):
         build_launch(
             {
                 "harness": "cline",
-                "secretEnv": "DEEPSEEK_API_KEY",
-                "config": {"baseUrl": "https://api.deepseek.com/anthropic", "model": "m"},
+                "secretEnv": "KIMI_API_KEY",
+                "config": {"baseUrl": "https://api.kimi.com/coding/v1"},
             },
-            base_env={"DEEPSEEK_API_KEY": "tok"},
+            base_env={"KIMI_API_KEY": "tok"},
+        )
+
+
+def test_cline_base_url_rejects_named_provider():
+    # A custom endpoint goes through the generated openai-compatible provider, so pairing
+    # baseUrl with a named `provider` is a config mistake, not a silent override.
+    with pytest.raises(ProviderError, match="both `baseUrl` and `provider`"):
+        build_launch(
+            {
+                "harness": "cline",
+                "secretEnv": "KIMI_API_KEY",
+                "config": {
+                    "baseUrl": "https://api.kimi.com/coding/v1",
+                    "model": "kimi-for-coding",
+                    "provider": "openai-compatible",
+                },
+            },
+            base_env={"KIMI_API_KEY": "tok"},
         )
 
 

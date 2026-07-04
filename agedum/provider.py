@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -751,6 +752,65 @@ def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Bui
     return env, [], ["opencode"], ()
 
 
+# The provider id agedum stores for a generated custom-endpoint cline launcher. cline ships
+# a generic `openai-compatible` provider whose base URL lives only in the stored provider
+# config — never on a run flag — so agedum writes a single-provider providers.json and lets
+# cline select it via `lastUsedProvider` (see _cline_providers_doc).
+CLINE_OPENAI_PROVIDER = "openai-compatible"
+
+
+def _cline_data_dir(base_url: str, model: str) -> Path:
+    """The isolated cline data dir (``CLINE_DATA_DIR``) for one custom-endpoint launcher.
+
+    cline honours a custom base URL only from a *stored* provider and otherwise defaults to
+    its own Cline account when that account is configured — so each ``baseUrl`` launcher gets
+    its own data dir holding a single ``openai-compatible`` provider (no Cline account to fall
+    back to). Derived from the endpoint + model so repeat launches reuse the same dir (and its
+    injected skills / session history). Lives under ``~/.cache`` so the conception sandbox's
+    writable set already covers cline's own session/db writes.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{base_url}-{model}".lower()).strip("-") or "endpoint"
+    return Path.home() / ".cache" / "agedum" / "cline" / slug
+
+
+def _cline_providers_doc(base_url: str, model: str) -> dict:
+    """A single-provider cline ``providers.json`` for a custom OpenAI-compatible endpoint.
+
+    Only structure lives here — provider id, base URL, model. The API key is **not** written:
+    it rides the runtime ``--key`` flag (masked in ``--dry-run``), cline's documented
+    mechanism, so no secret lands on disk. ``lastUsedProvider`` makes cline select the
+    provider without a ``--provider`` flag, which would otherwise rebuild the provider from
+    CLI flags and silently drop the stored ``baseUrl`` (posting to the OpenAI default).
+    """
+    return {
+        "version": 1,
+        "lastUsedProvider": CLINE_OPENAI_PROVIDER,
+        "providers": {
+            CLINE_OPENAI_PROVIDER: {
+                "settings": {
+                    "provider": CLINE_OPENAI_PROVIDER,
+                    "apiKey": "",
+                    "model": model,
+                    "baseUrl": base_url,
+                },
+                "updatedAt": "2020-01-01T00:00:00.000Z",
+                "tokenSource": "manual",
+            }
+        },
+    }
+
+
+def _cline_auto_approve_flags(block: dict) -> list[str]:
+    """``autoApprove`` → cline's ``--auto-approve <boolean>`` (approve every tool call, or
+    force-prompt with ``false``). Absent leaves cline's own default (currently auto-approve on)."""
+    value = block.get("autoApprove")
+    if value is True:
+        return ["--auto-approve", "true"]
+    if value is False:
+        return ["--auto-approve", "false"]
+    return []
+
+
 def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # Cline's provider/model knobs are appended CLI flags (like kimi). Unlike the other
     # harnesses, Cline takes the token as a per-run flag (`--key`), so the secret lands in
@@ -758,23 +818,61 @@ def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
     # agedum's choice. build_launch still exports secret_env into the child env via the
     # required-env path, so the value is in Launch.secrets and --dry-run masks it (the
     # command print redacts secret values; Cline is the first harness to put one there).
-    if str(block.get("baseUrl") or "").strip():
-        raise ProviderError(
-            "cline has no base-URL flag; configure the endpoint in the named Cline "
-            "provider (`cline auth`) and select it with `provider`, not `baseUrl`"
-        )
-    command = ["cline"]
     model = str(block.get("model") or "").strip()
+    effort = str(block.get("effortLevel") or "").strip()
+    base_url = str(block.get("baseUrl") or "").strip()
+
+    if base_url:
+        # A custom OpenAI-compatible endpoint (Kimi coding subscription, OpenCode-Go, …).
+        # cline has no run-time base-URL flag and a `--provider`/`--model` flag set rebuilds
+        # the provider from flags — dropping the stored base URL and posting to OpenAI's
+        # default. So agedum writes a single-provider providers.json under an isolated
+        # CLINE_DATA_DIR and launches with no `--provider`/`--model`; cline selects the stored
+        # provider (base URL intact) via `lastUsedProvider`, and the key rides `--key`.
+        if not model:
+            raise ProviderError(
+                "cline config sets `baseUrl` but no `model`; set `model` to the upstream id "
+                "served at that endpoint"
+            )
+        if not secret_env:
+            raise ProviderError(
+                "cline config sets `baseUrl` but no secretEnv to supply the API key"
+            )
+        if str(block.get("provider") or "").strip():
+            raise ProviderError(
+                "cline config sets both `baseUrl` and `provider`; a custom endpoint is reached "
+                "through the generated openai-compatible provider, not a named `--provider`"
+            )
+        data_dir = _cline_data_dir(base_url, model)
+        config_path = str(data_dir / "settings" / "providers.json")
+        config_doc = json.dumps(_cline_providers_doc(base_url, model), indent=2) + "\n"
+        command = ["cline"]
+        if effort:
+            command += ["--thinking", effort]
+        if block.get("plan") is True:
+            command.append("--plan")
+        command += _cline_auto_approve_flags(block)
+        token = base_env.get(secret_env, "")
+        if token:
+            command += ["--key", token]
+        return (
+            {"CLINE_DATA_DIR": str(data_dir)},
+            [],
+            command,
+            ((config_path, config_doc, False),),
+        )
+
+    command = ["cline"]
     if model:
         command += ["--model", model]
     provider = str(block.get("provider") or "").strip()
     if provider:
         command += ["--provider", provider]
-    effort = str(block.get("effortLevel") or "").strip()
     if effort:
         command += ["--thinking", effort]
     if block.get("plan") is True:
         command.append("--plan")
+    command += _cline_auto_approve_flags(block)
     if secret_env:
         token = base_env.get(secret_env, "")
         if token:
