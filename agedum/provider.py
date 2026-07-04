@@ -773,7 +773,9 @@ def _cline_data_dir(base_url: str, model: str) -> Path:
     return Path.home() / ".cache" / "agedum" / "cline" / slug
 
 
-def _cline_providers_doc(base_url: str, model: str) -> dict:
+def _cline_providers_doc(
+    base_url: str, model: str, context_window: int | None, max_tokens: int | None
+) -> dict:
     """A single-provider cline ``providers.json`` for a custom OpenAI-compatible endpoint.
 
     Only structure lives here — provider id, base URL, model. The API key is **not** written:
@@ -781,23 +783,57 @@ def _cline_providers_doc(base_url: str, model: str) -> dict:
     mechanism, so no secret lands on disk. ``lastUsedProvider`` makes cline select the
     provider without a ``--provider`` flag, which would otherwise rebuild the provider from
     CLI flags and silently drop the stored ``baseUrl`` (posting to the OpenAI default).
+
+    ``context_window`` / ``max_tokens`` (when given) become a one-entry ``models`` array —
+    cline's generic ``openai-compatible`` provider has no model catalogue, so this is how it
+    learns the model's window (its ``X/N`` meter + the point agentic compaction fires) and
+    output cap. Omitted → cline falls back to its built-in default window.
     """
+    settings = {
+        "provider": CLINE_OPENAI_PROVIDER,
+        "apiKey": "",
+        "model": model,
+        "baseUrl": base_url,
+    }
+    if context_window is not None or max_tokens is not None:
+        model_info: dict = {"id": model}
+        if context_window is not None:
+            model_info["contextWindow"] = context_window
+        if max_tokens is not None:
+            model_info["maxTokens"] = max_tokens
+        settings["models"] = [model_info]
     return {
         "version": 1,
         "lastUsedProvider": CLINE_OPENAI_PROVIDER,
         "providers": {
             CLINE_OPENAI_PROVIDER: {
-                "settings": {
-                    "provider": CLINE_OPENAI_PROVIDER,
-                    "apiKey": "",
-                    "model": model,
-                    "baseUrl": base_url,
-                },
+                "settings": settings,
                 "updatedAt": "2020-01-01T00:00:00.000Z",
                 "tokenSource": "manual",
             }
         },
     }
+
+
+def _cline_positive_int(block: dict, key: str) -> int | None:
+    """Read a positive-int config field (``contextWindow`` / ``maxTokens``); reject junk."""
+    value = block.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or int(value) <= 0:
+        raise ProviderError(f"cline config `{key}` must be a positive integer, got {value!r}")
+    return int(value)
+
+
+def _cline_compaction_flags(block: dict) -> list[str]:
+    """``compaction`` → cline's ``--compaction <mode>`` (``agentic`` = LLM summarizer, ``basic``
+    = the built-in default, ``off``). Absent leaves cline's own default (``basic``)."""
+    mode = str(block.get("compaction") or "").strip()
+    if not mode:
+        return []
+    if mode not in ("agentic", "basic", "off"):
+        raise ProviderError(f"cline config `compaction` must be agentic|basic|off, got {mode!r}")
+    return ["--compaction", mode]
 
 
 def _cline_auto_approve_flags(block: dict) -> list[str]:
@@ -843,12 +879,18 @@ def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
                 "cline config sets both `baseUrl` and `provider`; a custom endpoint is reached "
                 "through the generated openai-compatible provider, not a named `--provider`"
             )
+        context_window = _cline_positive_int(block, "contextWindow")
+        max_tokens = _cline_positive_int(block, "maxTokens")
         data_dir = _cline_data_dir(base_url, model)
         config_path = str(data_dir / "settings" / "providers.json")
-        config_doc = json.dumps(_cline_providers_doc(base_url, model), indent=2) + "\n"
+        config_doc = (
+            json.dumps(_cline_providers_doc(base_url, model, context_window, max_tokens), indent=2)
+            + "\n"
+        )
         command = ["cline"]
         if effort:
             command += ["--thinking", effort]
+        command += _cline_compaction_flags(block)
         if block.get("plan") is True:
             command.append("--plan")
         command += _cline_auto_approve_flags(block)
@@ -870,6 +912,7 @@ def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
         command += ["--provider", provider]
     if effort:
         command += ["--thinking", effort]
+    command += _cline_compaction_flags(block)
     if block.get("plan") is True:
         command.append("--plan")
     command += _cline_auto_approve_flags(block)

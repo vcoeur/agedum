@@ -30,8 +30,9 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   (global), where `<cline-config>` is `$CLINE_DATA_DIR` (default `~/.cline`). Skills use
   the `SKILL.cline.md` overlay; no `extra_args`. **Provider mode** (`_cline_env`) maps the
   config to Cline CLI flags (`--model` / `--provider` / `--thinking` / `--plan`, plus
-  `autoApprove` → `--auto-approve <bool>`) and passes the token via `--key` — so the secret
-  lands in argv (Cline's documented mechanism), which the dry-run masks. A **`baseUrl`**
+  `autoApprove` → `--auto-approve <bool>` and `compaction` → `--compaction <agentic|basic|off>`,
+  where `agentic` is the LLM-summarizer strategy) and passes the token via `--key` — so the
+  secret lands in argv (Cline's documented mechanism), which the dry-run masks. A **`baseUrl`**
   (custom OpenAI-compatible endpoint — Kimi coding subscription, OpenCode-Go, …) takes a
   different path: Cline has no run-time base-URL flag and a `--provider`/`--model` flag set
   rebuilds the provider from flags, silently dropping the stored base URL (posting to the
@@ -41,7 +42,11 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   **`CLINE_DATA_DIR`** (`~/.cache/agedum/cline/<endpoint-slug>`, one per endpoint+model so
   there's no Cline account to fall back to), then launches with **no** `--provider`/`--model`
   so Cline selects the stored provider (base URL intact) via `lastUsedProvider`. `baseUrl` and
-  a named `provider` are mutually exclusive. `agedum --prompt`/`--run` map to
+  a named `provider` are mutually exclusive. On the `baseUrl` path **`contextWindow`** /
+  **`maxTokens`** become a one-entry `models` array in that `providers.json` — the generic
+  `openai-compatible` provider has no model catalogue, so this is how Cline learns the window
+  (its `X/N` meter + the point agentic compaction fires) and output cap; omitted → Cline's
+  default window. `agedum --prompt`/`--run` map to
   `cline --tui "<text>"` (interactive TUI, seeded) and `cline "<text>"` (positional, run-once
   act mode).
 - **reasonix** — pure path-discovery (no flags), same shape as opencode/cline.
