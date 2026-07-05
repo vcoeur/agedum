@@ -48,6 +48,7 @@ from agedum.harness import (
 from agedum.launcher import LauncherError, run_virtualfs, writable_roots
 from agedum.provider import (
     CODEX_PROVIDER_NAME,
+    ConfigFile,
     ProviderError,
     build_launch,
     default_env_file,
@@ -347,8 +348,16 @@ def _print_config_files(launch) -> None:
         return
     secret_values = _secret_values(launch)
     print("generated config files")
-    for target, content, merge_json in launch.config_files:
-        note = "   (merged onto any existing file)" if merge_json else ""
+    for entry in launch.config_files:
+        target, content, merge_json = entry[0], entry[1], entry[2]
+        writable = len(entry) > 3 and bool(entry[3])
+        note = (
+            "   (merged onto any existing file)"
+            if merge_json
+            else "   (writable seed)"
+            if writable
+            else ""
+        )
         print(f"  {target}{note}")
         for line in _redact(content, secret_values).splitlines():
             print(f"    {line}")
@@ -637,26 +646,38 @@ def _run(
 
 
 def _inject_config_files(
-    plan: Plan, project_root: Path, dest: Path, config_files: tuple[tuple[str, str, bool], ...]
+    plan: Plan, project_root: Path, dest: Path, config_files: tuple[ConfigFile, ...]
 ) -> None:
     """Write each agedum-generated config file into ``dest`` and bind it at its target.
 
-    ``config_files`` are ``(target, content, merge_json)`` triples: ``target`` is
+    ``config_files`` are ``(target, content, merge_json[, writable])`` entries: ``target`` is
     project-root-relative (reasonix's ``reasonix.toml``) or absolute (pi's user-scope
     ``~/.pi/agent/models.json`` + ``settings.json``); ``merge_json`` deep-merges ``content``
     onto any existing JSON at the target so an injected user-scope file augments rather than
-    masks the user's own. The bind goes through the same launcher path as every other bind, so
-    ``assert_safe`` still refuses a git-tracked target — a provider config dropped over a
-    tracked file would otherwise be committable.
+    masks the user's own. The (read-only) bind goes through the same launcher path as every
+    other bind, so ``assert_safe`` still refuses a git-tracked target — a provider config
+    dropped over a tracked file would otherwise be committable.
+
+    A ``writable`` entry (cline's ``providers.json``) is instead **seeded directly into its
+    real target**, which the harness has already added to ``plan.writable_dirs``: no ro-bind,
+    so the tool can rewrite it in-session without EROFS. The target is agedum's own writable
+    cache (never a tracked path). Only real launches call this (dry-run just prints), so the
+    host-side write has no dry-run side effect.
     """
-    for target_spec, content, merge_json in config_files:
+    for entry in config_files:
+        target_spec, content, merge_json = entry[0], entry[1], entry[2]
+        writable = len(entry) > 3 and bool(entry[3])
         spec = Path(target_spec)
-        if spec.is_absolute():
-            target = spec
-            staged = Path(*spec.parts[1:])  # strip the leading "/" for a writable stage path
-        else:
-            target = project_root / target_spec
-            staged = Path(target_spec)
+        target = spec if spec.is_absolute() else project_root / target_spec
+        if writable:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Clear any stale mount-point artifact a previous ro-bind left behind (a 0-byte
+            # read-only file) so the fresh write can't trip over its mode.
+            target.unlink(missing_ok=True)
+            target.write_text(content)
+            plan.origins[target] = f"<agedum-generated {target_spec}>"
+            continue
+        staged = Path(*spec.parts[1:]) if spec.is_absolute() else Path(target_spec)
         out = dest / "config-files" / staged
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(merge_json_onto_file(target, content) if merge_json else content)

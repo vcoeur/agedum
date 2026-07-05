@@ -71,13 +71,24 @@ process list while Cline runs. That is Cline's documented mechanism, not agedum'
 agedum masks the token in `--dry-run` (the `command` line shows `--key ***`), and it still
 rides the `requiredEnv` export so the `environment` block masks it too.
 
-**No `baseUrl`.** Cline has no base-URL flag, so a `baseUrl` in a cline config is a
-fail-loud `ProviderError`, not a silent no-op. Configure a custom endpoint once as a named
-Cline provider (`cline auth`, stored in `~/.cline/data/settings/providers.json`) and select
-it with `provider`. So the provider `id` in the config must match a provider Cline already
-knows — a built-in (e.g. `deepseek`) or one you set up via `cline auth`. Under a
-[sandbox](../provider.md#sandbox) launch agedum makes `~/.cline` writable, so Cline can still
-persist that `providers.json` (and its task state) rather than hitting a read-only filesystem.
+**Custom `baseUrl`.** Cline has no run-time base-URL flag, and a `--provider`/`--model` flag
+set rebuilds the provider from flags (dropping any stored base URL and posting to the OpenAI
+default). So for a custom OpenAI-compatible endpoint (a Kimi coding subscription, OpenCode-Go,
+…) agedum **generates a single-provider `providers.json`** — the generic `openai-compatible`
+provider with `lastUsedProvider` set so Cline selects it with no flag — under an isolated
+`CLINE_DATA_DIR` (`~/.cache/agedum/cline/<endpoint-slug>`), and passes the key via `--key`.
+Set `model` (the upstream id served there) and `secretEnv`; optional `contextWindow` /
+`maxTokens` become a one-entry `models` array so Cline learns the window (its `X/N` meter +
+compaction trigger) and output cap. The API key is **never** written to disk. That
+`providers.json` is **seeded writable** into `CLINE_DATA_DIR` (not read-only bound), so under a
+[sandbox](../provider.md#sandbox) launch Cline can rewrite it to persist its own selection
+rather than hitting `EROFS` on a read-only filesystem; agedum re-seeds the correct endpoint
+config on every launch. `baseUrl` and a named `provider` are mutually exclusive.
+
+**Named provider.** To use a provider Cline already knows instead, set `provider` (no
+`baseUrl`) to a built-in (e.g. `deepseek`) or one set up via `cline auth` (stored in
+`~/.cline/data/settings/providers.json`). Under a sandbox launch agedum makes `~/.cline`
+writable so that store (and Cline's task state) persists too.
 
 **No subagent-model tiering.** Cline runs a single model per session, so there is no
 agedum equivalent of opencode's `agentOptions[]` or reasonix's `subagentModel`, and a
