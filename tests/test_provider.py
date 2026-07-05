@@ -968,10 +968,12 @@ def test_cline_base_url_generates_isolated_providers_config():
     assert "KIMI_API_KEY" in launch.secrets
 
     # One generated config file: the single-provider providers.json (no key baked in).
+    # It is a *writable* seed (4th field True) so cline can rewrite it without EROFS.
     assert len(launch.config_files) == 1
-    target, content, merge_json = launch.config_files[0]
+    target, content, merge_json, writable = launch.config_files[0]
     assert target == f"{data_dir}/settings/providers.json"
     assert merge_json is False
+    assert writable is True
     doc = json.loads(content)
     assert doc["lastUsedProvider"] == "openai-compatible"
     settings = doc["providers"]["openai-compatible"]["settings"]

@@ -44,7 +44,10 @@ Provider mode adds one more injection channel on top of the same pipeline:
 (reasonix's project-root `reasonix.toml`; pi's user-scope `models.json` /
 `settings.json`, deep-merged onto any existing file). The CLI writes each into the
 throwaway dir and appends it to `plan.binds`, so generated configs go through the same
-git-safety check and stub sweep as every other bind.
+git-safety check and stub sweep as every other bind. A config file flagged **writable**
+(cline's `providers.json`) is instead seeded straight into its real target — which the
+harness has already put in `plan.writable_dirs` — with **no** `--ro-bind`, so a harness that
+rewrites its own config (Cline persisting its provider selection) doesn't hit `EROFS`.
 
 The compiled tree lives under a `tempfile.mkdtemp()` directory that is removed when the
 command exits.

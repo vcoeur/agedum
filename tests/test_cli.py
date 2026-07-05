@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -1327,3 +1328,48 @@ def test_abstract_config_refuses_to_launch(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 1  # fail-loud, no launch
+
+
+def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
+    """A `writable` config file is seeded into its real (writable) target — no read-only bind —
+    so a tool that rewrites it (cline's providers.json) doesn't hit EROFS. A stale read-only
+    mount-point artifact from a prior ro-bind is cleared first."""
+    plan = cli.Plan()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    target = tmp_path / "cache" / "cline" / "slug" / "settings" / "providers.json"
+    # Simulate the 0-byte read-only file a previous ro-bind mount point left behind.
+    target.parent.mkdir(parents=True)
+    target.write_text("")
+    target.chmod(0o444)
+
+    cli._inject_config_files(
+        plan, project_root, dest, ((str(target), '{"version": 1}\n', False, True),)
+    )
+
+    # Written to the real target, writable, with the seed content — and not bound.
+    assert target.read_text() == '{"version": 1}\n'
+    assert os.access(target, os.W_OK)
+    assert plan.binds == []
+    assert target in plan.origins  # still recorded for --dry-run visibility
+
+
+def test_inject_config_files_readonly_entry_still_binds(tmp_path):
+    """A plain (non-writable) config file is staged under dest and read-only bound; the real
+    target is never written — the behaviour every other harness relies on."""
+    plan = cli.Plan()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    target = tmp_path / "abs" / "config.json"
+
+    cli._inject_config_files(plan, project_root, dest, ((str(target), "content", False),))
+
+    assert not target.exists()  # real target untouched
+    assert len(plan.binds) == 1
+    staged, bound_target = plan.binds[0]
+    assert bound_target == target
+    assert staged.read_text() == "content"

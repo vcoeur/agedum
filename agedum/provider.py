@@ -47,12 +47,16 @@ PI_SUBAGENT_BUILTINS = (
 
 # A per-harness env/command builder's result:
 #   (env_to_set, env_to_unset, base_command, config_files)
-# config_files is a tuple of (target, content, merge_json) triples the launcher writes into
-# the namespace: `target` is project-root-relative (reasonix's reasonix.toml) or absolute
-# (pi's user-scope ~/.pi/agent/models.json + settings.json); `merge_json` deep-merges the
-# content onto any existing JSON file at the target. Empty for every harness without a
-# generated on-disk config.
-BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[tuple[str, str, bool], ...]]
+# config_files is a tuple of (target, content, merge_json[, writable]) entries the launcher
+# writes into the namespace: `target` is project-root-relative (reasonix's reasonix.toml) or
+# absolute (pi's user-scope ~/.pi/agent/models.json + settings.json); `merge_json` deep-merges
+# the content onto any existing JSON file at the target. The optional 4th field `writable`
+# (default False) seeds the file **directly into its target dir** — which must already be a
+# writable sandbox dir — instead of read-only binding it, for a tool that rewrites the file
+# itself (cline persists its provider selection to providers.json, which a ro-bind makes fail
+# with EROFS). Empty for every harness without a generated on-disk config.
+ConfigFile = tuple[str, str, bool] | tuple[str, str, bool, bool]
+BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[ConfigFile, ...]]
 
 
 class ProviderError(RuntimeError):
@@ -87,7 +91,7 @@ class Launch:
     unset: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
     secrets: frozenset[str] = frozenset()
-    config_files: tuple[tuple[str, str, bool], ...] = ()
+    config_files: tuple[ConfigFile, ...] = ()
     warnings: tuple[str, ...] = ()
     sandbox: Sandbox | None = None
 
@@ -897,11 +901,15 @@ def _cline_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
         token = base_env.get(secret_env, "")
         if token:
             command += ["--key", token]
+        # `writable=True`: seed providers.json into the (already writable) CLINE_DATA_DIR
+        # rather than read-only binding it — cline rewrites this file to persist its provider
+        # selection, and a ro-bind makes that write fail with EROFS. agedum re-seeds it every
+        # launch, so cline's in-session edits are transient (the correct baseUrl wins next run).
         return (
             {"CLINE_DATA_DIR": str(data_dir)},
             [],
             command,
-            ((config_path, config_doc, False),),
+            ((config_path, config_doc, False, True),),
         )
 
     command = ["cline"]

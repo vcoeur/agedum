@@ -41,8 +41,12 @@ private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode
   written — it rides `--key`) and injects it via `Launch.config_files` under an isolated
   **`CLINE_DATA_DIR`** (`~/.cache/agedum/cline/<endpoint-slug>`, one per endpoint+model so
   there's no Cline account to fall back to), then launches with **no** `--provider`/`--model`
-  so Cline selects the stored provider (base URL intact) via `lastUsedProvider`. `baseUrl` and
-  a named `provider` are mutually exclusive. On the `baseUrl` path **`contextWindow`** /
+  so Cline selects the stored provider (base URL intact) via `lastUsedProvider`. That
+  `providers.json` is **seeded writable** straight into `CLINE_DATA_DIR` (the 4th
+  `config_files` field; **not** read-only bound), because Cline rewrites it to persist its
+  provider selection and a ro-bind makes that write fail with `EROFS` — agedum re-seeds the
+  correct endpoint config on every launch. `baseUrl` and a named `provider` are mutually
+  exclusive. On the `baseUrl` path **`contextWindow`** /
   **`maxTokens`** become a one-entry `models` array in that `providers.json` — the generic
   `openai-compatible` provider has no model catalogue, so this is how Cline learns the window
   (its `X/N` meter + the point agentic compaction fires) and output cap; omitted → Cline's
