@@ -173,7 +173,7 @@ agedum maps the flag to the harness named in the config:
 | Harness | `--prompt` (interactive) | `--run` (non-interactive) |
 |---|---|---|
 | claude | positional prompt: `claude "<text>"` | `claude --print "<text>"` |
-| kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
+| kimi | *(unsupported — fail-loud)* | `kimi --prompt "<text>"` |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
 | cline | `cline --tui "<text>"` | `cline "<text>"` |
 | reasonix | *(unsupported — fail-loud)* | `reasonix run "<text>"` |
@@ -183,11 +183,12 @@ agedum maps the flag to the harness named in the config:
 
 For cline the prompt is a positional argument either way; `--tui` is what opens the
 interactive TUI (seeded with the prompt), and a bare positional runs the task once in act
-mode and exits. For reasonix and aider only `--run` is supported — reasonix's `run`
-subcommand and aider's `--message` each take the task and exit, but neither has an
-interactive prompt-seed (reasonix's `chat` can't be pre-seeded; aider's `--message` exits),
-so `--prompt` is a fail-loud `ProviderError` (condash then falls back to spawn-and-type for
-an interactive seed).
+mode and exits. For kimi, reasonix, and aider only `--run` is supported — Kimi Code's
+`--prompt` runs once and exits (and cannot combine with `--yolo`/`--auto`, which `--run`
+therefore drops), reasonix's `run` subcommand and aider's `--message` each take the task and
+exit, but none has an interactive prompt-seed (reasonix's `chat` can't be pre-seeded; aider's
+`--message` exits), so `--prompt` is a fail-loud `ProviderError` (condash then falls back to
+spawn-and-type for an interactive seed).
 
 A harness with no known prompt-seeding convention is a fail-loud `ProviderError` (agedum
 never guesses). Harness passthrough args are preserved, before the prompt text.

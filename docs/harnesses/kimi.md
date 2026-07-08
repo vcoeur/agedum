@@ -72,8 +72,9 @@ Kimi Code reads its API token **from the environment**, so the key goes in `requ
 
 The config above launches `kimi --model kimi-k2 --yolo`, with `MOONSHOT_API_KEY` in the
 environment. `--run` seeds a one-shot task with `--prompt "<text>"` (Kimi Code's `--prompt`
-runs once and exits); `--prompt` (seed-then-stay interactive) is unsupported and fails loudly
-— see the [prompt-seeding table](../provider.md#prompt-seeding).
+runs once and exits) — it drops `--yolo`/`--plan`, which Kimi Code refuses to combine with
+`--prompt`. `--prompt` (seed-then-stay interactive) is unsupported and fails loudly — see the
+[prompt-seeding table](../provider.md#prompt-seeding).
 
 > Kimi Code dropped the `--thinking` / `--no-thinking` flags; thinking is now a config
 > setting, so it is applied only through the generated `config.toml` below (which needs
