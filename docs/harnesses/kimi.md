@@ -1,11 +1,11 @@
 ---
 title: kimi harness · agedum
-description: How agedum drives kimi-cli — wrapper-mode resolution (project AGENTS.md read natively, global AGENTS.md via a generated --agent-file, skills binds) and the provider config that becomes appended CLI flags.
+description: How agedum drives kimi — wrapper-mode resolution (project AGENTS.md read natively, global AGENTS.md via a generated --agent-file, skills binds) and the provider config that becomes appended CLI flags.
 ---
 
 # kimi
 
-kimi-cli reads the **project** `AGENTS.md` from the filesystem natively, but has **no
+kimi reads the **project** `AGENTS.md` from the filesystem natively, but has **no
 user-scope `AGENTS.md`** — so agedum leaves the project instructions in place and injects
 only the global ones, via a flag. Skills, both scopes, are injected as binds like
 [Claude's](claude.md).
@@ -84,7 +84,7 @@ kimi reads its API token **from the environment**, so the key goes in `requiredE
 | `plan` | `--plan` (true) |
 | `yolo` | `--yolo` (true) |
 | `configInline` | `--config <value>` |
-| `binary` | overrides the launched CLI name (default `kimi`; Moonshot's Kimi Code CLI ships as `kimi-cli`) |
+| `binary` | overrides the launched CLI name (default `kimi`) |
 
 The config above launches `kimi --model kimi-k2 --thinking`, with `MOONSHOT_API_KEY` in the
 environment. `--prompt`/`--run` add `--prompt "<text>"` (and `--print` for `--run`) — see

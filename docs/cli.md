@@ -128,7 +128,7 @@ modes without touching how commands are passed.
 | Flag | Effect |
 |---|---|
 | `--wrapper claude` | Render the source in Claude format ([details](harnesses/claude.md#wrapper-resolution)). |
-| `--wrapper kimi` | Render the source in kimi-cli format ([details](harnesses/kimi.md#wrapper-resolution)). |
+| `--wrapper kimi` | Render the source in kimi format ([details](harnesses/kimi.md#wrapper-resolution)). |
 | `--wrapper opencode` | Render the source in opencode format ([details](harnesses/opencode.md#wrapper-resolution)). |
 | `--wrapper cline` | Render the source in Cline format ([details](harnesses/cline.md#wrapper-resolution)). |
 | `--dry-run` | Print the virtual files that would be injected (and any appended args), then exit without running the command. |

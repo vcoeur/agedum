@@ -395,17 +395,17 @@ def _emit_frontmatter(meta: dict, body: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# kimi-cli harness
+# kimi harness
 # ---------------------------------------------------------------------------
 
 
 def kimi_config_dir() -> Path:
-    """kimi-cli's user-scope config dir (``~/.kimi``)."""
+    """kimi's user-scope config dir (``~/.kimi``)."""
     return Path.home() / ".kimi"
 
 
 def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
-    """Render the source for kimi-cli.
+    """Render the source for kimi.
 
     kimi reads the **project** ``AGENTS.md`` natively — it merges every ``AGENTS.md``
     from the project root (nearest ``.git``) down to the work dir into the system
