@@ -1,7 +1,8 @@
 """Locate and load the agent-neutral source shape for a project.
 
-The source is the decided layout: a root ``AGENTS.md`` for instructions and
-``.agents/skills/<name>/`` for skills. agedum compiles this per harness at launch.
+The source is the decided layout: a root ``AGENTS.md`` for instructions and a
+``.agents/skills/`` tree for skills (each skill a ``SKILL.md`` directory, optionally
+grouped in subfolders). agedum compiles this per harness at launch.
 """
 
 from __future__ import annotations
