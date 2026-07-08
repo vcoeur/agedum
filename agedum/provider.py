@@ -1652,6 +1652,23 @@ def _opencode_config_doc(block: dict) -> dict:
             raise ProviderError("opencodeConfig must be a JSON object")
         document = _deep_merge(document, passthrough)
 
+    # `agentAppend` (inside an `agent.<name>` block): role-specific instructions declared apart
+    # from the narrative `prompt` — e.g. a workflow handoff rule — folded onto the end of that
+    # agent's prompt here so opencode receives a single `prompt` and never sees the synthetic
+    # key. Resolved after the passthrough merge, so it covers agents from either source and any
+    # `extends`-inherited value already merged in. A string or list of strings (blank-line
+    # joined); an explicit `null` (an `extends` child clearing an inherited append) is a no-op.
+    # Absent → prompt unchanged. opencode is the only harness with per-agent prompts in the
+    # provider config, so this field is opencode-only.
+    agent_block = document.get("agent")
+    if isinstance(agent_block, dict):
+        for entry in agent_block.values():
+            if isinstance(entry, dict) and "agentAppend" in entry:
+                append_text = _opencode_agent_append(entry.pop("agentAppend"))
+                if append_text:
+                    prompt = str(entry.get("prompt") or "").strip()
+                    entry["prompt"] = f"{prompt}\n\n{append_text}" if prompt else append_text
+
     # Auto-inject the bundled transcript-capture plugin so any terminal capturer
     # (condash, `script`, tmux, …) can recover a clean transcript from opencode's
     # alternate-screen TUI. The plugin emits a neutral OSC the terminal ignores;
@@ -1665,6 +1682,29 @@ def _opencode_config_doc(block: dict) -> dict:
         document["plugin"] = plugins
 
     return document
+
+
+def _opencode_agent_append(value: object) -> str:
+    """Normalise an opencode agent's ``agentAppend`` into the markdown appended to its prompt.
+
+    A string is used verbatim (trimmed); a list of strings is joined with a blank line between
+    entries so each block keeps its own heading; ``null`` — an ``extends`` child clearing an
+    inherited append — and empty / whitespace-only entries yield ``""`` (no append). Any other
+    type (or a non-string list entry) raises :class:`ProviderError`.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        blocks: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ProviderError("opencode `agentAppend` list entries must be strings")
+            if item.strip():
+                blocks.append(item.strip())
+        return "\n\n".join(blocks)
+    raise ProviderError("opencode `agentAppend` must be a string, a list of strings, or null")
 
 
 def _transcript_plugin_path() -> str:

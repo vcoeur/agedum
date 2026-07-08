@@ -72,6 +72,7 @@ env var; no file written):
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
 | `providerDef` | an explicit provider block with the key resolved from the environment — see [below](#providerdef) |
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
+| `agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
 
 ### `providerDef` — declare the provider + key inline { #providerdef }
@@ -180,3 +181,56 @@ deep-merged into the generated document last, so it overrides the modeled keys o
 hatch you need for opencode: the modeled keys cover the common cases tersely and stay
 consistent with the other harnesses, and anything else is written in opencode's own format
 here.
+
+### `agentAppend` — per-agent instruction append { #agentappend }
+
+An agent's narrative `prompt` describes its role. Some rules are neither role description
+nor `permission` — e.g. a workflow trigger like *"if asked to change a sibling repo, hand
+off to the build agent"*. `agentAppend` lets those live **beside** the prompt instead of
+inside it: declare it in an agent's block (under `agentOptions` or, as here, the
+`opencodeConfig.agent.<name>` passthrough) and agedum folds it onto the **end of that
+agent's `prompt`** — a single blank line between — before the config reaches opencode. The
+synthetic `agentAppend` key is stripped, so opencode only ever sees one `prompt`.
+
+```json
+{
+  "harness": "opencode",
+  "config": {
+    "opencodeConfig": {
+      "agent": {
+        "conception": {
+          "mode": "primary",
+          "prompt": "You are the planning agent. Plan first, then act.",
+          "agentAppend": "## Handoff rule\n\nIf asked to edit a sibling repo, hand off to the build agent — do not edit it yourself."
+        }
+      }
+    }
+  }
+}
+```
+
+opencode then receives, for the `conception` agent:
+
+```text
+You are the planning agent. Plan first, then act.
+
+## Handoff rule
+
+If asked to edit a sibling repo, hand off to the build agent — do not edit it yourself.
+```
+
+- **String or list.** A string is appended verbatim; a **list of strings** is joined with a
+  blank line between entries (so each block keeps its own heading) — use it to stack several
+  independent rules.
+- **Heading is yours.** agedum adds no heading of its own; write the `## …` (or none) inside
+  the `agentAppend` text so you control the rendering.
+- **Inheritance.** Because it is an ordinary config field, `agentAppend` flows through
+  [`extends`](../provider.md): a base can define it for an agent and a child inherits it. A
+  child overrides it by setting its own value, or **clears** an inherited append by setting
+  it to `null`. An agent with `agentAppend` but no `prompt` gets the append text as its whole
+  prompt.
+- **Per-agent, opencode-only.** It attaches to one named agent, so it is meaningful only for
+  opencode — the sole harness that carries per-agent prompts in the provider config. The
+  other harnesses draw their instructions from `AGENTS.md` (with the per-harness
+  `AGENTS.<harness>.md` [overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope)),
+  which is where a shared, non-agent-specific rule belongs.

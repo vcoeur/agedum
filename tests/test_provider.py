@@ -752,6 +752,149 @@ def test_opencode_config_passthrough_rejects_non_object():
         )
 
 
+def _opencode_agents(config):
+    """Build an opencode launch and return its config doc's `agent` block."""
+    launch = build_launch({"harness": "opencode", "config": config}, base_env={})
+    return json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])["agent"]
+
+
+def test_opencode_agent_append_folds_into_prompt():
+    # agentAppend text is appended after the agent's prompt, and the synthetic key is
+    # stripped so opencode never sees it.
+    agents = _opencode_agents(
+        {
+            "opencodeConfig": {
+                "agent": {
+                    "conception": {
+                        "mode": "primary",
+                        "prompt": "You are the planning agent.",
+                        "agentAppend": "## Handoff rule\n\nHand off to the build agent.",
+                    }
+                }
+            }
+        }
+    )
+    assert agents["conception"]["prompt"] == (
+        "You are the planning agent.\n\n## Handoff rule\n\nHand off to the build agent."
+    )
+    assert "agentAppend" not in agents["conception"]
+    assert agents["conception"]["mode"] == "primary"
+
+
+def test_opencode_agent_append_list_concatenates():
+    agents = _opencode_agents(
+        {
+            "opencodeConfig": {
+                "agent": {
+                    "conception": {
+                        "prompt": "Base prompt.",
+                        "agentAppend": ["## Rule A\n\nfirst", "## Rule B\n\nsecond"],
+                    }
+                }
+            }
+        }
+    )
+    assert agents["conception"]["prompt"] == (
+        "Base prompt.\n\n## Rule A\n\nfirst\n\n## Rule B\n\nsecond"
+    )
+
+
+def test_opencode_agent_append_null_is_noop():
+    # A null agentAppend (an extends child clearing an inherited append) leaves the prompt
+    # untouched and still strips the key.
+    agents = _opencode_agents(
+        {
+            "opencodeConfig": {
+                "agent": {"build": {"prompt": "You are the build agent.", "agentAppend": None}}
+            }
+        }
+    )
+    assert agents["build"]["prompt"] == "You are the build agent."
+    assert "agentAppend" not in agents["build"]
+
+
+def test_opencode_agent_append_without_prompt_becomes_the_prompt():
+    agents = _opencode_agents(
+        {"opencodeConfig": {"agent": {"conception": {"agentAppend": "## Rule\n\nbody"}}}}
+    )
+    assert agents["conception"]["prompt"] == "## Rule\n\nbody"
+
+
+def test_opencode_agent_append_only_affects_agents_that_declare_it():
+    agents = _opencode_agents(
+        {
+            "opencodeConfig": {
+                "agent": {
+                    "conception": {"prompt": "plan", "agentAppend": "extra"},
+                    "build": {"prompt": "build"},
+                }
+            }
+        }
+    )
+    assert agents["conception"]["prompt"] == "plan\n\nextra"
+    assert agents["build"]["prompt"] == "build"
+
+
+def test_opencode_agent_append_extends_inheritance(tmp_path):
+    # A base defines agent + agentAppend; the child inherits it through extends. A second
+    # child clears it with null. Both resolve via load_merged_config before build_launch.
+    _write_config(
+        tmp_path,
+        "base/plan.json",
+        {
+            "abstract": True,
+            "harness": "opencode",
+            "config": {
+                "opencodeConfig": {
+                    "agent": {"conception": {"prompt": "Plan.", "agentAppend": "Handoff rule."}}
+                }
+            },
+        },
+    )
+    inherit = load_merged_config(
+        _write_config(tmp_path, "inherit.json", {"extends": "base/plan"}), tmp_path
+    )
+    agents = _opencode_agents(inherit["config"])
+    assert agents["conception"]["prompt"] == "Plan.\n\nHandoff rule."
+
+    cleared = load_merged_config(
+        _write_config(
+            tmp_path,
+            "cleared.json",
+            {
+                "extends": "base/plan",
+                "config": {"opencodeConfig": {"agent": {"conception": {"agentAppend": None}}}},
+            },
+        ),
+        tmp_path,
+    )
+    cleared_agents = _opencode_agents(cleared["config"])
+    assert cleared_agents["conception"]["prompt"] == "Plan."
+    assert "agentAppend" not in cleared_agents["conception"]
+
+
+def test_opencode_agent_append_rejects_invalid_type():
+    with pytest.raises(ProviderError, match="agentAppend"):
+        build_launch(
+            {
+                "harness": "opencode",
+                "config": {"opencodeConfig": {"agent": {"c": {"agentAppend": 5}}}},
+            },
+            base_env={},
+        )
+
+
+def test_opencode_agent_append_rejects_non_string_list_entry():
+    with pytest.raises(ProviderError, match="agentAppend"):
+        build_launch(
+            {
+                "harness": "opencode",
+                "config": {"opencodeConfig": {"agent": {"c": {"agentAppend": ["ok", 3]}}}},
+            },
+            base_env={},
+        )
+
+
 def test_build_launch_is_deterministic():
     config = {
         "harness": "opencode",
