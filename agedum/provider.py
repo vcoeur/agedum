@@ -466,7 +466,11 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
                 "use --run for a one-shot task, or launch without --prompt for an "
                 "interactive session"
             )
-        return [binary, *base_flags, *rest, "--prompt", text]
+        # --prompt is non-interactive and manages approvals itself: Kimi Code rejects combining
+        # it with the interactive permission flags (`--prompt` + `--yolo`/`--auto` both error),
+        # and `--plan` is interactive-only. Drop them from the seed command, keeping --model.
+        seed_flags = [flag for flag in base_flags if flag not in ("--yolo", "--auto", "--plan")]
+        return [binary, *seed_flags, *rest, "--prompt", text]
     if harness == "opencode":
         if interactive:
             return [binary, *base_flags, *rest, "--prompt", text]

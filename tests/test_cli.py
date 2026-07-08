@@ -645,13 +645,16 @@ def test_run_flag_claude_non_interactive(monkeypatch, tmp_path):
 def test_run_flag_kimi_uses_prompt(monkeypatch, tmp_path):
     captured = _capture_run(monkeypatch)
     monkeypatch.setitem(cli._COMPILERS, "kimi", lambda p, g, d: cli.Plan())
-    config = {"harness": "kimi", "config": {"model": "kimi-k2.6"}}
+    # yolo:true is set by the favorite kimi-code-auto launcher; --run must strip it because
+    # Kimi Code rejects --prompt combined with --yolo.
+    config = {"harness": "kimi", "config": {"model": "kimi-k2.6", "yolo": True}}
     _write_provider(tmp_path, "k", config, monkeypatch)
     monkeypatch.setattr("sys.argv", ["agedum", "k", "--run", "summarise"])
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
-    # Kimi Code's --prompt runs one prompt non-interactively and exits (no --print any more).
+    # Kimi Code's --prompt runs one prompt non-interactively and exits (no --print any more),
+    # and --yolo is dropped from the seed command.
     assert captured["command"] == [
         "kimi",
         "--model",

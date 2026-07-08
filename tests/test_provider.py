@@ -2062,9 +2062,13 @@ def test_with_prompt_kimi_interactive_fails_loudly():
         with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=True)
 
 
-def test_with_prompt_kimi_run_uses_prompt():
-    # kimi --run: --prompt runs the task non-interactively (no --print any more).
-    assert with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=False) == [
+def test_with_prompt_kimi_run_uses_prompt_and_drops_interactive_flags():
+    # kimi --run: --prompt runs the task non-interactively (no --print any more). Kimi Code
+    # rejects --prompt combined with --yolo/--auto (and --plan is interactive-only), so the
+    # seed command strips them, keeping --model.
+    assert with_prompt(
+        _launch("kimi", ["kimi", "--model", "k", "--yolo"]), [], "hi", interactive=False
+    ) == [
         "kimi",
         "--model",
         "k",
