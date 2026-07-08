@@ -530,15 +530,15 @@ def test_kimi_base_url_generates_config_file():
     assert provider["api_key"] == "sk-go"  # resolved key baked in; masked in --dry-run
 
 
-def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
-    # `agedum kimi` → kimi-cli (kimi harness) against the Kimi Code *subscription* endpoint,
-    # keyed by KIMI_API_KEY — never the metered moonshot platform API.
+def test_kimi_code_subscription_uses_kimi_and_subscription_endpoint():
+    # `agedum kimi` -> kimi (kimi harness) against the Kimi Code *subscription* endpoint,
+    # keyed by KIMI_API_KEY -- never the metered moonshot platform API.
     launch = build_launch(
         {
             "harness": "kimi",
             "secretEnv": "KIMI_API_KEY",
             "config": {
-                "binary": "kimi-cli",
+                "binary": "kimi",
                 "baseUrl": "https://api.kimi.com/coding/v1",
                 "providerType": "kimi",
                 "model": "kimi-for-coding",
@@ -548,7 +548,7 @@ def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
         },
         base_env={"KIMI_API_KEY": "sk-kimi-test"},
     )
-    assert launch.command[0] == "kimi-cli"  # the Kimi Code CLI binary, not `kimi`
+    assert launch.command[0] == "kimi"  # the Kimi CLI binary
     assert "--model" in launch.command and "kimi-for-coding" in launch.command
     doc = json.loads(launch.config_files[0][1])
     assert doc["default_model"] == "kimi-for-coding"
@@ -561,7 +561,7 @@ def test_kimi_code_subscription_uses_kimi_cli_and_subscription_endpoint():
 
 
 def test_kimi_binary_override_and_default():
-    # `binary` overrides the CLI name (Kimi Code CLI ships as `kimi-cli`); default is `kimi`.
+    # `binary` overrides the CLI name; default is `kimi`.
     overridden = build_launch(
         {"harness": "kimi", "config": {"binary": "kimi-cli", "model": "kimi-for-coding"}},
         base_env={},
