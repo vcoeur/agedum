@@ -22,8 +22,13 @@ my-project/
         │   ├── SKILL.cline.md    # optional Cline-only overlay
         │   ├── checklist.md      # task file, copied verbatim
         │   └── lint.sh           # script, copied verbatim
-        └── release/
-            └── SKILL.md
+        ├── release/
+        │   └── SKILL.md
+        └── git/                  # grouping subfolder (no SKILL.md of its own)
+            ├── commit/
+            │   └── SKILL.md      # compiled as the `git-commit` skill
+            └── pr/
+                └── SKILL.md      # compiled as the `git-pr` skill
 ```
 
 Nothing here is harness-specific except the optional `SKILL.<harness>.md` overlays —
@@ -64,9 +69,10 @@ sibling exists:
 
 ## Skills
 
-A **skill** is a directory under `.agents/skills/<name>/`. The directory name is the
-skill name. Each skill is rendered into the harness's skills location as a directory
-of the same name.
+A **skill** is any directory under `.agents/skills/` that contains a `SKILL.md` — at the
+top level or nested in a subfolder. For a top-level skill the directory name is the skill
+name; each skill is rendered into the harness's skills location as a directory of the same
+name.
 
 ### `SKILL.md` — the base
 
@@ -112,6 +118,31 @@ So a base that declares `name` / `description` plus a `SKILL.claude.md` that add
 three front-matter keys and both bodies. If a skill has no base body, the overlay body
 stands alone.
 
+### Skills in subfolders
+
+Skills may be grouped in subfolders. agedum walks the whole `.agents/skills/` tree and
+treats **every directory containing a `SKILL.md` as one skill** — so you can organise
+related skills under a common parent:
+
+```
+.agents/skills/
+├── review/            # → the `review` skill
+└── git/               # a grouping folder — no SKILL.md, not itself a skill
+    ├── commit/        # → the `git-commit` skill
+    └── pr/            # → the `git-pr` skill
+```
+
+A nested skill's **name is its path relative to `skills/`, with the components joined by
+`-`** — `git/commit/` becomes `git-commit`. agedum rewrites that skill's front-matter
+`name` to the flattened value so the harness invokes it as `git-commit`, and two
+like-named skills in different groups (`git/pr/` and `review/pr/`) never collide. A
+top-level skill keeps whatever `name` it declares.
+
+Grouping folders (those without their own `SKILL.md`) only provide the namespace — loose
+files placed directly in them are ignored; assets belong inside a skill directory. If two
+skills would flatten to the same name (e.g. a literal `git-commit/` alongside
+`git/commit/`), agedum raises an error rather than silently clobbering one.
+
 ### Task files, scripts, and other assets
 
 Any other file or subdirectory inside a skill — checklists, prompt fragments, helper
@@ -123,6 +154,11 @@ every other `*.md` and every non-markdown file is carried through unchanged.
     Only files matching `SKILL.<something>.md` are treated as overlays and filtered
     out of the copy. A `README.md` or `checklist.md` inside a skill is a normal asset
     and is copied. Name your overlays exactly `SKILL.<harness>.md`.
+
+!!! note "A skill nested inside a skill"
+    If a skill directory itself contains a subfolder with its own `SKILL.md`, that
+    subfolder is compiled as its own (nested) skill — not copied in as the parent's
+    asset. Both end up in the harness's skills location, at their own flattened names.
 
 ## Scopes { #scopes }
 

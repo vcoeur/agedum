@@ -13,9 +13,12 @@ keeping them separate preserves the scope distinction. The compiled tree lives i
 throwaway directory; `Plan` records absolute (src → target) binds the launcher
 mounts into the namespace.
 
-Per skill: the base ``SKILL.md`` (minimal `name`/`description`) is merged with an
-optional ``SKILL.claude.md`` overlay; task files and scripts are copied verbatim;
-other harnesses' ``SKILL.<h>.md`` overlays are skipped.
+Skills are discovered by walking ``.agents/skills/`` for every directory holding a
+``SKILL.md`` (see :func:`_discover_skills`), so subfolders may group them — a nested
+``group/skill/`` compiles to the flattened name ``group-skill``. Per skill: the base
+``SKILL.md`` (minimal `name`/`description`) is merged with an optional ``SKILL.claude.md``
+overlay; task files and scripts are copied verbatim; other harnesses' ``SKILL.<h>.md``
+overlays are skipped.
 
 Instructions get the same overlay treatment, but **only at user (global) scope**: the
 base ``~/.config/agents/AGENTS.md`` is merged with an optional sibling
@@ -281,33 +284,81 @@ def _compile_scope(
             plan.origins[claude_md_target] = str(source.agents_md)
 
     if source.skills_dir is not None:
-        skill_dirs = sorted(p for p in source.skills_dir.iterdir() if p.is_dir())
-        if skill_dirs:
+        skills = _discover_skills(source.skills_dir)
+        if skills:
             skills_out = dest / "skills"
-            for skill_dir in skill_dirs:
-                _compile_skill(skill_dir, skills_out / skill_dir.name, "SKILL.claude.md")
+            for name, skill_dir, nested in skills:
+                _compile_skill(
+                    skill_dir,
+                    skills_out / name,
+                    "SKILL.claude.md",
+                    force_name=name if nested else None,
+                )
             plan.binds.append((skills_out, skills_target))
             plan.origins[skills_target] = str(source.skills_dir)
 
 
-def _compile_skill(src: Path, out: Path, overlay_name: str) -> None:
+def _compile_skill(src: Path, out: Path, overlay_name: str, force_name: str | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     base = (src / "SKILL.md").read_text() if (src / "SKILL.md").is_file() else ""
     overlay_path = src / overlay_name
     merged = base
     if overlay_path.is_file():
         merged = _merge_skill(base, overlay_path.read_text())
+    # A nested skill's compiled identity is its flattened path (``group-skill``); force the
+    # front-matter ``name`` to match so the harness invokes it by that name and two
+    # like-named skills in different groups don't collide.
+    if force_name is not None:
+        merged = _set_skill_name(merged, force_name)
     (out / "SKILL.md").write_text(merged)
 
     # Copy task files / scripts / other assets; skip SKILL.md and any SKILL.<h>.md overlay.
+    # A subdirectory that itself holds a SKILL.md is a separate (nested) skill, compiled on
+    # its own — skip it here so it isn't also copied in as this skill's asset.
     for item in src.iterdir():
         if item.name == "SKILL.md" or (item.name.startswith("SKILL.") and item.suffix == ".md"):
+            continue
+        if item.is_dir() and any(item.rglob("SKILL.md")):
             continue
         dst = out / item.name
         if item.is_dir():
             shutil.copytree(item, dst, dirs_exist_ok=True)
         else:
             shutil.copy2(item, dst)
+
+
+def _discover_skills(skills_dir: Path) -> list[tuple[str, Path, bool]]:
+    """Find every skill under ``skills_dir``, walking subdirectories.
+
+    A skill is any directory containing a ``SKILL.md`` (at any depth). The compiled skill
+    name is that directory's path relative to ``skills_dir`` with the components joined by
+    ``-`` — so ``review/`` stays ``review`` and ``group/skill/`` becomes ``group-skill``,
+    letting subfolders namespace skills. Returns ``(name, source_dir, nested)`` tuples in a
+    deterministic order; ``nested`` is true when the skill sits below the top level (its
+    front-matter ``name`` gets rewritten to the flattened identity). Raises ``ValueError``
+    when two source directories flatten to the same name."""
+    found: dict[str, Path] = {}
+    skills: list[tuple[str, Path, bool]] = []
+    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+        skill_src = skill_md.parent
+        rel = skill_src.relative_to(skills_dir)
+        name = "-".join(rel.parts)
+        if name in found:
+            raise ValueError(
+                f"skill name collision: '{name}' from both "
+                f"'{found[name].relative_to(skills_dir)}' and '{rel}'"
+            )
+        found[name] = skill_src
+        skills.append((name, skill_src, len(rel.parts) > 1))
+    return skills
+
+
+def _set_skill_name(skill_md: str, name: str) -> str:
+    """Return ``skill_md`` with its front-matter ``name`` set to ``name`` (used to give a
+    nested skill the flattened identity that matches its compiled directory)."""
+    meta, body = _split_frontmatter(skill_md)
+    meta = {"name": name, **{k: v for k, v in meta.items() if k != "name"}}
+    return _emit_frontmatter(meta, body)
 
 
 def _merge_skill(base: str, overlay: str) -> str:
@@ -420,13 +471,17 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
 
 
 def _compile_skill_tree(skills_dir: Path, out_root: Path, overlay_name: str) -> Path | None:
-    """Compile each ``<skills_dir>/<name>/`` into ``out_root/<name>/``, applying the
-    ``overlay_name`` overlay; return ``out_root`` (or None when there are no skills)."""
-    skill_dirs = sorted(p for p in skills_dir.iterdir() if p.is_dir())
-    if not skill_dirs:
+    """Compile each discovered skill under ``skills_dir`` into ``out_root/<name>/``, applying
+    the ``overlay_name`` overlay; return ``out_root`` (or None when there are no skills).
+    Skills nested in subfolders are flattened to ``group-skill`` names (see
+    :func:`_discover_skills`)."""
+    skills = _discover_skills(skills_dir)
+    if not skills:
         return None
-    for skill_dir in skill_dirs:
-        _compile_skill(skill_dir, out_root / skill_dir.name, overlay_name)
+    for name, skill_dir, nested in skills:
+        _compile_skill(
+            skill_dir, out_root / name, overlay_name, force_name=name if nested else None
+        )
     return out_root
 
 

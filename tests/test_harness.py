@@ -2,8 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from agedum.harness import (
     Plan,
+    _discover_skills,
     claude_config_dir,
     cline_config_dir,
     cline_global_agents_md,
@@ -70,6 +73,103 @@ def test_compile_claude_project_layout_and_overlay(tmp_path):
     assert (skills_src / "demo" / "task1.md").exists()
     assert (skills_src / "demo" / "helper.sh").exists()
     assert not (skills_src / "demo" / "SKILL.kimi.md").exists()
+
+
+def test_discover_skills_walks_subfolders_and_flattens_names(tmp_path):
+    root = tmp_path / ".agents" / "skills"
+    (root / "review").mkdir(parents=True)
+    (root / "review" / "SKILL.md").write_text("---\nname: review\ndescription: d\n---\n")
+    (root / "git" / "commit").mkdir(parents=True)
+    (root / "git" / "commit" / "SKILL.md").write_text("---\nname: commit\ndescription: d\n---\n")
+    (root / "git" / "pr").mkdir(parents=True)
+    (root / "git" / "pr" / "SKILL.md").write_text("---\nname: pr\ndescription: d\n---\n")
+
+    discovered = _discover_skills(root)
+    assert discovered == [
+        ("git-commit", root / "git" / "commit", True),
+        ("git-pr", root / "git" / "pr", True),
+        ("review", root / "review", False),
+    ]
+
+
+def test_discover_skills_raises_on_flattened_name_collision(tmp_path):
+    root = tmp_path / ".agents" / "skills"
+    (root / "group-skill").mkdir(parents=True)
+    (root / "group-skill" / "SKILL.md").write_text("---\nname: group-skill\ndescription: d\n---\n")
+    (root / "group" / "skill").mkdir(parents=True)
+    (root / "group" / "skill" / "SKILL.md").write_text("---\nname: skill\ndescription: d\n---\n")
+
+    with pytest.raises(ValueError, match="skill name collision: 'group-skill'"):
+        _discover_skills(root)
+
+
+def test_compile_claude_nested_skill_flattens_name_and_dir(tmp_path):
+    # A skill in a grouping subfolder is compiled as `group-skill`, and its front-matter
+    # `name` is rewritten to match; a top-level skill keeps its declared name.
+    (tmp_path / "AGENTS.md").write_text("# p\n")
+    top = tmp_path / ".agents" / "skills" / "demo"
+    top.mkdir(parents=True)
+    (top / "SKILL.md").write_text("---\nname: demo\ndescription: top\n---\nBody.\n")
+    nested = tmp_path / ".agents" / "skills" / "git" / "commit"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text("---\nname: commit\ndescription: nested\n---\nCommit body.\n")
+    (nested / "helper.sh").write_text("#!/bin/sh\necho hi\n")
+
+    plan = compile_claude(load_source(tmp_path), None, tmp_path / "out")
+    skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
+
+    # Top-level skill: unchanged identity.
+    assert (skills_src / "demo" / "SKILL.md").read_text().count("name: demo") == 1
+
+    # Nested skill: compiled at the flattened dir with a rewritten `name`, description kept,
+    # body preserved, and its asset carried through.
+    nested_md = (skills_src / "git-commit" / "SKILL.md").read_text()
+    assert "name: git-commit" in nested_md
+    assert "name: commit" not in nested_md
+    assert "description: nested" in nested_md
+    assert "Commit body." in nested_md
+    assert (skills_src / "git-commit" / "helper.sh").exists()
+    # No stray `git/` grouping dir leaks into the compiled tree.
+    assert not (skills_src / "git").exists()
+
+
+def test_compile_claude_skill_nested_inside_skill_not_double_copied(tmp_path):
+    # A skill that itself contains a nested skill: the child is compiled on its own and is
+    # NOT also copied in as the parent's asset.
+    (tmp_path / "AGENTS.md").write_text("# p\n")
+    parent = tmp_path / ".agents" / "skills" / "outer"
+    parent.mkdir(parents=True)
+    (parent / "SKILL.md").write_text("---\nname: outer\ndescription: parent\n---\n")
+    (parent / "notes.md").write_text("asset\n")
+    child = parent / "inner"
+    child.mkdir()
+    (child / "SKILL.md").write_text("---\nname: inner\ndescription: child\n---\n")
+
+    plan = compile_claude(load_source(tmp_path), None, tmp_path / "out")
+    skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
+
+    # Both skills exist, at their own compiled dirs.
+    assert (skills_src / "outer" / "SKILL.md").exists()
+    assert (skills_src / "outer-inner" / "SKILL.md").exists()
+    # The child subtree is not duplicated inside the parent; plain assets still copy.
+    assert not (skills_src / "outer" / "inner").exists()
+    assert (skills_src / "outer" / "notes.md").exists()
+
+
+def test_compile_kimi_discovers_nested_skills(tmp_path, monkeypatch):
+    # The shared _compile_skill_tree path (kimi/opencode/cline/…) also walks subfolders.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "AGENTS.md").write_text("# p\n")
+    nested = tmp_path / ".agents" / "skills" / "group" / "skill"
+    nested.mkdir(parents=True)
+    (nested / "SKILL.md").write_text("---\nname: skill\ndescription: d\n---\nBody.\n")
+
+    plan = compile_kimi(load_source(tmp_path), None, tmp_path / "out")
+    skills_src = _src_for(plan, tmp_path / ".kimi" / "skills")
+    nested_md = (skills_src / "group-skill" / "SKILL.md").read_text()
+    assert "name: group-skill" in nested_md
 
 
 def test_load_source_excludes_home_as_project_root(tmp_path, monkeypatch):

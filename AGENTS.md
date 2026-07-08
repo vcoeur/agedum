@@ -5,6 +5,11 @@ A Python CLI that drives any agent CLI from an agent-neutral source shape
 private mount namespace at launch. Implemented: **Claude**, **kimi**, **opencode**,
 **Cline**, **reasonix**, **aider**, **pi**, and **codex** harnesses at **project + global scope**.
 
+Skills are discovered by walking `.agents/skills/` for every directory holding a
+`SKILL.md` (`_discover_skills`), so subfolders group them: a nested `group/skill/`
+compiles to the flattened name `group-skill` (and its front-matter `name` is rewritten to
+match); top-level skills keep their declared name.
+
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
   `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
