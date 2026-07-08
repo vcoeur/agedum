@@ -1652,6 +1652,31 @@ def _opencode_config_doc(block: dict) -> dict:
             raise ProviderError("opencodeConfig must be a JSON object")
         document = _deep_merge(document, passthrough)
 
+    # `agentAppend` (inside an `opencodeConfig.agent.<name>` block, beside `prompt`):
+    # role-specific instructions declared apart from the narrative `prompt` — e.g. a workflow
+    # handoff rule — folded onto the end of that agent's prompt here, so opencode receives a
+    # single `prompt` and never sees the synthetic key. Resolved after the passthrough merge, so
+    # any `extends`-inherited value is already merged in. A string or list of strings (blank-line
+    # joined); an explicit `null` (an `extends` child clearing an inherited append) folds nothing
+    # but still strips the key. Absent → prompt unchanged. opencode is the only harness with
+    # per-agent prompts in the provider config, so this field is opencode-only.
+    agent_block = document.get("agent")
+    if isinstance(agent_block, dict) and any(
+        isinstance(entry, dict) and "agentAppend" in entry for entry in agent_block.values()
+    ):
+        # Rebuild the agent map, copying only the entries we touch: build_launch must not mutate
+        # the caller's config, and `_deep_merge` aliases the passthrough's `agent` sub-dicts by
+        # reference (its else-branch), so popping/rewriting in place would edit the input.
+        folded: dict = {}
+        for name, entry in agent_block.items():
+            if isinstance(entry, dict) and "agentAppend" in entry:
+                append_text = _opencode_agent_append(entry["agentAppend"])
+                entry = {key: value for key, value in entry.items() if key != "agentAppend"}
+                if append_text:
+                    entry["prompt"] = _opencode_join_prompt(entry.get("prompt"), append_text)
+            folded[name] = entry
+        document["agent"] = folded
+
     # Auto-inject the bundled transcript-capture plugin so any terminal capturer
     # (condash, `script`, tmux, …) can recover a clean transcript from opencode's
     # alternate-screen TUI. The plugin emits a neutral OSC the terminal ignores;
@@ -1665,6 +1690,44 @@ def _opencode_config_doc(block: dict) -> dict:
         document["plugin"] = plugins
 
     return document
+
+
+def _opencode_agent_append(value: object) -> str:
+    """Normalise an opencode agent's ``agentAppend`` into the markdown appended to its prompt.
+
+    A string is trimmed; a list of strings is trimmed per entry and joined with a blank line
+    between entries so each block keeps its own heading; ``null`` — an ``extends`` child clearing
+    an inherited append — and empty / whitespace-only entries yield ``""`` (no append). Any other
+    type (or a non-string list entry) raises :class:`ProviderError`.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        blocks: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ProviderError("opencode `agentAppend` list entries must be strings")
+            if item.strip():
+                blocks.append(item.strip())
+        return "\n\n".join(blocks)
+    raise ProviderError("opencode `agentAppend` must be a string, a list of strings, or null")
+
+
+def _opencode_join_prompt(prompt: object, append_text: str) -> str:
+    """Join an agent's existing prompt with resolved ``agentAppend`` text (one blank line).
+
+    A missing prompt yields the append alone; a string prompt is trimmed and separated from the
+    append by a blank line. A non-string prompt (a malformed opencode agent config) raises
+    rather than being coerced to its Python ``repr``.
+    """
+    if prompt is None:
+        return append_text
+    if isinstance(prompt, str):
+        base = prompt.strip()
+        return f"{base}\n\n{append_text}" if base else append_text
+    raise ProviderError("opencode `agentAppend` requires the agent's `prompt` to be a string")
 
 
 def _transcript_plugin_path() -> str:
