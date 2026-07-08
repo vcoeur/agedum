@@ -426,8 +426,9 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 
     * **claude** — a positional prompt seeds an interactive session; ``--print`` runs and
       exits (``claude "<text>"`` vs ``claude --print "<text>"``).
-    * **kimi** — ``--prompt`` seeds the agent (interactive by default); adding ``--print``
-      makes that invocation non-interactive (``kimi --prompt "<text>" [--print]``).
+    * **kimi** — Kimi Code's ``--prompt`` runs one prompt non-interactively and exits (it
+      dropped the old ``--print`` flag), which is ``--run``. There is no seed-then-stay
+      interactive mode, so ``--prompt`` (interactive) raises :class:`ProviderError`.
     * **opencode** — top-level ``--prompt`` seeds the TUI; the ``run`` subcommand runs and
       exits (``opencode --prompt "<text>"`` vs ``opencode run "<text>"``).
     * **cline** — a positional prompt is the seed either way; ``--tui`` is what opens the
@@ -456,8 +457,16 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
         mode_flags = [] if interactive else ["--print"]
         return [binary, *base_flags, *rest, *mode_flags, text]
     if harness == "kimi":
-        mode_flags = [] if interactive else ["--print"]
-        return [binary, *base_flags, *rest, "--prompt", text, *mode_flags]
+        # Kimi Code's --prompt runs one prompt non-interactively and exits (it dropped the old
+        # --print flag) — that is --run. There is no "seed then stay interactive" mode, so
+        # --prompt fails loudly (condash then falls back to spawn-and-type), like reasonix/aider.
+        if interactive:
+            raise ProviderError(
+                "kimi has no interactive prompt-seeding (`--prompt` runs once and exits); "
+                "use --run for a one-shot task, or launch without --prompt for an "
+                "interactive session"
+            )
+        return [binary, *base_flags, *rest, "--prompt", text]
     if harness == "opencode":
         if interactive:
             return [binary, *base_flags, *rest, "--prompt", text]
@@ -646,21 +655,24 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
 
 
 # The provider name agedum assigns to a generated custom-endpoint kimi provider in the
-# injected kimi config. The user never types it — agedum points kimi at it via --config-file
-# and selects the model by its upstream id.
+# injected Kimi Code config.toml. The user never types it — agedum selects the model alias
+# (whose provider is this) via --model, and default_model points at it too.
 KIMI_PROVIDER_NAME = "agedum"
 
 
-def _kimi_config_doc(
+def _kimi_config_toml(
     block: dict, base_url: str, model: str, secret_env: str, base_env: dict[str, str]
-) -> dict:
-    """Build a self-sufficient kimi config doc that points at a custom endpoint.
+) -> str:
+    """Build a self-sufficient Kimi Code ``config.toml`` pointing at a custom endpoint.
 
-    kimi's config does not interpolate ``$ENV`` and ``--config-file`` replaces the default
-    config, so the doc carries the resolved API key verbatim (masked in ``--dry-run``) plus a
-    single provider + model; kimi fills every other setting from its ``Config`` defaults.
+    Kimi Code has no ``--config-file`` flag and its config does not interpolate ``$ENV``, so
+    agedum binds this generated ``config.toml`` over ``~/.kimi-code/config.toml`` (the file
+    Kimi reads) with the resolved API key baked in (masked in ``--dry-run``). It carries a
+    single provider + model and toggles thinking; Kimi fills every other setting from its own
+    defaults. ``providerType`` must name a Kimi Code provider type (``openai`` for an OpenAI
+    Chat Completions surface, ``anthropic``, ``kimi``, …).
     """
-    provider_type = str(block.get("providerType") or "openai_legacy").strip() or "openai_legacy"
+    provider_type = str(block.get("providerType") or "openai").strip() or "openai"
     context_window = block.get("contextWindow")
     max_context_size = (
         int(context_window)
@@ -673,49 +685,44 @@ def _kimi_config_doc(
         if isinstance(capabilities, list) and capabilities
         else ["thinking"]
     )
-    return {
-        "default_model": model,
-        "models": {
-            model: {
-                "provider": KIMI_PROVIDER_NAME,
-                "model": model,
-                "max_context_size": max_context_size,
-                "capabilities": model_capabilities,
-            }
-        },
-        "providers": {
-            KIMI_PROVIDER_NAME: {
-                "type": provider_type,
-                "base_url": base_url,
-                "api_key": base_env.get(secret_env, ""),
-            }
-        },
-    }
+    caps = ", ".join(f'"{_toml_escape(capability)}"' for capability in model_capabilities)
+    lines = [
+        f'default_model = "{_toml_escape(model)}"',
+        "",
+        f'[models."{_toml_escape(model)}"]',
+        f'provider = "{KIMI_PROVIDER_NAME}"',
+        f'model = "{_toml_escape(model)}"',
+        f"max_context_size = {max_context_size}",
+        f"capabilities = [{caps}]",
+        "",
+        f'[providers."{KIMI_PROVIDER_NAME}"]',
+        f'type = "{_toml_escape(provider_type)}"',
+        f'base_url = "{_toml_escape(base_url)}"',
+        f'api_key = "{_toml_escape(base_env.get(secret_env, ""))}"',
+    ]
+    thinking = block.get("thinking")
+    if thinking is not None:
+        lines += ["", "[thinking]", f"enabled = {'true' if thinking else 'false'}"]
+    return "\n".join(lines) + "\n"
 
 
 def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
-    # kimi's provider/model knobs are appended CLI flags, not env vars. The token
-    # (secret_env) reaches the child via the required-env export in build_launch.
-    # The CLI binary is overridable: current Kimi CLI packages expose `kimi`.
-    # Default to `kimi` for backward compatibility.
+    # Kimi Code's provider/model knobs are appended CLI flags plus a generated config.toml,
+    # not env vars. The token (secret_env) reaches the child via the required-env export in
+    # build_launch and is also baked into the generated config.
+    # The CLI binary is overridable; current Kimi Code packages expose `kimi`.
     binary = str(block.get("binary") or "kimi").strip() or "kimi"
     command = [binary]
     model = str(block.get("model") or "").strip()
     base_url = str(block.get("baseUrl") or "").strip()
-    config_inline = str(block.get("configInline") or "").strip()
     config_files: list[tuple[str, str, bool]] = []
 
     if base_url:
-        # kimi has no --base-url flag and its config does not interpolate $ENV, so a custom
-        # OpenAI-/Anthropic-compatible endpoint becomes a generated kimi config (provider
-        # `agedum` + model) with the resolved key baked in — like opencode's
-        # OPENCODE_CONFIG_CONTENT — bound into the namespace and loaded via --config-file
-        # (which replaces the default config, so the generated doc is self-sufficient).
-        if config_inline:
-            raise ProviderError(
-                "kimi config sets both `baseUrl` and `configInline`; use one — `baseUrl` to "
-                "generate a provider config, `configInline` to pass a raw --config string"
-            )
+        # Kimi Code has no --base-url flag and its config does not interpolate $ENV, so a
+        # custom OpenAI-/Anthropic-compatible endpoint becomes a generated config.toml
+        # (provider `agedum` + model, resolved key baked in — like opencode's
+        # OPENCODE_CONFIG_CONTENT). There is no --config-file: Kimi reads config.toml under
+        # its data dir, so agedum binds this self-sufficient doc over ~/.kimi-code/config.toml.
         if not model:
             raise ProviderError(
                 "kimi config sets `baseUrl` but no `model`; set `model` to the upstream model "
@@ -723,24 +730,16 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
             )
         if not secret_env:
             raise ProviderError("kimi config has a baseUrl but no secretEnv to supply the API key")
-        config_doc = _kimi_config_doc(block, base_url, model, secret_env, base_env)
-        config_path = str(kimi_config_dir() / "agedum-config.json")
-        config_files.append((config_path, json.dumps(config_doc, indent=2) + "\n", False))
-        command += ["--config-file", config_path]
+        config_toml = _kimi_config_toml(block, base_url, model, secret_env, base_env)
+        config_path = str(kimi_config_dir() / "config.toml")
+        config_files.append((config_path, config_toml, False))
 
     if model:
         command += ["--model", model]
-    thinking = block.get("thinking")
-    if thinking is True:
-        command.append("--thinking")
-    elif thinking is False:
-        command.append("--no-thinking")
     if block.get("plan") is True:
         command.append("--plan")
     if block.get("yolo") is True:
         command.append("--yolo")
-    if config_inline:
-        command += ["--config", config_inline]
     return {}, [], command, tuple(config_files)
 
 

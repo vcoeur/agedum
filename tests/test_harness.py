@@ -167,7 +167,7 @@ def test_compile_kimi_discovers_nested_skills(tmp_path, monkeypatch):
     (nested / "SKILL.md").write_text("---\nname: skill\ndescription: d\n---\nBody.\n")
 
     plan = compile_kimi(load_source(tmp_path), None, tmp_path / "out")
-    skills_src = _src_for(plan, tmp_path / ".kimi" / "skills")
+    skills_src = _src_for(plan, tmp_path / ".kimi-code" / "skills")
     nested_md = (skills_src / "group-skill" / "SKILL.md").read_text()
     assert "name: group-skill" in nested_md
 
@@ -250,10 +250,10 @@ def test_compile_kimi(tmp_path, monkeypatch):
     (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
 
     home = tmp_path / "home"
-    (home / ".kimi").mkdir(parents=True)
-    (home / ".kimi" / "config.toml").write_text('default_model = "x"\n')
+    (home / ".kimi-code").mkdir(parents=True)
+    (home / ".kimi-code" / "config.toml").write_text('default_model = "x"\n')
     monkeypatch.setenv("HOME", str(home))
-    assert kimi_config_dir() == home / ".kimi"
+    assert kimi_config_dir() == home / ".kimi-code"
 
     project = load_source(proj)
     global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
@@ -261,35 +261,34 @@ def test_compile_kimi(tmp_path, monkeypatch):
     dest.mkdir()
     plan = compile_kimi(project, global_, dest)
 
-    # Instructions -> --agent-file holds ONLY the global AGENTS.md. The project
-    # AGENTS.md is read natively by kimi (./AGENTS.md), so it is NOT injected here.
-    assert "--agent-file" in plan.extra_args
-    # The agent-file is bound to a stable ~/.kimi target; its content lives at the bind source.
-    agent_file_target = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1])
-    assert agent_file_target == home / ".kimi" / "agedum-agent.yaml"
-    yaml_text = _src_for(plan, agent_file_target).read_text()
-    assert "ROLE_ADDITIONAL:" in yaml_text
-    assert "GLOBAL-INSTR" in yaml_text
-    assert "PROJECT-INSTR" not in yaml_text
+    # Global instructions -> bound at ~/.kimi-code/AGENTS.md (the user-scope AGENTS.md Kimi
+    # reads natively). The project AGENTS.md is read natively (./AGENTS.md), so it is NOT
+    # injected here — and no flag is appended.
+    assert plan.extra_args == []
+    agents_target = home / ".kimi-code" / "AGENTS.md"
+    assert agents_target in [t for _, t in plan.binds]
+    agents_text = _src_for(plan, agents_target).read_text()
+    assert "GLOBAL-INSTR" in agents_text
+    assert "PROJECT-INSTR" not in agents_text
 
     # The natively-read project AGENTS.md is recorded so --dry-run can surface it.
     assert (proj / "AGENTS.md") in plan.native_reads
 
-    # Global skills -> bound into ~/.kimi/skills.
-    assert (home / ".kimi" / "skills") in [t for _, t in plan.binds]
-    assert (_src_for(plan, home / ".kimi" / "skills") / "gskill" / "SKILL.md").exists()
+    # Global skills -> bound into ~/.kimi-code/skills.
+    assert (home / ".kimi-code" / "skills") in [t for _, t in plan.binds]
+    assert (_src_for(plan, home / ".kimi-code" / "skills") / "gskill" / "SKILL.md").exists()
 
-    # Project skills -> ./.kimi/skills (project-local bind), kimi overlay applied.
-    assert (proj / ".kimi" / "skills") in [t for _, t in plan.binds]
-    pskill_md = (_src_for(plan, proj / ".kimi" / "skills") / "pskill" / "SKILL.md").read_text()
+    # Project skills -> ./.kimi-code/skills (project-local bind), kimi overlay applied.
+    assert (proj / ".kimi-code" / "skills") in [t for _, t in plan.binds]
+    pskill_dir = _src_for(plan, proj / ".kimi-code" / "skills")
+    pskill_md = (pskill_dir / "pskill" / "SKILL.md").read_text()
     assert "name: pskill" in pskill_md
     assert "kimi note" in pskill_md
-    assert "--config" not in plan.extra_args  # no config rewrite
 
 
-def test_compile_kimi_project_only_injects_no_agent_file(tmp_path):
+def test_compile_kimi_project_only_injects_nothing(tmp_path):
     # A project with its own AGENTS.md but no global scope: kimi reads ./AGENTS.md
-    # natively, so there is nothing to inject — no --agent-file is produced.
+    # natively, so there is nothing to inject — no bind, no appended flag.
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
@@ -299,7 +298,7 @@ def test_compile_kimi_project_only_injects_no_agent_file(tmp_path):
     dest.mkdir()
     plan = compile_kimi(project, None, dest)
 
-    assert "--agent-file" not in plan.extra_args
+    assert plan.extra_args == []
     assert plan.binds == []
 
 
@@ -421,11 +420,11 @@ def test_compile_kimi_global_agents_harness_overlay_merged(tmp_path, monkeypatch
     dest.mkdir()
     plan = compile_kimi(load_source(tmp_path / "noproj"), global_, dest)
 
-    agent_file_target = Path(plan.extra_args[plan.extra_args.index("--agent-file") + 1])
-    yaml_text = _src_for(plan, agent_file_target).read_text()
-    assert "GLOBAL-BASE" in yaml_text
-    assert "KIMI-EXTRA" in yaml_text
-    assert "CLAUDE-EXTRA" not in yaml_text  # wrong-harness overlay ignored
+    agents_target = kimi_config_dir() / "AGENTS.md"
+    agents_text = _src_for(plan, agents_target).read_text()
+    assert "GLOBAL-BASE" in agents_text
+    assert "KIMI-EXTRA" in agents_text
+    assert "CLAUDE-EXTRA" not in agents_text  # wrong-harness overlay ignored
 
 
 def test_compile_opencode_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
@@ -846,7 +845,7 @@ def test_compile_aider(tmp_path):
     plan = compile_aider(project, global_, dest)
 
     # aider has no native instruction discovery — both scopes' AGENTS.md ride a --read
-    # (project first, then global), the instructions analogue of kimi's --agent-file.
+    # (project first, then global), since aider reads no AGENTS.md natively.
     reads = _aider_reads(plan)
     assert len(reads) == 2
     assert Path(reads[0]).read_text() == "PROJECT-INSTR\n"

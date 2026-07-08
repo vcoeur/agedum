@@ -50,7 +50,7 @@ command with nothing injected. See [Source & scopes](source-shape.md#scopes) for
 
 !!! warning "Injected paths must be gitignored"
     The mount namespace shares your **real** `.git`. agedum refuses to overlay a
-    git-tracked file, so the targets it injects (`CLAUDE.md`, `.claude/`, `.kimi/`)
+    git-tracked file, so the targets it injects (`CLAUDE.md`, `.claude/`, `.kimi-code/`)
     must be untracked and listed in `.gitignore`. See [Internals](internals.md#safety).
 
 ## Develop

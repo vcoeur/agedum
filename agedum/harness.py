@@ -51,10 +51,10 @@ class Plan:
     """
 
     binds: list[tuple[Path, Path]] = field(default_factory=list)
-    # Extra args appended to the launched command (e.g. kimi's --agent-file).
+    # Extra args appended to the launched command (e.g. aider's --read).
     extra_args: list[str] = field(default_factory=list)
     # Provenance for --dry-run: injected dest path -> the agent-neutral source it came
-    # from (a bind target, or kimi's --agent-file path). Display-only; the launcher
+    # from (a bind target, or aider's --read path). Display-only; the launcher
     # ignores it.
     origins: dict[Path, str] = field(default_factory=dict)
     # Sources the harness reads *in place* without a bind (kimi/opencode read the project
@@ -400,30 +400,29 @@ def _emit_frontmatter(meta: dict, body: str) -> str:
 
 
 def kimi_config_dir() -> Path:
-    """kimi's user-scope config dir (``~/.kimi``)."""
-    return Path.home() / ".kimi"
+    """Kimi Code's user-scope data dir (``~/.kimi-code``)."""
+    return Path.home() / ".kimi-code"
 
 
 def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
-    """Render the source for kimi.
+    """Render the source for Kimi Code.
 
-    kimi reads the **project** ``AGENTS.md`` natively — it merges every ``AGENTS.md``
-    from the project root (nearest ``.git``) down to the work dir into the system
-    prompt's ``KIMI_AGENTS_MD`` slot — so the source file is already where kimi looks
-    and agedum injects nothing for it. kimi has **no user-scope ``AGENTS.md``**, so the
-    **global** ``AGENTS.md`` (base merged with an optional ``AGENTS.kimi.md`` overlay) is
-    injected via a custom ``--agent-file`` that extends the default agent
-    (``system_prompt_args.ROLE_ADDITIONAL``). The two coexist: the
-    agent-file fills ``ROLE_ADDITIONAL`` while native discovery fills ``KIMI_AGENTS_MD``.
+    Kimi Code merges every ``AGENTS.md`` from the project root (the nearest ``.git``) down to
+    the work dir into the system prompt's ``KIMI_AGENTS_MD`` slot, **and** reads a user-scope
+    ``AGENTS.md`` at ``~/.kimi-code/AGENTS.md``. So the project source's ``AGENTS.md`` is
+    already where Kimi looks (agedum injects nothing for it), while the **global**
+    ``AGENTS.md`` (base merged with an optional ``AGENTS.kimi.md`` overlay) is bound at
+    ``~/.kimi-code/AGENTS.md`` — both scopes merge natively into ``KIMI_AGENTS_MD``.
 
     Skills are binds:
 
-    * **global skills** → ``~/.kimi/skills/`` (kimi auto-merges them);
-    * **project skills** → ``./.kimi/skills/`` (project-local; kimi auto-reads it).
+    * **global skills** → ``~/.kimi-code/skills/`` (Kimi auto-merges them);
+    * **project skills** → ``./.kimi-code/skills/`` (project-local; Kimi auto-reads it).
     """
     plan = Plan()
 
-    # kimi persists its state under ~/.kimi — writable under a sandbox (see Plan.writable_dirs).
+    # Kimi Code persists its state under ~/.kimi-code — writable under a sandbox
+    # (see Plan.writable_dirs).
     plan.writable_dirs.append(kimi_config_dir())
 
     # Project AGENTS.md is read natively from ./AGENTS.md (no bind) — record it so
@@ -431,26 +430,23 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
     if project.agents_md is not None:
         plan.native_reads.append(project.agents_md)
 
-    # Global instructions (base + AGENTS.kimi.md overlay) -> a custom --agent-file (kimi
-    # has no user-scope AGENTS.md). Project instructions are read natively from
-    # ./AGENTS.md, so they are left in place.
+    # Global instructions (base + AGENTS.kimi.md overlay) -> ~/.kimi-code/AGENTS.md, the
+    # user-scope AGENTS.md Kimi reads natively. Project instructions are read from ./AGENTS.md.
     global_instructions = _instructions(global_, "kimi") if global_ is not None else None
     if global_instructions is not None:
         instructions = global_instructions.strip("\n") + "\n"
-        agent_file = dest / "agent.yaml"
-        agent_file.parent.mkdir(parents=True, exist_ok=True)
-        agent_file.write_text(_kimi_agent_file_yaml(instructions))
-        # Bind the agent-file to a stable ~/.kimi path (like the skills binds) and pass that
-        # to --agent-file, rather than the dest path directly: under write-confinement the
-        # sandbox replaces /tmp with a private tmpfs, which would hide an agent-file referenced
-        # at its dest (/tmp/agedum-…) path. The bind makes it visible regardless.
-        target = kimi_config_dir() / "agedum-agent.yaml"
-        plan.binds.append((agent_file, target))
-        plan.extra_args += ["--agent-file", str(target)]
+        agents_md = dest / "AGENTS.md"
+        agents_md.parent.mkdir(parents=True, exist_ok=True)
+        agents_md.write_text(instructions)
+        # Bind to the stable ~/.kimi-code path (like the skills binds), not the dest path:
+        # under write-confinement the sandbox replaces /tmp with a private tmpfs, which would
+        # hide a file referenced at its dest (/tmp/agedum-…) path. The bind makes it visible.
+        target = kimi_config_dir() / "AGENTS.md"
+        plan.binds.append((agents_md, target))
         if global_ is not None and global_.agents_md is not None:
             plan.origins[target] = str(global_.agents_md)
 
-    # Global skills -> ~/.kimi/skills (read by default; merge_all_available_skills).
+    # Global skills -> ~/.kimi-code/skills (read by default; merge_all_available_skills).
     if global_ is not None and global_.skills_dir is not None:
         out = _compile_skill_tree(global_.skills_dir, dest / "global-skills", "SKILL.kimi.md")
         if out is not None:
@@ -458,12 +454,11 @@ def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:
             plan.binds.append((out, target))
             plan.origins[target] = str(global_.skills_dir)
 
-    # Project skills -> ./.kimi/skills (project-local; kimi auto-reads it, matching
-    # condash's prior layout — uniform with the Claude harness, no config rewrite).
+    # Project skills -> ./.kimi-code/skills (project-local; Kimi auto-reads it).
     if project.skills_dir is not None:
         out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.kimi.md")
         if out is not None:
-            target = project.root / ".kimi" / "skills"
+            target = project.root / ".kimi-code" / "skills"
             plan.binds.append((out, target))
             plan.origins[target] = str(project.skills_dir)
 
@@ -483,20 +478,6 @@ def _compile_skill_tree(skills_dir: Path, out_root: Path, overlay_name: str) -> 
             skill_dir, out_root / name, overlay_name, force_name=name if nested else None
         )
     return out_root
-
-
-def _kimi_agent_file_yaml(instructions: str) -> str:
-    """Wrap instructions into kimi's agent-file shape (extends the default agent,
-    injecting the text as ``system_prompt_args.ROLE_ADDITIONAL``)."""
-    indented = instructions.rstrip("\n").replace("\n", "\n      ")
-    return (
-        "version: 1\n"
-        "agent:\n"
-        "  extend: default\n"
-        "  system_prompt_args:\n"
-        "    ROLE_ADDITIONAL: |\n"
-        f"      {indented}\n"
-    )
 
 
 # ---------------------------------------------------------------------------

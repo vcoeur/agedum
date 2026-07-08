@@ -236,13 +236,13 @@ def test_run_appends_plan_extra_args_after_command(monkeypatch, tmp_path):
         return _Result()
 
     monkeypatch.setattr(launcher_mod.subprocess, "run", fake_run)
-    plan = Plan(extra_args=["--agent-file", "/tmp/a.yaml", "--config", "{}"])
-    rc = run_virtualfs(tmp_path, plan, ["kimi", "-p", "hi"])
+    plan = Plan(extra_args=["--read", "/tmp/a.md", "--read", "/tmp/b.md"])
+    rc = run_virtualfs(tmp_path, plan, ["aider", "-p", "hi"])
 
     assert rc == 0
     argv = captured["argv"]
     tail = argv[argv.index("--") + 1 :]
-    assert tail == ["kimi", "-p", "hi", "--agent-file", "/tmp/a.yaml", "--config", "{}"]
+    assert tail == ["aider", "-p", "hi", "--read", "/tmp/a.md", "--read", "/tmp/b.md"]
 
 
 def test_run_virtualfs_stdin_handling(monkeypatch, tmp_path):

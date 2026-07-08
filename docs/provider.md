@@ -208,8 +208,8 @@ agedum claude-deepseek-auto --run "review this" --dry-run
 Prints the full resolved launch without running it, so you can see exactly what context the
 harness is given. It is grouped by **scope** (project / global); under each, every source
 (`AGENTS.md`, `.agents/skills/`) is listed with its **disposition**: `→ <dest>` when
-injected, `read in place` when the harness reads it natively, `→ kimi agent file` for the
-kimi `--agent-file`, or an explicit note when a scope contributes nothing. Project-scope
+injected, `read in place` when the harness reads it natively, or an explicit note when a
+scope contributes nothing. Project-scope
 paths display relative to the cwd; global-scope stays `~`-absolute. The resolved config (env
 vars; opencode's `OPENCODE_CONFIG_CONTENT` pretty-printed; secrets masked) and the final
 command are shown too. For a kimi provider run from a project root:
@@ -221,15 +221,14 @@ env file   ~/.config/agents/.env
 
 project scope · ~/src/foo
   AGENTS.md         read in place (read natively — not injected)
-  .agents/skills/   → .kimi/skills/
+  .agents/skills/   → .kimi-code/skills/
 
 global scope
-  ~/.config/agents/AGENTS.md   → kimi agent file (passed via --agent-file)
-  ~/.config/agents/skills/     → ~/.kimi/skills/
+  ~/.config/agents/AGENTS.md   → ~/.kimi-code/AGENTS.md
+  ~/.config/agents/skills/     → ~/.kimi-code/skills/
 
 command
   kimi
-  + agedum appends: --agent-file /tmp/agedum-kimi-dry-…/agent.yaml
 ```
 
 For an **opencode** provider the resolved config is shown as indented JSON (the

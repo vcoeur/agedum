@@ -74,7 +74,7 @@ processes, and your shell after the command exits, see the original tree.
 
 **Directory binds are overlaid one level deep, not masked wholesale.** The only directory
 binds agedum emits are skill trees, and binding the whole compiled dir over
-`~/.config/opencode/skills/` (or `~/.claude/skills/`, `~/.kimi/skills/`) would hide any
+`~/.config/opencode/skills/` (or `~/.claude/skills/`, `~/.kimi-code/skills/`) would hide any
 hand-authored skill already living there. So `build_bwrap_argv` expands a directory bind
 into one `--ro-bind` per child — `<compiled>/<name>` over `<target>/<name>` — leaving
 unrelated siblings in the real target dir visible. A shipped skill still wins over a
@@ -98,7 +98,7 @@ the repo), injected content could be committed by accident.
 `assert_safe` therefore **refuses to inject over any git-tracked path**. Targets must
 be untracked and gitignored. Targets outside the project repo (e.g. `~/.claude/...`)
 are never tracked by this repo, so they are allowed. In practice: list `CLAUDE.md`,
-`.claude/`, `.kimi/`, `.opencode/`, `.cline/`, `.reasonix/`, `.pi/`, and `.codex/` in your `.gitignore`.
+`.claude/`, `.kimi-code/`, `.opencode/`, `.cline/`, `.reasonix/`, `.pi/`, and `.codex/` in your `.gitignore`.
 
 The check runs over the **effective, per-child** binds — the exact paths the namespace
 will mount. A tracked but unrelated sibling inside a skills target dir (say a
