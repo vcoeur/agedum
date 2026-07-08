@@ -336,7 +336,7 @@ def _print_proxy(launch) -> None:
 
 def _print_config_files(launch) -> None:
     """Show any agedum-generated config files (reasonix's ``reasonix.toml``, pi's user-scope
-    ``models.json`` / ``settings.json``, kimi's ``--config-file``).
+    ``models.json`` / ``settings.json``, kimi's ``~/.kimi-code/config.toml``).
 
     Each is bound inside the namespace at its target (project-root-relative or absolute). Most
     content references keys by env-var name, but some endpoints can't (kimi's config does not
@@ -451,10 +451,10 @@ def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]
 
     For each scope (project, global) every source is listed with what happens to it:
     injected ``→ <dest>``, ``read in place`` (kimi/opencode read the project AGENTS.md
-    natively), routed to the kimi ``--agent-file``, or an explicit note when the scope is
-    empty. When ``sandbox`` is enabled, the write-confinement section (the read-write set
-    over a read-only host) is printed too. Returns the launch's appended args (kimi
-    ``--agent-file``) for the command line.
+    natively), routed to an appended flag (aider's ``--read``), or an explicit note when the
+    scope is empty. When ``sandbox`` is enabled, the write-confinement section (the read-write
+    set over a read-only host) is printed too. Returns the launch's appended args for the
+    command line.
     """
     project = load_source()
     global_ = load_global_source()
@@ -531,11 +531,8 @@ def _disposition(source_path: Path, plan: Plan, dir_targets: set, display) -> st
             return f"→ {display(target)}{'/' if target in dir_targets else ''}"
     for index, token in enumerate(plan.extra_args):
         if plan.origins.get(Path(token)) == key:
-            # The flag preceding the matching token tells us how it is passed: kimi's
-            # --agent-file vs aider's --read.
+            # The flag preceding the matching token tells us how it is passed (aider's --read).
             flag = plan.extra_args[index - 1] if index > 0 else ""
-            if flag == "--agent-file":
-                return "→ kimi agent file (passed via --agent-file)"
             if flag == "--read":
                 return "→ aider read-only context (passed via --read)"
             return f"→ passed via {flag}" if flag else "→ (appended arg)"

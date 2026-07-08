@@ -51,7 +51,7 @@ command. Every harness disposes of each source in one of three ways:
 |---|---|
 | **injected** (`→ <dest>`) | agedum writes a compiled copy and binds it at the path the harness reads (e.g. Claude's `CLAUDE.md`, every harness's skills dir). |
 | **read in place** | the harness reads the file natively at its source location, so agedum injects nothing — and *cannot*, since the root `AGENTS.md` is git-tracked. kimi, opencode, cline, reasonix, and pi all read the **project** `AGENTS.md` this way. |
-| **appended flag** | the context is passed as an extra argument, not a bind — kimi's `--agent-file` for global instructions, and aider's `--read` for *both* scopes' instructions (aider reads no `AGENTS.md` natively). |
+| **appended flag** | the context is passed as an extra argument, not a bind — aider's `--read` for *both* scopes' instructions (aider reads no `AGENTS.md` natively). |
 
 Two rules hold for every harness:
 

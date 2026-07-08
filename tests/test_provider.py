@@ -1,4 +1,5 @@
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -470,17 +471,21 @@ def test_kimi_appends_flags_and_exports_token():
         {
             "harness": "kimi",
             "secretEnv": "KIMI_API_KEY",
-            "config": {"model": "kimi-k2.6", "thinking": True, "plan": True},
+            "config": {"model": "kimi-k2.6", "plan": True, "yolo": True},
         },
         base_env={"KIMI_API_KEY": "kk"},
     )
     assert launch.env["KIMI_API_KEY"] == "kk"  # token reaches the child via required-env
-    assert launch.command == ["kimi", "--model", "kimi-k2.6", "--thinking", "--plan"]
+    assert launch.command == ["kimi", "--model", "kimi-k2.6", "--plan", "--yolo"]
 
 
-def test_kimi_no_thinking_flag():
+def test_kimi_thinking_without_base_url_is_a_noop():
+    # thinking now lives in the generated config.toml (needs baseUrl); without an endpoint
+    # there is no config to carry it, so the command stays bare — Kimi Code dropped the
+    # --thinking / --no-thinking flags.
     launch = build_launch({"harness": "kimi", "config": {"thinking": False}}, base_env={})
-    assert launch.command == ["kimi", "--no-thinking"]
+    assert launch.command == ["kimi"]
+    assert launch.config_files == ()
 
 
 def test_kimi_yolo_flag():
@@ -494,8 +499,8 @@ def test_kimi_native_empty_config():
     assert launch.env == {}
 
 
-def test_kimi_base_url_generates_config_file():
-    config_path = str(Path.home() / ".kimi" / "agedum-config.json")
+def test_kimi_base_url_generates_config_toml():
+    config_path = str(Path.home() / ".kimi-code" / "config.toml")
     launch = build_launch(
         {
             "harness": "kimi",
@@ -508,26 +513,21 @@ def test_kimi_base_url_generates_config_file():
         },
         base_env={"OPENCODE_GO_API_KEY": "sk-go"},
     )
-    assert launch.command == [
-        "kimi",
-        "--config-file",
-        config_path,
-        "--model",
-        "kimi-k2.7-code",
-        "--thinking",
-    ]
+    # No --config-file / --thinking flag: Kimi Code reads config.toml from its data dir.
+    assert launch.command == ["kimi", "--model", "kimi-k2.7-code"]
     assert len(launch.config_files) == 1
     target, content, merge_json = launch.config_files[0]
     assert target == config_path
     assert merge_json is False
-    doc = json.loads(content)
+    doc = tomllib.loads(content)
     assert doc["default_model"] == "kimi-k2.7-code"
     assert doc["models"]["kimi-k2.7-code"]["provider"] == "agedum"
     assert doc["models"]["kimi-k2.7-code"]["max_context_size"] == 262144
     provider = doc["providers"]["agedum"]
-    assert provider["type"] == "openai_legacy"
+    assert provider["type"] == "openai"  # default type (openai_legacy was removed in Kimi Code)
     assert provider["base_url"] == "https://opencode.ai/zen/go/v1"
     assert provider["api_key"] == "sk-go"  # resolved key baked in; masked in --dry-run
+    assert doc["thinking"]["enabled"] is True
 
 
 def test_kimi_code_subscription_uses_kimi_and_subscription_endpoint():
@@ -544,13 +544,15 @@ def test_kimi_code_subscription_uses_kimi_and_subscription_endpoint():
                 "model": "kimi-for-coding",
                 "contextWindow": 262144,
                 "thinking": True,
+                "yolo": True,
             },
         },
         base_env={"KIMI_API_KEY": "sk-kimi-test"},
     )
-    assert launch.command[0] == "kimi"  # the Kimi CLI binary
-    assert "--model" in launch.command and "kimi-for-coding" in launch.command
-    doc = json.loads(launch.config_files[0][1])
+    assert launch.command == ["kimi", "--model", "kimi-for-coding", "--yolo"]
+    target, content, _ = launch.config_files[0]
+    assert target == str(Path.home() / ".kimi-code" / "config.toml")
+    doc = tomllib.loads(content)
     assert doc["default_model"] == "kimi-for-coding"
     assert doc["models"]["kimi-for-coding"]["max_context_size"] == 262144
     provider = doc["providers"]["agedum"]
@@ -594,22 +596,6 @@ def test_kimi_base_url_requires_secret_env():
                 },
             },
             base_env={},
-        )
-
-
-def test_kimi_base_url_rejects_config_inline():
-    with pytest.raises(ProviderError, match="configInline"):
-        build_launch(
-            {
-                "harness": "kimi",
-                "secretEnv": "OPENCODE_GO_API_KEY",
-                "config": {
-                    "baseUrl": "https://opencode.ai/zen/go/v1",
-                    "model": "kimi-k2.7-code",
-                    "configInline": "default_thinking=true",
-                },
-            },
-            base_env={"OPENCODE_GO_API_KEY": "sk-go"},
         )
 
 
@@ -2070,18 +2056,20 @@ def test_with_prompt_claude_run_uses_print():
     ]
 
 
-def test_with_prompt_kimi_interactive_uses_prompt_flag():
-    cmd = with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=True)
-    assert cmd == ["kimi", "--model", "k", "--prompt", "hi"]
+def test_with_prompt_kimi_interactive_fails_loudly():
+    # Kimi Code's --prompt runs once and exits; there is no seed-then-stay mode.
+    with pytest.raises(ProviderError, match="no interactive prompt-seeding"):
+        with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=True)
 
 
-def test_with_prompt_kimi_run_appends_print():
-    # kimi: --prompt seeds; --print makes the invocation non-interactive.
-    assert with_prompt(_launch("kimi", ["kimi"]), [], "hi", interactive=False) == [
+def test_with_prompt_kimi_run_uses_prompt():
+    # kimi --run: --prompt runs the task non-interactively (no --print any more).
+    assert with_prompt(_launch("kimi", ["kimi", "--model", "k"]), [], "hi", interactive=False) == [
         "kimi",
+        "--model",
+        "k",
         "--prompt",
         "hi",
-        "--print",
     ]
 
 

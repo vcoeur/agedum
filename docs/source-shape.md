@@ -203,8 +203,8 @@ flowchart LR
   gSk["~/.config/agents/skills/"] --> gClSk["~/.claude/skills/"]
 ```
 
-The targets differ per harness — kimi reads the project `AGENTS.md` natively and injects
-the global one via a `--agent-file`; opencode, cline, reasonix, pi, and codex read the project
+The targets differ per harness — kimi reads the project `AGENTS.md` natively and binds
+the global one to `~/.kimi-code/AGENTS.md`; opencode, cline, reasonix, pi, and codex read the project
 `AGENTS.md` natively and bind the global one to their own config path; aider reads neither
 scope natively and injects both via `--read`. See the
 [harness pages](harnesses/index.md) for each harness's full mapping.

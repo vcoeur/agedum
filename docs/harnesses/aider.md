@@ -11,8 +11,8 @@ differs from agedum's other harnesses in two ways that shape how agedum drives i
 - **No native instruction discovery.** aider reads neither `AGENTS.md` nor a `CONVENTIONS.md`
   on its own. Its one channel for standing context is `--read FILE` (a read-only file added
   to the chat) — the documented [conventions](https://aider.chat/docs/usage/conventions.html)
-  mechanism. So agedum injects each scope's `AGENTS.md` as a `--read` argument, the
-  instructions analogue of [kimi](kimi.md)'s `--agent-file`.
+  mechanism. So agedum injects each scope's `AGENTS.md` as a `--read` argument, since aider
+  reads no `AGENTS.md` natively.
 - **No skills mechanism.** aider has nothing to load a skills tree into, so agedum **does not
   inject skills** for it (there is no `SKILL.aider.md` overlay). A project `.agents/skills/`
   shows up in `--dry-run` as `(not injected)`.

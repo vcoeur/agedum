@@ -162,8 +162,8 @@ def test_wrapper_codex_is_registered(monkeypatch):
 
 
 def test_dry_run_aider_read_disposition(monkeypatch, capsys):
-    # aider injects instructions via --read; --dry-run must label that disposition, not the
-    # kimi --agent-file one (the shared extra_args path).
+    # aider injects instructions via --read; --dry-run must label that disposition
+    # (the appended-flag / extra_args path).
     monkeypatch.setattr(cli, "load_source", lambda: cli.Source(Path("/proj"), None, None))
     monkeypatch.setattr(
         cli, "load_global_source", lambda: cli.Source(Path("/g"), Path("/g/AGENTS.md"), None)
@@ -512,24 +512,27 @@ def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
 
 def test_provider_dry_run_shows_dispositions_and_native_read(monkeypatch, tmp_path, capsys):
     # Realistic kimi sources + plan: project AGENTS.md read natively, project/global skills
-    # bound, global AGENTS.md routed to the --agent-file.
+    # bound, global AGENTS.md bound at Kimi's user-scope ~/.kimi-code/AGENTS.md.
     project = cli.Source(Path("/proj"), Path("/proj/AGENTS.md"), Path("/proj/.agents/skills"))
     global_ = cli.Source(Path("/g"), Path("/g/AGENTS.md"), Path("/g/.agents/skills"))
     monkeypatch.setattr(cli, "load_source", lambda: project)
     monkeypatch.setattr(cli, "load_global_source", lambda: global_)
     _no_launch(monkeypatch)
-    p_skills, g_skills, agent_file = (
-        Path("/proj/.kimi/skills"),
-        Path("/g/.kimi/skills"),
-        Path("/tmp/k/agent.yaml"),
+    p_skills, g_skills, agents_md = (
+        Path("/proj/.kimi-code/skills"),
+        Path("/g/.kimi-code/skills"),
+        Path("/tmp/k/AGENTS.md"),
     )
     plan = cli.Plan(
-        binds=[(Path("/tmp/ps"), p_skills), (Path("/tmp/gs"), g_skills)],
-        extra_args=["--agent-file", str(agent_file)],
+        binds=[
+            (Path("/tmp/ps"), p_skills),
+            (Path("/tmp/gs"), g_skills),
+            (Path("/tmp/am"), agents_md),
+        ],
         origins={
             p_skills: "/proj/.agents/skills",
             g_skills: "/g/.agents/skills",
-            agent_file: "/g/AGENTS.md",
+            agents_md: "/g/AGENTS.md",
         },
         native_reads=[Path("/proj/AGENTS.md")],
     )
@@ -542,9 +545,8 @@ def test_provider_dry_run_shows_dispositions_and_native_read(monkeypatch, tmp_pa
     out = capsys.readouterr().out
     assert "project scope" in out and "global scope" in out
     assert "read in place" in out  # project AGENTS.md read natively, not invisible
-    assert "→ /proj/.kimi/skills" in out  # project skills injected
-    assert "→ kimi agent file (passed via --agent-file)" in out  # global AGENTS.md
-    assert "+ agedum appends: --agent-file /tmp/k/agent.yaml" in out
+    assert "→ /proj/.kimi-code/skills" in out  # project skills injected
+    assert "→ /tmp/k/AGENTS.md" in out  # global AGENTS.md bound at ~/.kimi-code/AGENTS.md
 
 
 def test_provider_dry_run_pretty_prints_opencode_config(monkeypatch, tmp_path, capsys):
@@ -640,7 +642,7 @@ def test_run_flag_claude_non_interactive(monkeypatch, tmp_path):
     assert captured["close_stdin"] is True
 
 
-def test_run_flag_kimi_appends_print(monkeypatch, tmp_path):
+def test_run_flag_kimi_uses_prompt(monkeypatch, tmp_path):
     captured = _capture_run(monkeypatch)
     monkeypatch.setitem(cli._COMPILERS, "kimi", lambda p, g, d: cli.Plan())
     config = {"harness": "kimi", "config": {"model": "kimi-k2.6"}}
@@ -649,13 +651,13 @@ def test_run_flag_kimi_appends_print(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.app()
     assert exc.value.code == 0
+    # Kimi Code's --prompt runs one prompt non-interactively and exits (no --print any more).
     assert captured["command"] == [
         "kimi",
         "--model",
         "kimi-k2.6",
         "--prompt",
         "summarise",
-        "--print",
     ]
 
 
