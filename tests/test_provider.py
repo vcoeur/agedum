@@ -895,6 +895,40 @@ def test_opencode_agent_append_rejects_non_string_list_entry():
         )
 
 
+def test_opencode_agent_append_does_not_mutate_input_config():
+    # build_launch must not edit the caller's config: the fold copies the entries it touches
+    # rather than popping/rewriting the aliased passthrough dicts in place.
+    config = {
+        "harness": "opencode",
+        "config": {
+            "opencodeConfig": {"agent": {"conception": {"prompt": "plan", "agentAppend": "extra"}}}
+        },
+    }
+    launch = build_launch(config, base_env={})
+    assert config["config"]["opencodeConfig"]["agent"]["conception"] == {
+        "prompt": "plan",
+        "agentAppend": "extra",
+    }
+    # ...while the generated doc still carries the folded prompt with the key stripped.
+    folded = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])["agent"]["conception"]
+    assert folded == {"prompt": "plan\n\nextra"}
+
+
+def test_opencode_agent_append_rejects_non_string_prompt():
+    # A non-string prompt beside agentAppend is a malformed agent config — raise rather than
+    # coerce it to its Python repr.
+    with pytest.raises(ProviderError, match="prompt"):
+        build_launch(
+            {
+                "harness": "opencode",
+                "config": {
+                    "opencodeConfig": {"agent": {"c": {"prompt": {"x": 1}, "agentAppend": "y"}}}
+                },
+            },
+            base_env={},
+        )
+
+
 def test_build_launch_is_deterministic():
     config = {
         "harness": "opencode",
