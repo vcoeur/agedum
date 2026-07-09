@@ -93,6 +93,16 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
   translator already produces a clean top-level `system`); setting both is an error.
 - `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,MANTLE}` are always unset defensively. Empty
   strings, zero, and `false` are omitted.
+- Sizing the context window of a third-party model (verified against Claude Code 2.1.205):
+  - `maxContextTokens` is honoured **only when the model id does not start with `claude-`**;
+    a first-party id ignores it and keeps Claude Code's own window. It is the knob that
+    lifts a third-party model off the 200,000-token default.
+  - `autoCompactWindow` is clamped to `[100_000, 1_000_000]`, then capped to the context
+    window — the effective threshold is `min(maxContextTokens, autoCompactWindow)`. Setting
+    `maxContextTokens` above 1,000,000 therefore buys headroom between the compaction
+    trigger and the upstream's hard limit, not a bigger meter.
+  - A model id matching `[1m]` (e.g. DeepSeek's `deepseek-v4-pro[1m]`) is special-cased to
+    1,000,000 tokens without `maxContextTokens`, unless `disable1M` is set.
 - `--prompt`/`--run` seed an interactive vs `--print` run — see the
   [prompt-seeding table](../provider.md#prompt-seeding).
 
