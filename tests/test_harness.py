@@ -406,6 +406,43 @@ def test_compile_claude_project_agents_harness_overlay_not_merged(tmp_path):
     assert _src_for(plan, tmp_path / "CLAUDE.md").read_text() == "PROJECT-BASE\n"
 
 
+def test_compile_claude_injects_config_agents_claude_overlay(tmp_path, monkeypatch):
+    # agentsconf ships settings.json + hook scripts to ~/.config/agents/claude/; agedum
+    # binds them into the user Claude dir at global scope, straight from the source (no copy).
+    overlay = tmp_path / "xdg" / "agents" / "claude"
+    (overlay / "scripts").mkdir(parents=True)
+    (overlay / "settings.json").write_text('{"hooks": {}}\n')
+    (overlay / "scripts" / "hook.sh").write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    cc = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+
+    global_ = Source(root=tmp_path, agents_md=None, skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(load_source(tmp_path / "noproj"), global_, dest)
+
+    assert _src_for(plan, cc / "settings.json") == overlay / "settings.json"
+    assert _src_for(plan, cc / "scripts") == overlay / "scripts"
+
+
+def test_compile_claude_no_overlay_when_config_agents_claude_absent(tmp_path, monkeypatch):
+    # A host with no ~/.config/agents/claude/ (no agentsconf checkout) gets no overlay binds.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))  # xdg/agents/claude absent
+    cc = tmp_path / "claude-home"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cc))
+
+    global_ = Source(root=tmp_path, agents_md=None, skills_dir=None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    plan = compile_claude(load_source(tmp_path / "noproj"), global_, dest)
+
+    targets = _targets(plan)
+    assert cc / "settings.json" not in targets
+    assert cc / "scripts" not in targets
+
+
 def test_compile_kimi_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
     gconf = tmp_path / "gconf" / "agents"
     gconf.mkdir(parents=True)

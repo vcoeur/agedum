@@ -38,7 +38,7 @@ from pathlib import Path
 
 import yaml
 
-from agedum.sources import Source
+from agedum.sources import Source, config_agents_dir
 
 
 @dataclass
@@ -224,7 +224,9 @@ def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
 
     Project → ``./CLAUDE.md`` + ``./.claude/skills``; global → ``~/.claude/CLAUDE.md``
     + ``~/.claude/skills``. The two are placed separately (never concatenated); Claude
-    merges them at runtime.
+    merges them at runtime. The global scope also injects agentsconf's Claude overlay
+    (``settings.json`` + hook ``scripts/``) from ``~/.config/agents/claude/`` — see
+    :func:`_inject_claude_overlay`.
     """
     plan = Plan()
 
@@ -262,8 +264,33 @@ def compile_claude(project: Source, global_: Source | None, dest: Path) -> Plan:
             claude_md_target=cc / "CLAUDE.md",
             skills_target=cc / "skills",
         )
+        _inject_claude_overlay(plan, cc)
 
     return plan
+
+
+def _inject_claude_overlay(plan: Plan, claude_dir: Path) -> None:
+    """Bind agentsconf's Claude overlay (global ``settings.json`` + hook ``scripts/``)
+    into the user Claude config dir, read-only.
+
+    agentsconf ships these to ``~/.config/agents/claude/`` — the writable global source
+    root — never straight into ``~/.claude``, which is read-only under a write-confinement
+    sandbox. agedum injects them the same way it injects ``CLAUDE.md`` + ``skills``. Each
+    is gated on the source existing, so a host without an agentsconf checkout gets no
+    binds. Read-only by construction (every ``plan.binds`` entry is a ``--ro-bind``): the
+    overlay is source-controlled, so Claude never writes user-scope settings back.
+    """
+    overlay = config_agents_dir() / "claude"
+    settings = overlay / "settings.json"
+    if settings.is_file():
+        target = claude_dir / "settings.json"
+        plan.binds.append((settings, target))
+        plan.origins[target] = str(settings)
+    scripts = overlay / "scripts"
+    if scripts.is_dir():
+        target = claude_dir / "scripts"
+        plan.binds.append((scripts, target))
+        plan.origins[target] = str(scripts)
 
 
 def _compile_scope(

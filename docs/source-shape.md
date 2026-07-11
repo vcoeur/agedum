@@ -211,11 +211,12 @@ scope natively and injects both via `--read`. See the
 
 ### Only the two scope paths are touched
 
-For the global scope, agedum overlays **only** the harness's instruction file and skills
-directory under the user config dir — for Claude, just `~/.claude/CLAUDE.md` and
-`~/.claude/skills/`. Everything else in `~/.claude` is left exactly as it is: your
-`~/.claude.json` auth, settings, history, and any other state are never shadowed. The
-overlay is scoped as tightly as possible.
+For the global scope, agedum overlays the harness's instruction file and skills directory
+under the user config dir — for Claude, `~/.claude/CLAUDE.md` and `~/.claude/skills/`. Claude
+alone may also overlay a read-only `settings.json` + hook `scripts/`, but only when a `claude/`
+corner exists in the source root (see the [Claude overlay](harnesses/claude.md#claude-overlay)).
+Everything else in `~/.claude` is left exactly as it is: your `~/.claude.json` auth, history,
+and any other state are never shadowed. The overlay is scoped as tightly as possible.
 
 The skills overlay is tighter still: agedum binds each skill folder it ships individually
 (`~/.claude/skills/<name>`), so a hand-authored skill you keep in that dir but agedum does
