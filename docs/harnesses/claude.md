@@ -1,6 +1,6 @@
 ---
 title: Claude harness · agedum
-description: How agedum drives Claude Code — wrapper-mode resolution (AGENTS.md → CLAUDE.md and skills binds, project and global) and the provider config that repoints Claude at a custom endpoint, model, and auth.
+description: How agedum drives Claude Code — wrapper-mode resolution (AGENTS.md → CLAUDE.md and skills binds, project and global; plus the read-only settings.json + hook-scripts overlay) and the provider config that repoints Claude at a custom endpoint, model, and auth.
 ---
 
 # Claude
@@ -19,6 +19,8 @@ harness: pure binds, each [scope](../source-shape.md#scopes) at its own native l
 | project `.agents/skills/` | `<root>/.claude/skills/` |
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.claude.md` overlay) | `$CLAUDE_CONFIG_DIR/CLAUDE.md` (default `~/.claude/CLAUDE.md`) |
 | global `~/.config/agents/skills/` | `$CLAUDE_CONFIG_DIR/skills/` (default `~/.claude/skills/`) |
+| global `~/.config/agents/claude/settings.json` (optional overlay) | `$CLAUDE_CONFIG_DIR/settings.json` — **read-only** |
+| global `~/.config/agents/claude/scripts/` (optional overlay) | `$CLAUDE_CONFIG_DIR/scripts/` — **read-only** |
 
 - Each scope lands at **its own** location — never concatenated. The project `CLAUDE.md`
   carries only project instructions; the user `CLAUDE.md` only the global ones. Claude
@@ -29,8 +31,10 @@ harness: pure binds, each [scope](../source-shape.md#scopes) at its own native l
 - For each skill, the base `SKILL.md` is merged with an optional `SKILL.claude.md` overlay
   (front-matter union with overlay winning, bodies concatenated), then task files and
   scripts are copied verbatim.
-- Only `~/.claude/CLAUDE.md` and `~/.claude/skills/` are overlaid in the user config dir —
-  your `~/.claude.json` auth and other settings are untouched.
+- The user config dir gets up to four global overlays: `CLAUDE.md`, `skills/`, and — when a
+  `claude/` overlay is present in the source root — the read-only `settings.json` + `scripts/`
+  ([below](#claude-overlay)). Your `~/.claude.json` auth and anything else in the dir are
+  untouched.
 - `extra_args`: **none**. The command runs exactly as you wrote it.
 
 ```bash
@@ -40,6 +44,29 @@ agedum --wrapper claude -- claude
 # Headless review with a specific model:
 agedum --wrapper claude -- claude --model sonnet -p "review this change"
 ```
+
+## Claude overlay — settings.json + hook scripts { #claude-overlay }
+
+`settings.json` (permissions, hooks, statusline) and the hook `scripts/` it calls are
+Claude-specific config, not agent-neutral source, so they live in a `claude/` corner of the
+global source root — `~/.config/agents/claude/settings.json` and
+`~/.config/agents/claude/scripts/`. At **global scope** agedum binds each **read-only** into
+the user config dir (`$CLAUDE_CONFIG_DIR/settings.json` + `/scripts/`), gated on the source
+existing: a host with no `claude/` overlay gets no binds and nothing changes.
+
+Two consequences of the read-only bind, both by design:
+
+- **agedum never writes into `~/.claude/`** — it bind-mounts, exactly as for `CLAUDE.md` and
+  skills. That is why the overlay is sourced from the writable `~/.config/agents/` root rather
+  than being copied straight into `~/.claude/`: under a [sandbox](../provider.md) launch (and
+  some managed environments) `~/.claude/` is mounted read-only, and a writer that targets it
+  fails with `EROFS`.
+- **Claude never rewrites user-scope `settings.json` in place** — change it at the source and
+  re-inject. Session-level permission grants still land in the project
+  `.claude/settings.local.json` (a separate, untracked layer), so this does not get in the way.
+
+The overlay files are typically shipped by [agentsconf](https://github.com/vcoeur/agentsconf);
+agedum only consumes whatever has landed under `~/.config/agents/claude/`.
 
 ## Provider config { #provider-config }
 

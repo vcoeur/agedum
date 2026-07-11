@@ -53,13 +53,21 @@ def load_source(root: Path | None = None) -> Source:
     )
 
 
+def config_agents_dir() -> Path:
+    """agedum's global-scope source root — ``$XDG_CONFIG_HOME/agents`` or
+    ``~/.config/agents`` (XDG-aware). Holds the global ``AGENTS.md`` + ``skills/`` and
+    the Claude overlay (``claude/settings.json`` + ``claude/scripts/``) agentsconf ships
+    here for agedum to inject."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "agents"
+
+
 def load_global_source() -> Source:
     """The global-scope source: `~/.config/agents/AGENTS.md` for instructions and
     `~/.config/agents/skills/` for skills (both XDG-aware, honouring `$XDG_CONFIG_HOME`).
     `root` is the home dir and is unused for mounting — global content is folded into the
     project injection."""
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    config_agents = (Path(xdg) if xdg else Path.home() / ".config") / "agents"
+    config_agents = config_agents_dir()
     agents = config_agents / AGENTS_MD
     skills = config_agents / "skills"
     return Source(

@@ -12,8 +12,12 @@ match); top-level skills keep their declared name.
 
 - **Claude** — each scope at its *own* location: project → `./CLAUDE.md` +
   `./.claude/skills/`; global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) →
-  `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged
-  (only those two `~/.claude` paths overlaid; `~/.claude.json` auth untouched).
+  `~/.claude/CLAUDE.md` + `~/.claude/skills/` (`$CLAUDE_CONFIG_DIR`-aware), never merged.
+  Global scope also injects agentsconf's **Claude overlay** — `~/.config/agents/claude/settings.json`
+  + `~/.config/agents/claude/scripts/` → `~/.claude/settings.json` + `~/.claude/scripts/`, each
+  read-only and gated on the source existing (`_inject_claude_overlay`). agentsconf ships those to
+  the writable config-agents root, never straight into `~/.claude` (read-only under a sandbox), so
+  agedum injects them the same way as `CLAUDE.md`/skills. `~/.claude.json` auth untouched.
 - **kimi** — project `AGENTS.md` is read natively (kimi merges `AGENTS.md` from the
   project root down to the work dir into `KIMI_AGENTS_MD`), so agedum leaves it in
   place. kimi has no user-scope `AGENTS.md`, so the global `AGENTS.md` is injected via a
