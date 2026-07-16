@@ -562,6 +562,106 @@ def test_kimi_code_subscription_uses_kimi_and_subscription_endpoint():
     assert provider["api_key"] == "sk-kimi-test"
 
 
+def _kimi_k3_config(**overrides) -> dict:
+    """The kimi/kimi-k3-auto launcher shape (mirrors agentsconf kimi/kimi-k3-auto.json)."""
+    config = {
+        "binary": "kimi",
+        "baseUrl": "https://api.kimi.com/coding/v1",
+        "providerType": "kimi",
+        "model": "k3",
+        "contextWindow": 1048576,
+        "thinking": True,
+        "effortLevel": "max",
+        "supportEfforts": ["max"],
+        "defaultEffort": "max",
+    }
+    config.update(overrides)
+    return {"harness": "kimi", "secretEnv": "KIMI_API_KEY", "config": config}
+
+
+def test_kimi_effort_emits_thinking_effort_and_model_support_efforts():
+    launch = build_launch(_kimi_k3_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["thinking"]["effort"] == "max"
+    assert doc["thinking"]["enabled"] is True
+    # support_efforts is what keeps Kimi Code from collapsing the effort to plain `on`.
+    assert doc["models"]["k3"]["support_efforts"] == ["max"]
+    assert doc["models"]["k3"]["default_effort"] == "max"
+    assert doc["models"]["k3"]["max_context_size"] == 1048576
+
+
+def test_kimi_effort_without_support_efforts_is_rejected():
+    # Kimi Code would silently normalise the effort to `on`; agedum refuses the no-op config.
+    config = _kimi_k3_config()
+    del config["config"]["supportEfforts"]
+    with pytest.raises(ProviderError, match="supportEfforts"):
+        build_launch(config, base_env=_KIMI_ENV)
+
+
+def test_kimi_effort_unlisted_in_support_efforts_is_rejected():
+    # Kimi Code raises MODEL_CONFIG_INVALID at launch for an effort outside support_efforts.
+    with pytest.raises(ProviderError, match="not listed"):
+        build_launch(_kimi_k3_config(effortLevel="high"), base_env=_KIMI_ENV)
+
+
+def test_kimi_effort_widened_support_efforts_allows_high():
+    # The seam for later: widen supportEfforts and `high` becomes configurable.
+    launch = build_launch(
+        _kimi_k3_config(effortLevel="high", supportEfforts=["low", "high", "max"]),
+        base_env=_KIMI_ENV,
+    )
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["thinking"]["effort"] == "high"
+    assert doc["models"]["k3"]["support_efforts"] == ["low", "high", "max"]
+
+
+def test_kimi_effort_on_openai_provider_type_skips_the_kimi_only_guard():
+    # The support_efforts resolution is kimi-wire-protocol only; a compatible endpoint
+    # forwards the effort unchanged, so no supportEfforts is required.
+    launch = build_launch(
+        _kimi_k3_config(providerType="openai", supportEfforts=None, effortLevel="high"),
+        base_env=_KIMI_ENV,
+    )
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["thinking"]["effort"] == "high"
+    assert "support_efforts" not in doc["models"]["k3"]
+
+
+def test_kimi_mcp_servers_generate_mcp_json():
+    servers = {
+        "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+        "playwright": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]},
+    }
+    launch = build_launch(_kimi_k3_config(mcpServers=servers), base_env=_KIMI_ENV)
+    targets = {entry[0]: entry for entry in launch.config_files}
+    mcp_path = str(Path.home() / ".kimi-code" / "mcp.json")
+    assert mcp_path in targets  # Kimi reads MCP from mcp.json, never config.toml
+    target, content, merge_json = targets[mcp_path]
+    assert merge_json is False
+    assert json.loads(content) == {"mcpServers": servers}
+    config_toml = targets[str(Path.home() / ".kimi-code" / "config.toml")][1]
+    assert "mcpServers" not in tomllib.loads(config_toml)
+
+
+def test_kimi_mcp_servers_need_an_object():
+    with pytest.raises(ProviderError, match="mcpServers"):
+        build_launch(_kimi_k3_config(mcpServers=["context7"]), base_env=_KIMI_ENV)
+
+
+def test_kimi_mcp_servers_without_base_url_still_inject():
+    # MCP is independent of the endpoint, so it must not be gated on the config.toml path.
+    launch = build_launch(
+        {
+            "harness": "kimi",
+            "config": {"mcpServers": {"context7": {"command": "npx", "args": ["-y", "x"]}}},
+        },
+        base_env={},
+    )
+    assert [entry[0] for entry in launch.config_files] == [
+        str(Path.home() / ".kimi-code" / "mcp.json")
+    ]
+
+
 def test_kimi_binary_override_and_default():
     # `binary` overrides the CLI name; default is `kimi`.
     overridden = build_launch(

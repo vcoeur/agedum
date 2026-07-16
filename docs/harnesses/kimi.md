@@ -113,9 +113,67 @@ is self-sufficient; Kimi fills every other setting from its own defaults.
 | `contextWindow` | `models.<model>.max_context_size` | `262144` |
 | `capabilities` | `models.<model>.capabilities` | `["thinking"]` |
 | `thinking` | `[thinking].enabled` (only when set) | — |
+| `effortLevel` | `[thinking].effort` (only when set) | — |
+| `supportEfforts` | `models.<model>.support_efforts` | — |
+| `defaultEffort` | `models.<model>.default_effort` | — |
 | (`secretEnv` value) | `providers.agedum.api_key` (resolved key, baked in) | — |
 
 The above launches `kimi --model kimi-k2.7-code`, reading the generated
 `~/.kimi-code/config.toml`. `baseUrl` requires `model` + `secretEnv`. `providerType` must name
 a Kimi Code provider type (`openai` for an OpenAI Chat Completions surface, `anthropic`,
 `kimi`, `google-genai`, `openai_responses`, `vertexai`).
+
+## Thinking effort { #thinking-effort }
+
+`effortLevel` sets `[thinking] effort`, but on the **kimi wire protocol** (`providerType:
+"kimi"`) Kimi Code resolves that value against the model's `support_efforts` list, and the
+failure modes are both silent-ish:
+
+- **no `supportEfforts`** → Kimi normalises the effort away to plain `on`, so the configured
+  effort is discarded while the config still reads as set;
+- **an effort outside `supportEfforts`** → Kimi raises `MODEL_CONFIG_INVALID` at launch.
+
+So agedum **requires `supportEfforts` whenever `effortLevel` is set on `providerType: "kimi"`**,
+and rejects an `effortLevel` the list doesn't contain — a config that would no-op is an error,
+not a surprise at runtime. A model's own roster entry reports these under `think_efforts`
+(`valid_efforts` / `default_effort`) in `GET /models`; mirror them:
+
+```json
+{
+  "config": {
+    "providerType": "kimi",
+    "model": "k3",
+    "contextWindow": 1048576,
+    "thinking": true,
+    "effortLevel": "max",
+    "supportEfforts": ["max"],
+    "defaultEffort": "max"
+  }
+}
+```
+
+Widening `supportEfforts` is the seam for later: when a model accepts more efforts, list them
+and `effortLevel` can move off `max`. On a non-kimi `providerType` the guard does not apply —
+a compatible backend receives the effort string unchanged and makes its own decision.
+
+## MCP servers { #mcp }
+
+Kimi Code reads MCP servers from **`mcp.json`, never `config.toml`**, so `mcpServers` becomes a
+second generated doc bound at `~/.kimi-code/mcp.json`. It is bound read-only rather than merged,
+so the launcher declares its own server set instead of inheriting the host's:
+
+```json
+{
+  "config": {
+    "mcpServers": {
+      "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"] },
+      "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] }
+    }
+  }
+}
+```
+
+Entries use Kimi's MCP shape: stdio takes `command` (+ `args`, `env`, `cwd`); HTTP takes `url`
+(+ `bearerTokenEnvVar` for a static token from the environment). `mcpServers` is independent of
+`baseUrl` — a launcher can inject MCP without generating a `config.toml`. Kimi also reads a
+project-root `.mcp.json` (Claude-compatible) on its own; agedum does not touch that file.
