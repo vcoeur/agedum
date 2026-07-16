@@ -675,6 +675,11 @@ def _kimi_config_toml(
     single provider + model and toggles thinking; Kimi fills every other setting from its own
     defaults. ``providerType`` must name a Kimi Code provider type (``openai`` for an OpenAI
     Chat Completions surface, ``anthropic``, ``kimi``, …).
+
+    ``effortLevel`` becomes ``[thinking] effort``, and ``supportEfforts`` / ``defaultEffort``
+    become the model block's ``support_efforts`` / ``default_effort`` — the roster fields Kimi
+    Code resolves an effort against (a model's ``/models`` entry reports them under
+    ``think_efforts``).
     """
     provider_type = str(block.get("providerType") or "openai").strip() or "openai"
     context_window = block.get("contextWindow")
@@ -690,14 +695,51 @@ def _kimi_config_toml(
         else ["thinking"]
     )
     caps = ", ".join(f'"{_toml_escape(capability)}"' for capability in model_capabilities)
-    lines = [
-        f'default_model = "{_toml_escape(model)}"',
-        "",
+
+    support_efforts = block.get("supportEfforts")
+    model_support_efforts = (
+        [str(effort_value) for effort_value in support_efforts]
+        if isinstance(support_efforts, list) and support_efforts
+        else []
+    )
+    default_effort = str(block.get("defaultEffort") or "").strip()
+    effort = str(block.get("effortLevel") or "").strip()
+
+    # On the kimi wire protocol Kimi Code resolves the configured effort against the model's
+    # `support_efforts`: an unlisted effort raises MODEL_CONFIG_INVALID at launch, and an
+    # *empty* list silently collapses the effort to plain `on`. Both read as "configured"
+    # while doing something else — fail loudly instead.
+    if effort and provider_type == "kimi":
+        if not model_support_efforts:
+            raise ProviderError(
+                "kimi `effortLevel` needs `supportEfforts` listing the efforts the model "
+                "accepts; without it Kimi Code normalises the effort away to plain `on`"
+            )
+        if effort not in model_support_efforts:
+            raise ProviderError(
+                f"kimi `effortLevel` {effort!r} is not listed in `supportEfforts` "
+                f"({', '.join(model_support_efforts)}); Kimi Code rejects an unlisted effort"
+            )
+
+    model_lines = [
         f'[models."{_toml_escape(model)}"]',
         f'provider = "{KIMI_PROVIDER_NAME}"',
         f'model = "{_toml_escape(model)}"',
         f"max_context_size = {max_context_size}",
         f"capabilities = [{caps}]",
+    ]
+    if model_support_efforts:
+        listed_efforts = ", ".join(
+            f'"{_toml_escape(effort_value)}"' for effort_value in model_support_efforts
+        )
+        model_lines.append(f"support_efforts = [{listed_efforts}]")
+    if default_effort:
+        model_lines.append(f'default_effort = "{_toml_escape(default_effort)}"')
+
+    lines = [
+        f'default_model = "{_toml_escape(model)}"',
+        "",
+        *model_lines,
         "",
         f'[providers."{KIMI_PROVIDER_NAME}"]',
         f'type = "{_toml_escape(provider_type)}"',
@@ -705,9 +747,18 @@ def _kimi_config_toml(
         f'api_key = "{_toml_escape(base_env.get(secret_env, ""))}"',
     ]
     thinking = block.get("thinking")
-    if thinking is not None:
-        lines += ["", "[thinking]", f"enabled = {'true' if thinking else 'false'}"]
+    if thinking is not None or effort:
+        lines += ["", "[thinking]"]
+        if thinking is not None:
+            lines.append(f"enabled = {'true' if thinking else 'false'}")
+        if effort:
+            lines.append(f'effort = "{_toml_escape(effort)}"')
     return "\n".join(lines) + "\n"
+
+
+def _kimi_mcp_json(mcp_servers: dict) -> str:
+    """Build the Kimi Code ``mcp.json`` document from an ``mcpServers`` block."""
+    return json.dumps({"mcpServers": mcp_servers}, indent=2) + "\n"
 
 
 def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
@@ -737,6 +788,17 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
         config_toml = _kimi_config_toml(block, base_url, model, secret_env, base_env)
         config_path = str(kimi_config_dir() / "config.toml")
         config_files.append((config_path, config_toml, False))
+
+    # Kimi Code reads MCP servers from `mcp.json`, not config.toml, so this is a second
+    # generated doc rather than another section. Bound read-only (not merged) so the launcher
+    # declares its own server set rather than inheriting whatever the host happens to carry.
+    mcp_servers = block.get("mcpServers")
+    if mcp_servers:
+        if not isinstance(mcp_servers, dict):
+            raise ProviderError("kimi `mcpServers` must be an object keyed by server name")
+        config_files.append(
+            (str(kimi_config_dir() / "mcp.json"), _kimi_mcp_json(mcp_servers), False)
+        )
 
     if model:
         command += ["--model", model]
