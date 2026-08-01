@@ -427,8 +427,14 @@ def _emit_frontmatter(meta: dict, body: str) -> str:
 
 
 def kimi_config_dir() -> Path:
-    """Kimi Code's user-scope data dir (``~/.kimi-code``)."""
-    return Path.home() / ".kimi-code"
+    """Kimi Code's user-scope data dir — ``$KIMI_CODE_HOME`` or ``~/.kimi-code``.
+
+    A custom-endpoint launcher points ``KIMI_CODE_HOME`` at an isolated dir it owns (see
+    ``_kimi_data_dir``), so the instruction + skill targets below follow the generated config
+    into that dir rather than landing in the user's own Kimi home.
+    """
+    override = os.environ.get("KIMI_CODE_HOME")
+    return Path(override) if override else Path.home() / ".kimi-code"
 
 
 def compile_kimi(project: Source, global_: Source | None, dest: Path) -> Plan:

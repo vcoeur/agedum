@@ -286,6 +286,39 @@ def test_compile_kimi(tmp_path, monkeypatch):
     assert "kimi note" in pskill_md
 
 
+def test_compile_kimi_follows_an_isolated_kimi_home(tmp_path, monkeypatch):
+    # A custom-endpoint launcher points KIMI_CODE_HOME at a dir agedum owns (so Kimi Code can
+    # rewrite its own config.toml there); the instruction + skill targets must follow it,
+    # otherwise they land in a home the harness is no longer reading.
+    gconf = tmp_path / "gconf" / "agents"
+    gconf.mkdir(parents=True)
+    (gconf / "AGENTS.md").write_text("GLOBAL-INSTR\n")
+    gskills = tmp_path / "gskills"
+    (gskills / "gskill").mkdir(parents=True)
+    (gskills / "gskill" / "SKILL.md").write_text("---\nname: gskill\ndescription: d\n---\n")
+
+    home = tmp_path / "home"
+    isolated = tmp_path / "cache" / "agedum" / "kimi" / "endpoint"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("KIMI_CODE_HOME", str(isolated))
+    assert kimi_config_dir() == isolated
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    global_ = Source(root=tmp_path, agents_md=gconf / "AGENTS.md", skills_dir=gskills)
+    plan = compile_kimi(load_source(proj), global_, dest)
+
+    targets = {target for _, target in plan.binds}
+    assert isolated / "AGENTS.md" in targets
+    assert isolated / "skills" in targets
+    assert not any(str(target).startswith(str(home / ".kimi-code")) for target in targets)
+    # The isolated home is where Kimi persists sessions/logs, so it must be writable.
+    assert isolated in plan.writable_dirs
+
+
 def test_compile_kimi_project_only_injects_nothing(tmp_path):
     # A project with its own AGENTS.md but no global scope: kimi reads ./AGENTS.md
     # natively, so there is nothing to inject — no bind, no appended flag.
