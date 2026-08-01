@@ -627,6 +627,119 @@ def test_kimi_effort_on_openai_provider_type_skips_the_kimi_only_guard():
     assert "support_efforts" not in doc["models"]["k3"]
 
 
+def _kimi_dual_tier_config(**overrides) -> dict:
+    """A two-tier kimi launcher: a wide primary plus a cheaper subagent model."""
+    config = {
+        "baseUrl": "https://api.kimi.com/coding/v1",
+        "providerType": "kimi",
+        "model": "k3",
+        "subagentModel": "kimi-for-coding",
+        "thinking": True,
+        "effortLevel": "high",
+        "models": {
+            "k3": {
+                "contextWindow": 1048576,
+                "capabilities": ["thinking", "always_thinking"],
+                "supportEfforts": ["low", "high", "max"],
+                "defaultEffort": "high",
+            },
+            "kimi-for-coding": {"contextWindow": 262144},
+        },
+    }
+    config.update(overrides)
+    return {"harness": "kimi", "secretEnv": "KIMI_API_KEY", "config": config}
+
+
+def test_kimi_models_map_declares_every_tier():
+    launch = build_launch(_kimi_dual_tier_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["default_model"] == "k3"
+    assert launch.command == ["kimi", "--model", "k3"]
+    assert set(doc["models"]) == {"k3", "kimi-for-coding"}
+    assert doc["models"]["k3"]["max_context_size"] == 1048576
+    assert doc["models"]["k3"]["support_efforts"] == ["low", "high", "max"]
+    # Both tiers ride the one generated provider — a models map is not a second endpoint.
+    assert {entry["provider"] for entry in doc["models"].values()} == {"agedum"}
+    assert doc["models"]["kimi-for-coding"]["max_context_size"] == 262144
+    assert doc["models"]["kimi-for-coding"]["capabilities"] == ["thinking"]  # default
+    assert "support_efforts" not in doc["models"]["kimi-for-coding"]
+
+
+def test_kimi_subagent_model_points_secondary_model_at_the_cheap_tier():
+    launch = build_launch(_kimi_dual_tier_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["secondary_model"] == {"model": "kimi-for-coding"}
+    assert doc["thinking"]["effort"] == "high"  # applies to the session (primary) model
+    # Subagent tiering is an experimental flag, off by default — without this the
+    # [secondary_model] section parses and is never consulted.
+    assert doc["experimental"] == {"secondary-model": True}
+
+
+def test_kimi_without_subagent_model_leaves_the_experimental_flag_alone():
+    launch = build_launch(_kimi_k3_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert "experimental" not in doc
+
+
+def test_kimi_subagent_effort_rides_the_secondary_model_entry():
+    launch = build_launch(
+        _kimi_dual_tier_config(subagentModel="k3", subagentEffort="low"), base_env=_KIMI_ENV
+    )
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["secondary_model"] == {"model": "k3", "default_effort": "low"}
+
+
+def test_kimi_subagent_model_must_be_declared():
+    # Kimi Code fails subagent spawning when [secondary_model].model names no [models] entry.
+    with pytest.raises(ProviderError, match="subagentModel"):
+        build_launch(_kimi_dual_tier_config(subagentModel="k9"), base_env=_KIMI_ENV)
+
+
+def test_kimi_subagent_effort_unlisted_for_that_model_is_rejected():
+    with pytest.raises(ProviderError, match="subagentEffort"):
+        build_launch(
+            _kimi_dual_tier_config(subagentModel="kimi-for-coding", subagentEffort="low"),
+            base_env=_KIMI_ENV,
+        )
+
+
+def test_kimi_subagent_effort_without_subagent_model_is_rejected():
+    config = _kimi_dual_tier_config(subagentEffort="low")
+    del config["config"]["subagentModel"]
+    with pytest.raises(ProviderError, match="subagentEffort"):
+        build_launch(config, base_env=_KIMI_ENV)
+
+
+def test_kimi_default_model_must_have_a_models_entry():
+    with pytest.raises(ProviderError, match="not declared in `models`"):
+        build_launch(_kimi_dual_tier_config(model="k9"), base_env=_KIMI_ENV)
+
+
+def test_kimi_models_map_rejects_top_level_per_model_knobs():
+    # A top-level contextWindow applies to no model once `models` is set — reject, don't drop.
+    with pytest.raises(ProviderError, match="contextWindow"):
+        build_launch(_kimi_dual_tier_config(contextWindow=262144), base_env=_KIMI_ENV)
+
+
+def test_kimi_effort_checked_against_the_default_model_entry():
+    # `high` is listed for k3 (the default) but absent from the subagent tier — still valid,
+    # because [thinking] effort applies to the session's model.
+    launch = build_launch(_kimi_dual_tier_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert doc["thinking"]["effort"] == "high"
+    # …and an effort the default model does not list is still rejected.
+    with pytest.raises(ProviderError, match="not listed"):
+        build_launch(_kimi_dual_tier_config(effortLevel="medium"), base_env=_KIMI_ENV)
+
+
+def test_kimi_single_model_config_is_unchanged_by_the_models_seam():
+    # No `models` map: the top-level knobs still describe the one declared model.
+    launch = build_launch(_kimi_k3_config(), base_env=_KIMI_ENV)
+    doc = tomllib.loads(launch.config_files[0][1])
+    assert set(doc["models"]) == {"k3"}
+    assert "secondary_model" not in doc
+
+
 def test_kimi_mcp_servers_generate_mcp_json():
     servers = {
         "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},

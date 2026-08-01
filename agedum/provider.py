@@ -664,31 +664,59 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
 KIMI_PROVIDER_NAME = "agedum"
 
 
-def _kimi_config_toml(
-    block: dict, base_url: str, model: str, secret_env: str, base_env: dict[str, str]
-) -> str:
-    """Build a self-sufficient Kimi Code ``config.toml`` pointing at a custom endpoint.
+# The per-model knobs a kimi launcher may set — at the top level for a single-model config,
+# or inside each `models` entry when the launcher declares several.
+_KIMI_MODEL_KEYS = ("contextWindow", "capabilities", "supportEfforts", "defaultEffort")
 
-    Kimi Code has no ``--config-file`` flag and its config does not interpolate ``$ENV``, so
-    agedum binds this generated ``config.toml`` over ``~/.kimi-code/config.toml`` (the file
-    Kimi reads) with the resolved API key baked in (masked in ``--dry-run``). It carries a
-    single provider + model and toggles thinking; Kimi fills every other setting from its own
-    defaults. ``providerType`` must name a Kimi Code provider type (``openai`` for an OpenAI
-    Chat Completions surface, ``anthropic``, ``kimi``, …).
+# Kimi Code gates subagent tiering behind this experimental flag id (default off); agedum
+# enables it in the generated config whenever a launcher sets `subagentModel`.
+KIMI_SECONDARY_MODEL_FLAG = "secondary-model"
 
-    ``effortLevel`` becomes ``[thinking] effort``, and ``supportEfforts`` / ``defaultEffort``
-    become the model block's ``support_efforts`` / ``default_effort`` — the roster fields Kimi
-    Code resolves an effort against (a model's ``/models`` entry reports them under
-    ``think_efforts``).
+
+def _kimi_support_efforts(entry: dict) -> list[str]:
+    """The efforts one model entry declares (Kimi Code's ``support_efforts``), or ``[]``."""
+    values = entry.get("supportEfforts")
+    return [str(value) for value in values] if isinstance(values, list) and values else []
+
+
+def _kimi_models(block: dict, model: str) -> dict[str, dict]:
+    """Resolve the declared model entries, default model first.
+
+    Without a ``models`` map a launcher declares exactly one model: the top-level ``model``
+    carrying the top-level per-model knobs. With one, every knob belongs to an entry — a
+    top-level knob would then apply to no model, so it is rejected rather than dropped.
     """
-    provider_type = str(block.get("providerType") or "openai").strip() or "openai"
-    context_window = block.get("contextWindow")
+    declared = block.get("models")
+    if declared is None:
+        return {model: {key: block[key] for key in _KIMI_MODEL_KEYS if key in block}}
+    if not isinstance(declared, dict) or not declared:
+        raise ProviderError("kimi `models` must be a non-empty object keyed by model id")
+    for name, entry in declared.items():
+        if not isinstance(entry, dict):
+            raise ProviderError(f"kimi `models.{name}` must be an object of per-model settings")
+    stray = [key for key in _KIMI_MODEL_KEYS if key in block]
+    if stray:
+        raise ProviderError(
+            f"kimi config sets `models` and top-level {', '.join(stray)}; move those into the "
+            "matching `models` entry — a top-level knob applies to no model once `models` is set"
+        )
+    if model not in declared:
+        raise ProviderError(
+            f"kimi `model` {model!r} is not declared in `models` ({', '.join(declared)}); "
+            "the default model needs its own entry"
+        )
+    return {model: declared[model], **{k: v for k, v in declared.items() if k != model}}
+
+
+def _kimi_model_lines(alias: str, entry: dict) -> list[str]:
+    """Render one ``[models."<id>"]`` table from a per-model entry."""
+    context_window = entry.get("contextWindow")
     max_context_size = (
         int(context_window)
         if isinstance(context_window, (int, float)) and int(context_window) > 0
         else 262144
     )
-    capabilities = block.get("capabilities")
+    capabilities = entry.get("capabilities")
     model_capabilities = (
         [str(capability) for capability in capabilities]
         if isinstance(capabilities, list) and capabilities
@@ -696,50 +724,106 @@ def _kimi_config_toml(
     )
     caps = ", ".join(f'"{_toml_escape(capability)}"' for capability in model_capabilities)
 
-    support_efforts = block.get("supportEfforts")
-    model_support_efforts = (
-        [str(effort_value) for effort_value in support_efforts]
-        if isinstance(support_efforts, list) and support_efforts
-        else []
-    )
-    default_effort = str(block.get("defaultEffort") or "").strip()
+    lines = [
+        f'[models."{_toml_escape(alias)}"]',
+        f'provider = "{KIMI_PROVIDER_NAME}"',
+        f'model = "{_toml_escape(alias)}"',
+        f"max_context_size = {max_context_size}",
+        f"capabilities = [{caps}]",
+    ]
+    support_efforts = _kimi_support_efforts(entry)
+    if support_efforts:
+        listed_efforts = ", ".join(
+            f'"{_toml_escape(effort_value)}"' for effort_value in support_efforts
+        )
+        lines.append(f"support_efforts = [{listed_efforts}]")
+    default_effort = str(entry.get("defaultEffort") or "").strip()
+    if default_effort:
+        lines.append(f'default_effort = "{_toml_escape(default_effort)}"')
+    return lines
+
+
+def _kimi_config_toml(
+    block: dict, base_url: str, model: str, secret_env: str, base_env: dict[str, str]
+) -> str:
+    """Build a self-sufficient Kimi Code ``config.toml`` pointing at a custom endpoint.
+
+    Kimi Code has no ``--config-file`` flag and its config does not interpolate ``$ENV``, so
+    agedum binds this generated ``config.toml`` over ``~/.kimi-code/config.toml`` (the file
+    Kimi reads) with the resolved API key baked in (masked in ``--dry-run``). It carries one
+    provider, one or more models and toggles thinking; Kimi fills every other setting from its
+    own defaults. ``providerType`` must name a Kimi Code provider type (``openai`` for an
+    OpenAI Chat Completions surface, ``anthropic``, ``kimi``, …).
+
+    ``effortLevel`` becomes ``[thinking] effort``, and ``supportEfforts`` / ``defaultEffort``
+    become the model block's ``support_efforts`` / ``default_effort`` — the roster fields Kimi
+    Code resolves an effort against (a model's ``/models`` entry reports them under
+    ``think_efforts``).
+
+    A ``models`` map declares several models on the one provider; ``model`` names the default
+    (``default_model``) and ``subagentModel`` / ``subagentEffort`` point ``[secondary_model]``
+    at the tier subagents run on, so a launcher can pair a wide primary with a cheaper
+    subagent model.
+    """
+    provider_type = str(block.get("providerType") or "openai").strip() or "openai"
+    models = _kimi_models(block, model)
     effort = str(block.get("effortLevel") or "").strip()
 
     # On the kimi wire protocol Kimi Code resolves the configured effort against the model's
     # `support_efforts`: an unlisted effort raises MODEL_CONFIG_INVALID at launch, and an
     # *empty* list silently collapses the effort to plain `on`. Both read as "configured"
-    # while doing something else — fail loudly instead.
+    # while doing something else — fail loudly instead. `[thinking] effort` applies to the
+    # session's model, so it is the default model's entry that has to list it; a model reached
+    # by switching later is Kimi Code's own check at switch time.
+    primary_efforts = _kimi_support_efforts(models[model])
     if effort and provider_type == "kimi":
-        if not model_support_efforts:
+        if not primary_efforts:
             raise ProviderError(
                 "kimi `effortLevel` needs `supportEfforts` listing the efforts the model "
                 "accepts; without it Kimi Code normalises the effort away to plain `on`"
             )
-        if effort not in model_support_efforts:
+        if effort not in primary_efforts:
             raise ProviderError(
                 f"kimi `effortLevel` {effort!r} is not listed in `supportEfforts` "
-                f"({', '.join(model_support_efforts)}); Kimi Code rejects an unlisted effort"
+                f"({', '.join(primary_efforts)}); Kimi Code rejects an unlisted effort"
             )
 
-    model_lines = [
-        f'[models."{_toml_escape(model)}"]',
-        f'provider = "{KIMI_PROVIDER_NAME}"',
-        f'model = "{_toml_escape(model)}"',
-        f"max_context_size = {max_context_size}",
-        f"capabilities = [{caps}]",
-    ]
-    if model_support_efforts:
-        listed_efforts = ", ".join(
-            f'"{_toml_escape(effort_value)}"' for effort_value in model_support_efforts
+    subagent_model = str(block.get("subagentModel") or "").strip()
+    subagent_effort = str(block.get("subagentEffort") or "").strip()
+    if subagent_effort and not subagent_model:
+        raise ProviderError(
+            "kimi `subagentEffort` needs `subagentModel`; the effort rides the "
+            "`[secondary_model]` entry"
         )
-        model_lines.append(f"support_efforts = [{listed_efforts}]")
-    if default_effort:
-        model_lines.append(f'default_effort = "{_toml_escape(default_effort)}"')
+    if subagent_model:
+        if subagent_model not in models:
+            raise ProviderError(
+                f"kimi `subagentModel` {subagent_model!r} is not declared in `models` "
+                f"({', '.join(models)}); Kimi Code fails subagent spawning when "
+                "`[secondary_model].model` names no `[models]` entry"
+            )
+        subagent_efforts = _kimi_support_efforts(models[subagent_model])
+        if subagent_effort and subagent_effort not in subagent_efforts:
+            listed = ", ".join(subagent_efforts) or "none"
+            raise ProviderError(
+                f"kimi `subagentEffort` {subagent_effort!r} is not listed in the "
+                f"`supportEfforts` of model {subagent_model!r} ({listed}); Kimi Code rejects "
+                "an unlisted secondary effort"
+            )
 
-    lines = [
-        f'default_model = "{_toml_escape(model)}"',
-        "",
-        *model_lines,
+    lines = [f'default_model = "{_toml_escape(model)}"']
+    for alias, entry in models.items():
+        lines += ["", *_kimi_model_lines(alias, entry)]
+    if subagent_model:
+        lines += ["", "[secondary_model]", f'model = "{_toml_escape(subagent_model)}"']
+        if subagent_effort:
+            lines.append(f'default_effort = "{_toml_escape(subagent_effort)}"')
+        # Subagent tiering is an experimental Kimi Code flag, off by default: without the
+        # override `[secondary_model]` parses fine and is simply never consulted. The config
+        # `experimental` record is keyed by flag id and is the self-contained seam (the
+        # KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL env var still wins over it at runtime).
+        lines += ["", "[experimental]", f"{KIMI_SECONDARY_MODEL_FLAG} = true"]
+    lines += [
         "",
         f'[providers."{KIMI_PROVIDER_NAME}"]',
         f'type = "{_toml_escape(provider_type)}"',
