@@ -116,12 +116,65 @@ is self-sufficient; Kimi fills every other setting from its own defaults.
 | `effortLevel` | `[thinking].effort` (only when set) | — |
 | `supportEfforts` | `models.<model>.support_efforts` | — |
 | `defaultEffort` | `models.<model>.default_effort` | — |
+| `models` | one `[models.<id>]` table per entry (see [Several models](#several-models)) | — |
+| `subagentModel` | `[secondary_model].model` | — |
+| `subagentEffort` | `[secondary_model].default_effort` | — |
 | (`secretEnv` value) | `providers.agedum.api_key` (resolved key, baked in) | — |
 
 The above launches `kimi --model kimi-k2.7-code`, reading the generated
 `~/.kimi-code/config.toml`. `baseUrl` requires `model` + `secretEnv`. `providerType` must name
 a Kimi Code provider type (`openai` for an OpenAI Chat Completions surface, `anthropic`,
 `kimi`, `google-genai`, `openai_responses`, `vertexai`).
+
+### Several models — tiers and subagents { #several-models }
+
+`model` alone declares one model. A **`models`** map declares several on the same provider,
+and `model` picks which one is `default_model`:
+
+```json
+{
+  "config": {
+    "baseUrl": "https://api.kimi.com/coding/v1",
+    "providerType": "kimi",
+    "model": "k3",
+    "subagentModel": "kimi-for-coding",
+    "thinking": true,
+    "effortLevel": "high",
+    "models": {
+      "k3": {
+        "contextWindow": 1048576,
+        "capabilities": ["thinking", "always_thinking"],
+        "supportEfforts": ["low", "high", "max"],
+        "defaultEffort": "high"
+      },
+      "kimi-for-coding": { "contextWindow": 262144 }
+    }
+  }
+}
+```
+
+Each entry takes the same per-model keys as the single-model form (`contextWindow`,
+`capabilities`, `supportEfforts`, `defaultEffort`); every model rides the one generated
+`agedum` provider, so a `models` map is a **tier list on one endpoint**, not a second
+endpoint. Setting `models` **and** a top-level per-model key is an error: once the map exists
+the top-level value would apply to no model, so agedum rejects it instead of dropping it.
+`model` must name one of the declared entries.
+
+**`subagentModel` is the second tier.** Kimi Code spawns subagents on `[secondary_model]`, so
+this is how a launcher pairs a wide primary with a cheaper subagent model (the harness
+analogue of a per-agent model list). It must name a declared entry — Kimi Code fails subagent
+spawning when `[secondary_model].model` resolves to nothing, and **`kimi doctor` does not
+catch a dangling pointer** (verified: a `[secondary_model]` naming an undeclared model still
+reports "All checked config files are valid"), so agedum rejects it at launch instead.
+`subagentEffort` sets that entry's `default_effort` and must appear in *that model's*
+`supportEfforts`. Both are overridable at runtime by Kimi Code's own `KIMI_SECONDARY_MODEL` /
+`KIMI_SECONDARY_EFFORT`.
+
+**Subagent tiering is an experimental Kimi Code flag** (`secondary-model`, default **off**) —
+without it `[secondary_model]` parses cleanly and is simply never consulted. So a
+`subagentModel` also makes agedum emit `[experimental] secondary-model = true`, the config
+seam the flag resolver reads (keyed by flag id); the `KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL`
+env var still overrides it at runtime.
 
 ## Thinking effort { #thinking-effort }
 
@@ -155,6 +208,11 @@ not a surprise at runtime. A model's own roster entry reports these under `think
 Widening `supportEfforts` is the seam for later: when a model accepts more efforts, list them
 and `effortLevel` can move off `max`. On a non-kimi `providerType` the guard does not apply —
 a compatible backend receives the effort string unchanged and makes its own decision.
+
+With a [`models`](#several-models) map the check runs against the **default model's** entry —
+`[thinking] effort` applies to the session's model, and a model reached by switching later is
+Kimi Code's own check at switch time. The subagent tier is checked separately, through
+`subagentEffort` against `[secondary_model].model`'s own list.
 
 ## MCP servers { #mcp }
 
