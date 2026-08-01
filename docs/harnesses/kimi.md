@@ -42,6 +42,8 @@ mirrors the Claude harness — each scope kept distinct, never merged.
 - Skills use the `SKILL.kimi.md` overlay where present; assets are copied verbatim.
 - The AGENTS.md and skills binds land at paths Kimi Code already reads, so there is **no
   config rewrite** and `extra_args` stays empty.
+- `~/.kimi-code` above is whatever `KIMI_CODE_HOME` names — a provider config that generates a
+  `config.toml` [relocates it](#custom-endpoint), and these targets follow.
 
 ```bash
 agedum --wrapper kimi -- kimi -p "explain this code"
@@ -121,10 +123,24 @@ is self-sufficient; Kimi fills every other setting from its own defaults.
 | `subagentEffort` | `[secondary_model].default_effort` | — |
 | (`secretEnv` value) | `providers.agedum.api_key` (resolved key, baked in) | — |
 
-The above launches `kimi --model kimi-k2.7-code`, reading the generated
-`~/.kimi-code/config.toml`. `baseUrl` requires `model` + `secretEnv`. `providerType` must name
-a Kimi Code provider type (`openai` for an OpenAI Chat Completions surface, `anthropic`,
-`kimi`, `google-genai`, `openai_responses`, `vertexai`).
+The above launches `kimi --model kimi-k2.7-code`, reading the generated `config.toml`.
+`baseUrl` requires `model` + `secretEnv`. `providerType` must name a Kimi Code provider type
+(`openai` for an OpenAI Chat Completions surface, `anthropic`, `kimi`, `google-genai`,
+`openai_responses`, `vertexai`).
+
+**A generated config moves the Kimi home.** Kimi Code refreshes its provider-model catalogue
+at startup and persists it by writing a temp file and **renaming it over** `config.toml` — and
+a rename cannot replace a bind mount, so a read-only bind there fails `EBUSY` and the harness
+reports `Skipped refreshing <provider>` on every launch. So a `baseUrl` launcher instead gets
+its own Kimi home: agedum sets **`KIMI_CODE_HOME`** to `~/.cache/agedum/kimi/<endpoint-model
+slug>` and *seeds* `config.toml` (and `mcp.json`) there as real files. The rewrite lands, the
+user's own `~/.kimi-code` is untouched, and the launcher stays authoritative because agedum
+re-seeds every launch — whatever Kimi discovered in-session is replaced by the declared
+config. `kimi_config_dir()` reads the same variable, so the instruction and skill targets
+follow into that home. The dir is derived from endpoint + model, so repeat launches of one
+launcher reuse it (skills, sessions, logs); **two launchers do not share session history, and
+neither sees `~/.kimi-code`'s**. Without `baseUrl` nothing is generated: Kimi runs on its own
+account config in `~/.kimi-code`, and an injected `mcp.json` is read-only bound there as before.
 
 ### Several models — tiers and subagents { #several-models }
 

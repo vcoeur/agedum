@@ -845,6 +845,25 @@ def _kimi_mcp_json(mcp_servers: dict) -> str:
     return json.dumps({"mcpServers": mcp_servers}, indent=2) + "\n"
 
 
+def _kimi_data_dir(base_url: str, model: str) -> Path:
+    """The isolated Kimi Code data dir (``KIMI_CODE_HOME``) for one custom-endpoint launcher.
+
+    Kimi Code refreshes its provider-model catalogue at startup and persists it by writing a
+    temp file and **renaming it over** ``config.toml``. A rename cannot replace a bind mount,
+    so a read-only bind there does not merely reject the write — it fails with ``EBUSY`` and
+    the harness reports ``Skipped refreshing <provider>`` on every launch. Seeding the
+    generated docs into a dir agedum owns lets that rewrite land, leaves the user's own
+    ``~/.kimi-code`` untouched, and still keeps the launcher authoritative: agedum re-seeds
+    every launch, so whatever Kimi discovered in-session is replaced by the declared config.
+
+    Derived from endpoint + model so repeat launches reuse the same dir (and its injected
+    skills / session history). Lives under ``~/.cache`` so the conception sandbox's writable
+    set already covers Kimi's own session, log and update writes.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{base_url}-{model}".lower()).strip("-") or "endpoint"
+    return Path.home() / ".cache" / "agedum" / "kimi" / slug
+
+
 def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # Kimi Code's provider/model knobs are appended CLI flags plus a generated config.toml,
     # not env vars. The token (secret_env) reaches the child via the required-env export in
@@ -854,14 +873,21 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
     command = [binary]
     model = str(block.get("model") or "").strip()
     base_url = str(block.get("baseUrl") or "").strip()
-    config_files: list[tuple[str, str, bool]] = []
+    env: dict[str, str] = {}
+    config_files: list[ConfigFile] = []
+    # A generated config moves the whole Kimi home to a dir agedum owns (see _kimi_data_dir);
+    # without one, Kimi Code's own ~/.kimi-code is the target and the docs are bound.
+    data_dir = _kimi_data_dir(base_url, model) if base_url else kimi_config_dir()
+    seeded = bool(base_url)
 
     if base_url:
         # Kimi Code has no --base-url flag and its config does not interpolate $ENV, so a
         # custom OpenAI-/Anthropic-compatible endpoint becomes a generated config.toml
         # (provider `agedum` + model, resolved key baked in — like opencode's
-        # OPENCODE_CONFIG_CONTENT). There is no --config-file: Kimi reads config.toml under
-        # its data dir, so agedum binds this self-sufficient doc over ~/.kimi-code/config.toml.
+        # OPENCODE_CONFIG_CONTENT). There is no --config-file either: Kimi reads config.toml
+        # from its data dir, so agedum points KIMI_CODE_HOME at an isolated one and seeds the
+        # doc there. `kimi_config_dir()` reads that same env var, so the instruction and skill
+        # binds follow it (cli.main applies launch.env before compiling for exactly this).
         if not model:
             raise ProviderError(
                 "kimi config sets `baseUrl` but no `model`; set `model` to the upstream model "
@@ -870,18 +896,21 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
         if not secret_env:
             raise ProviderError("kimi config has a baseUrl but no secretEnv to supply the API key")
         config_toml = _kimi_config_toml(block, base_url, model, secret_env, base_env)
-        config_path = str(kimi_config_dir() / "config.toml")
-        config_files.append((config_path, config_toml, False))
+        env["KIMI_CODE_HOME"] = str(data_dir)
+        config_files.append((str(data_dir / "config.toml"), config_toml, False, True))
 
     # Kimi Code reads MCP servers from `mcp.json`, not config.toml, so this is a second
-    # generated doc rather than another section. Bound read-only (not merged) so the launcher
-    # declares its own server set rather than inheriting whatever the host happens to carry.
+    # generated doc rather than another section. Never merged, so the launcher declares its own
+    # server set rather than inheriting whatever the host happens to carry — seeded into the
+    # isolated home alongside config.toml, or bound read-only when there is no generated config.
     mcp_servers = block.get("mcpServers")
     if mcp_servers:
         if not isinstance(mcp_servers, dict):
             raise ProviderError("kimi `mcpServers` must be an object keyed by server name")
+        mcp_path = str(data_dir / "mcp.json")
+        mcp_doc = _kimi_mcp_json(mcp_servers)
         config_files.append(
-            (str(kimi_config_dir() / "mcp.json"), _kimi_mcp_json(mcp_servers), False)
+            (mcp_path, mcp_doc, False, True) if seeded else (mcp_path, mcp_doc, False)
         )
 
     if model:
@@ -890,7 +919,7 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
         command.append("--plan")
     if block.get("yolo") is True:
         command.append("--yolo")
-    return {}, [], command, tuple(config_files)
+    return env, [], command, tuple(config_files)
 
 
 def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:

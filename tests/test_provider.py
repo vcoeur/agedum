@@ -500,7 +500,6 @@ def test_kimi_native_empty_config():
 
 
 def test_kimi_base_url_generates_config_toml():
-    config_path = str(Path.home() / ".kimi-code" / "config.toml")
     launch = build_launch(
         {
             "harness": "kimi",
@@ -516,9 +515,10 @@ def test_kimi_base_url_generates_config_toml():
     # No --config-file / --thinking flag: Kimi Code reads config.toml from its data dir.
     assert launch.command == ["kimi", "--model", "kimi-k2.7-code"]
     assert len(launch.config_files) == 1
-    target, content, merge_json = launch.config_files[0]
-    assert target == config_path
+    target, content, merge_json, writable = launch.config_files[0]
+    assert target == str(Path(launch.env["KIMI_CODE_HOME"]) / "config.toml")
     assert merge_json is False
+    assert writable is True
     doc = tomllib.loads(content)
     assert doc["default_model"] == "kimi-k2.7-code"
     assert doc["models"]["kimi-k2.7-code"]["provider"] == "agedum"
@@ -550,8 +550,8 @@ def test_kimi_code_subscription_uses_kimi_and_subscription_endpoint():
         base_env={"KIMI_API_KEY": "sk-kimi-test"},
     )
     assert launch.command == ["kimi", "--model", "kimi-for-coding", "--yolo"]
-    target, content, _ = launch.config_files[0]
-    assert target == str(Path.home() / ".kimi-code" / "config.toml")
+    target, content, _, _ = launch.config_files[0]
+    assert target == str(Path(launch.env["KIMI_CODE_HOME"]) / "config.toml")
     doc = tomllib.loads(content)
     assert doc["default_model"] == "kimi-for-coding"
     assert doc["models"]["kimi-for-coding"]["max_context_size"] == 262144
@@ -747,13 +747,43 @@ def test_kimi_mcp_servers_generate_mcp_json():
     }
     launch = build_launch(_kimi_k3_config(mcpServers=servers), base_env=_KIMI_ENV)
     targets = {entry[0]: entry for entry in launch.config_files}
-    mcp_path = str(Path.home() / ".kimi-code" / "mcp.json")
+    home = Path(launch.env["KIMI_CODE_HOME"])
+    mcp_path = str(home / "mcp.json")
     assert mcp_path in targets  # Kimi reads MCP from mcp.json, never config.toml
-    target, content, merge_json = targets[mcp_path]
+    target, content, merge_json, writable = targets[mcp_path]
     assert merge_json is False
+    assert writable is True
     assert json.loads(content) == {"mcpServers": servers}
-    config_toml = targets[str(Path.home() / ".kimi-code" / "config.toml")][1]
+    config_toml = targets[str(home / "config.toml")][1]
     assert "mcpServers" not in tomllib.loads(config_toml)
+
+
+def test_kimi_generated_config_isolates_the_kimi_home():
+    # Kimi Code rewrites config.toml by renaming a temp file over it, which EBUSYs against a
+    # bind mount — so a generated config moves the whole Kimi home somewhere agedum owns.
+    launch = build_launch(_kimi_k3_config(), base_env=_KIMI_ENV)
+    home = Path(launch.env["KIMI_CODE_HOME"])
+    assert home != Path.home() / ".kimi-code"  # never the user's own Kimi home
+    assert home.is_relative_to(Path.home() / ".cache" / "agedum" / "kimi")
+    # Same endpoint + model resolves to the same dir, so skills and sessions persist.
+    again = build_launch(_kimi_k3_config(), base_env=_KIMI_ENV)
+    assert again.env["KIMI_CODE_HOME"] == str(home)
+    # A different model is a different launcher, hence a different home.
+    other = build_launch(_kimi_k3_config(model="kimi-for-coding"), base_env=_KIMI_ENV)
+    assert other.env["KIMI_CODE_HOME"] != str(home)
+
+
+def test_kimi_without_a_generated_config_keeps_the_real_home():
+    # No baseUrl: nothing is generated, Kimi runs on its own account config, and an mcp.json
+    # is still injected — read-only bound at the real home, as before.
+    servers = {"context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]}}
+    launch = build_launch({"harness": "kimi", "config": {"mcpServers": servers}}, base_env={})
+    assert "KIMI_CODE_HOME" not in launch.env
+    assert len(launch.config_files) == 1
+    entry = launch.config_files[0]
+    assert entry[0] == str(Path.home() / ".kimi-code" / "mcp.json")
+    assert json.loads(entry[1]) == {"mcpServers": servers}
+    assert len(entry) == 3  # read-only bind, not a writable seed
 
 
 def test_kimi_mcp_servers_need_an_object():
