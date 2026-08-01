@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -1359,6 +1360,9 @@ def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
     assert os.access(target, os.W_OK)
     assert plan.binds == []
     assert target in plan.origins  # still recorded for --dry-run visibility
+    # A seed outlives the launch and may carry a baked API key (kimi's config.toml), so it is
+    # owner-only rather than whatever the umask would have granted.
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 def test_inject_config_files_readonly_entry_still_binds(tmp_path):

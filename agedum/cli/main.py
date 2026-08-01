@@ -672,6 +672,12 @@ def _inject_config_files(
             # read-only file) so the fresh write can't trip over its mode.
             target.unlink(missing_ok=True)
             target.write_text(content)
+            # A seeded file outlives the launch (that is the point — the harness rewrites it),
+            # and some carry a resolved API key baked in because the harness cannot read $ENV
+            # (kimi's config.toml). A ro-bound doc lived in a 0700 temp dir that was deleted
+            # after the run; this one persists in ~/.cache, so restrict it explicitly rather
+            # than inherit whatever the umask grants.
+            target.chmod(0o600)
             plan.origins[target] = f"<agedum-generated {target_spec}>"
             continue
         staged = Path(*spec.parts[1:]) if spec.is_absolute() else Path(target_spec)
