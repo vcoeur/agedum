@@ -463,6 +463,182 @@ def test_claude_baseurl_without_secret_errors():
         )
 
 
+# --- canonical mcpServers -> per-harness MCP dialects ---
+
+
+def _claude_mcp_document(launch):
+    """The `--mcp-config` payload claude was launched with."""
+    assert "--mcp-config" in launch.command
+    return json.loads(launch.command[launch.command.index("--mcp-config") + 1])
+
+
+def test_claude_mcp_servers_become_an_additive_mcp_config_flag():
+    # Claude's stdio dialect is the canonical one, so the entry passes through unchanged —
+    # and --strict-mcp-config is never passed, so the user's own servers still load.
+    launch = build_launch(
+        {
+            "harness": "claude",
+            "config": {
+                "mcpServers": {
+                    "nodum": {
+                        "command": "nodum",
+                        "args": ["mcp", "serve"],
+                        "env": {"NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}"},
+                    }
+                }
+            },
+        },
+        base_env={},
+    )
+    assert launch.command[0] == "claude"
+    assert "--strict-mcp-config" not in launch.command
+    assert _claude_mcp_document(launch) == {
+        "mcpServers": {
+            "nodum": {
+                "command": "nodum",
+                "args": ["mcp", "serve"],
+                # Left verbatim: Claude Code expands ${VAR} itself, so no token in argv.
+                "env": {"NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}"},
+            }
+        }
+    }
+
+
+def test_claude_mcp_servers_reach_a_bare_native_launch():
+    # The no-baseUrl path returns early; MCP must survive it (native Claude + MCP is the
+    # most likely combination of all).
+    launch = build_launch(
+        {
+            "harness": "claude",
+            "config": {"mcpServers": {"nodum": {"command": "nodum", "args": ["mcp", "serve"]}}},
+        },
+        base_env={},
+    )
+    assert launch.env == {}
+    assert _claude_mcp_document(launch)["mcpServers"]["nodum"]["command"] == "nodum"
+
+
+def test_claude_mcp_remote_entry_defaults_to_http():
+    launch = build_launch(
+        {
+            "harness": "claude",
+            "config": {
+                "mcpServers": {
+                    "buffer": {
+                        "url": "https://mcp.buffer.com/mcp",
+                        "headers": {"Authorization": "Bearer ${BUFFER_KEY}"},
+                    }
+                }
+            },
+        },
+        base_env={},
+    )
+    assert _claude_mcp_document(launch)["mcpServers"]["buffer"] == {
+        "type": "http",
+        "url": "https://mcp.buffer.com/mcp",
+        "headers": {"Authorization": "Bearer ${BUFFER_KEY}"},
+    }
+
+
+def test_claude_mcp_remote_rejects_an_unknown_transport():
+    with pytest.raises(ProviderError, match="transport"):
+        build_launch(
+            {
+                "harness": "claude",
+                "config": {"mcpServers": {"x": {"url": "https://x/mcp", "transport": "grpc"}}},
+            },
+            base_env={},
+        )
+
+
+def test_mcp_entry_cannot_be_both_stdio_and_remote():
+    with pytest.raises(ProviderError, match="stdio or remote"):
+        build_launch(
+            {
+                "harness": "claude",
+                "config": {"mcpServers": {"x": {"command": "x", "url": "https://x/mcp"}}},
+            },
+            base_env={},
+        )
+
+
+def test_mcp_entry_needs_a_command_or_a_url():
+    with pytest.raises(ProviderError, match="command.*url"):
+        build_launch(
+            {"harness": "claude", "config": {"mcpServers": {"x": {"args": ["serve"]}}}},
+            base_env={},
+        )
+
+
+def test_opencode_mcp_servers_translate_to_the_local_dialect():
+    # opencode diverges three ways: command is one array, the env key is `environment`,
+    # and ${VAR} is respelled to opencode's own {env:VAR}.
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {
+                "mcpServers": {
+                    "nodum": {
+                        "command": "nodum",
+                        "args": ["mcp", "serve"],
+                        "env": {"NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}"},
+                    }
+                }
+            },
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["mcp"]["nodum"] == {
+        "type": "local",
+        "command": ["nodum", "mcp", "serve"],
+        "environment": {"NODUM_AGENT_TOKEN": "{env:NODUM_AGENT_TOKEN}"},
+        "enabled": True,
+    }
+
+
+def test_opencode_mcp_remote_respells_the_placeholder_in_headers():
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {
+                "mcpServers": {
+                    "buffer": {
+                        "url": "https://mcp.buffer.com/mcp",
+                        "headers": {"Authorization": "Bearer ${BUFFER_KEY}"},
+                    }
+                }
+            },
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["mcp"]["buffer"] == {
+        "type": "remote",
+        "url": "https://mcp.buffer.com/mcp",
+        "headers": {"Authorization": "Bearer {env:BUFFER_KEY}"},
+        "enabled": True,
+    }
+
+
+def test_opencode_mcp_passthrough_wins_over_the_canonical_block():
+    # The canonical block is merged before opencodeConfig, so a launcher can still override
+    # one server in opencode's own dialect without abandoning the shared base.
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {
+                "mcpServers": {"nodum": {"command": "nodum", "args": ["mcp", "serve"]}},
+                "opencodeConfig": {"mcp": {"nodum": {"enabled": False}}},
+            },
+        },
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert payload["mcp"]["nodum"]["enabled"] is False
+    assert payload["mcp"]["nodum"]["command"] == ["nodum", "mcp", "serve"]
+
+
 # --- kimi env/command mapping ---
 
 
@@ -789,6 +965,14 @@ def test_kimi_without_a_generated_config_keeps_the_real_home():
 def test_kimi_mcp_servers_need_an_object():
     with pytest.raises(ProviderError, match="mcpServers"):
         build_launch(_kimi_k3_config(mcpServers=["context7"]), base_env=_KIMI_ENV)
+
+
+def test_kimi_mcp_servers_reject_an_env_placeholder():
+    # Kimi Code is not known to expand ${VAR} in mcp.json, so a shared MCP base extended by
+    # a kimi launcher must fail loudly instead of handing the server a literal placeholder.
+    servers = {"nodum": {"command": "nodum", "env": {"TOKEN": "${NODUM_AGENT_TOKEN}"}}}
+    with pytest.raises(ProviderError, match="placeholder"):
+        build_launch(_kimi_k3_config(mcpServers=servers), base_env=_KIMI_ENV)
 
 
 def test_kimi_mcp_servers_without_base_url_still_inject():
@@ -2853,6 +3037,28 @@ def test_load_merged_config_list_extends_left_to_right(tmp_path):
     merged = load_merged_config(_write_config(tmp_path, "child.json", child), tmp_path)
     # a, then b over a (y), then child over both (z).
     assert merged["config"] == {"x": 1, "y": 2, "z": 3}
+
+
+def test_load_merged_config_unions_required_env(tmp_path):
+    # A plain deep-merge replaces lists, so a child declaring its own requiredEnv would drop
+    # the base's — launching with the base's token neither validated nor exported, and
+    # whatever the base configured with it failing at first use instead of at launch.
+    _write_config(
+        tmp_path,
+        "base/mcp.json",
+        {"abstract": True, "harness": "opencode", "requiredEnv": ["NODUM_AGENT_TOKEN"]},
+    )
+    child = {"extends": "base/mcp.json", "requiredEnv": ["BUFFER_KEY"]}
+    merged = load_merged_config(_write_config(tmp_path, "oc/x.json", child), tmp_path)
+    assert merged["requiredEnv"] == ["NODUM_AGENT_TOKEN", "BUFFER_KEY"]
+
+
+def test_load_merged_config_required_env_union_dedupes(tmp_path):
+    _write_config(tmp_path, "a.json", {"harness": "claude", "requiredEnv": ["K", "A"]})
+    _write_config(tmp_path, "b.json", {"requiredEnv": ["K", "B"]})
+    child = {"extends": ["a.json", "b.json"], "requiredEnv": ["A", "C"]}
+    merged = load_merged_config(_write_config(tmp_path, "child.json", child), tmp_path)
+    assert merged["requiredEnv"] == ["K", "A", "B", "C"]
 
 
 def test_load_merged_config_is_recursive(tmp_path):

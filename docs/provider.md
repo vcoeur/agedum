@@ -118,11 +118,76 @@ with `/`:
 
 - **Merge** is a deep-merge: nested objects (like `config`) combine key-by-key. With a **list**
   of bases, they merge left→right and the extending config is applied **last** (child wins).
+- **`requiredEnv` unions** instead of being replaced — it is the one exception to child-wins.
+  Lists otherwise replace wholesale, which would mean a child declaring its own
+  `requiredEnv` silently drops the base's: the base's var would go unvalidated and
+  unexported, and whatever it configured (an [MCP](#mcp) `${VAR}`, a provider key) would
+  fail at first use rather than at launch. Requirements accumulate down the chain — base
+  order first, the child's additions appended, duplicates dropped.
 - **Recursive** — a base may itself `extends` another.
 - A **cycle** (a → b → a) or a base that resolves to no file is an **error**.
 - `abstract: true` marks a config as a base only: it is skipped by `--providers` and refuses to
   launch directly (`agedum base/claude-deepseek.json` errors). Abstractness is **not** inherited
   — a config that extends an abstract base is itself launchable.
+
+## MCP servers — `config.mcpServers` { #mcp }
+
+`config.mcpServers` declares MCP servers in **one canonical vocabulary** that agedum
+translates into each harness's own dialect, so a server is written once and extended onto
+every launcher that should carry it. Supported by **claude**, **opencode**, and **kimi**
+(kimi with the caveat below); other harnesses ignore the key.
+
+An entry is either **stdio** or **remote** — never both:
+
+```json
+"mcpServers": {
+  "nodum":  { "command": "nodum", "args": ["mcp", "serve"],
+              "env": { "NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}" }, "cwd": "/opt/x" },
+  "buffer": { "url": "https://mcp.buffer.com/mcp", "transport": "http",
+              "headers": { "Authorization": "Bearer ${BUFFER_KEY}" } }
+}
+```
+
+| Canonical | claude | opencode |
+|---|---|---|
+| stdio `{command, args, env, cwd}` | passed through as-is (claude's dialect *is* the canonical one) | `{type:"local", command:[command, …args], environment, cwd, enabled:true}` |
+| remote `{url, headers, transport}` | `{type: transport\|"http", url, headers}` | `{type:"remote", url, headers, enabled:true}` |
+| delivery | `--mcp-config '<json>'` appended to argv | merged into `OPENCODE_CONFIG_CONTENT` |
+
+### `${VAR}` placeholders
+
+Any value may carry a `${VAR}` placeholder. **agedum respells it, it never resolves it** —
+resolving would bake the secret into argv (claude) or into an env var (opencode), where the
+process list and `--dry-run` would expose it. Instead each harness expands it itself:
+claude reads `${VAR}` natively, and opencode's spelling `{env:VAR}` is written for it.
+
+The variable still has to *reach* the harness, which means naming it in **`requiredEnv`** —
+that is what copies it out of `~/.config/agents/.env` into the child environment. Declaring
+it there also makes a missing token fail at launch rather than at first tool call:
+
+```json
+{ "abstract": true,
+  "requiredEnv": ["NODUM_AGENT_TOKEN"],
+  "config": { "mcpServers": { "nodum": { "command": "nodum", "args": ["mcp", "serve"],
+              "env": { "NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}" } } } } }
+```
+
+Extend that base from any claude or opencode launcher and both the server and its env
+requirement come along.
+
+### Per-harness notes
+
+- **claude** — `--strict-mcp-config` is deliberately *not* passed, so provider-declared
+  servers are **additive** to the user's own (`~/.claude/settings.json`, project `.mcp.json`),
+  not a replacement.
+- **opencode** — the translated block is merged **before** `opencodeConfig`, so an explicit
+  `opencodeConfig.mcp` entry still overrides one server without abandoning the shared base.
+  Note opencode resolves an unset `{env:VAR}` to the empty string, which is a second reason
+  to declare the var in `requiredEnv`.
+- **kimi** — keeps the older verbatim passthrough into `mcp.json` ([kimi § MCP](harnesses/kimi.md#mcp)),
+  and its remote form is `{url, bearerTokenEnvVar}` rather than `headers`. Kimi Code is not
+  known to expand `${VAR}` there, so a placeholder in a kimi `mcpServers` entry is a
+  **fail-loud error** rather than a literal handed to the server.
 
 ## Filesystem sandbox — `sandbox` { #sandbox }
 

@@ -113,6 +113,7 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
 | `openaiThinking` | `AGEDUM_OPENAI_THINKING=<mode>` — `"toggle"` maps Anthropic `thinking` on/off (translate proxy only) |
 | `autoCompactWindow` (> 0) | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
 | `extraEnv` (object) | arbitrary env for the claude child, stringified + applied last (escape hatch, e.g. `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `DISABLE_COMPACT`) |
+| `mcpServers` (object) | MCP servers, in the canonical cross-harness vocabulary — see [below](#mcp) |
 
 - `secretEnv` (mapped to the auth token) must be present in the [env file](../provider.md#the-env-file);
   `baseUrl` without a `secretEnv` is an error.
@@ -132,6 +133,33 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
     1,000,000 tokens without `maxContextTokens`, unless `disable1M` is set.
 - `--prompt`/`--run` seed an interactive vs `--print` run — see the
   [prompt-seeding table](../provider.md#prompt-seeding).
+
+## MCP servers { #mcp }
+
+`mcpServers` is the [canonical cross-harness vocabulary](../provider.md#mcp); Claude Code's
+own stdio dialect *is* that vocabulary, so stdio entries pass through untouched and a remote
+entry becomes `{type, url, headers}`. The document is appended to the command as
+`--mcp-config '<json>'` (the flag takes a JSON **string**, so nothing is written to disk).
+
+```json
+"config": {
+  "mcpServers": {
+    "nodum": { "command": "nodum", "args": ["mcp", "serve"],
+               "env": { "NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}" } }
+  }
+}
+```
+
+- **Additive, not exclusive.** `--strict-mcp-config` is never passed, so the servers in
+  `~/.claude/settings.json` and a project `.mcp.json` still load alongside these.
+- **`${VAR}` is left verbatim** — Claude Code expands it against its own environment
+  (`${VAR}` and `${VAR:-default}`), so no token lands in argv. Name the var in `requiredEnv`
+  so agedum copies it out of the env file and the launch fails loudly when it is missing.
+- Claude Code spawns a stdio server with the inherited environment plus the entry's own
+  `env`, which is applied last and wins. Inheritance is not guaranteed — it is suppressed by
+  `CLAUDE_CODE_MCP_ALLOWLIST_ENV` and under `CLAUDE_CODE_ENTRYPOINT=local-agent`, and even
+  the inheriting path scrubs `OTEL_*` / `INPUT_*` / `CLAUDE_BG_*` — so declare what the
+  server needs rather than relying on it.
 
 ## System-role fold proxy { #fold-proxy }
 
