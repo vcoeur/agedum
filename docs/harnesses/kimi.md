@@ -251,3 +251,11 @@ Entries use Kimi's MCP shape: stdio takes `command` (+ `args`, `env`, `cwd`); HT
 (+ `bearerTokenEnvVar` for a static token from the environment). `mcpServers` is independent of
 `baseUrl` — a launcher can inject MCP without generating a `config.toml`. Kimi also reads a
 project-root `.mcp.json` (Claude-compatible) on its own; agedum does not touch that file.
+
+**kimi is not part of the [canonical translation](../provider.md#mcp).** claude and opencode
+have their `mcpServers` block rewritten into their own dialects, including respelling
+`${VAR}` placeholders; kimi keeps the verbatim passthrough above. Kimi Code is not known to
+expand `${VAR}` in `mcp.json`, so rather than hand a server the literal string `${TOKEN}`,
+a placeholder in a kimi entry is a **fail-loud error** — use `bearerTokenEnvVar` for a
+remote token, or write the value literally. This is what stops a shared MCP base, extended
+onto a kimi launcher, from breaking silently.

@@ -74,6 +74,7 @@ env var; no file written):
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
 | `opencodeConfig.agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
+| `mcpServers` | MCP servers in the canonical cross-harness vocabulary, translated into opencode's `mcp` block — see [below](#mcp) |
 
 ### `providerDef` — declare the provider + key inline { #providerdef }
 
@@ -238,3 +239,44 @@ If asked to edit a sibling repo, hand off to the build agent — do not edit it 
   other harnesses draw their instructions from `AGENTS.md` (with the per-harness
   `AGENTS.<harness>.md` [overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope)),
   which is where a shared, non-agent-specific rule belongs.
+
+## MCP servers { #mcp }
+
+`mcpServers` is the [canonical cross-harness vocabulary](../provider.md#mcp), translated
+into opencode's own `mcp` block inside `OPENCODE_CONFIG_CONTENT`. opencode's dialect
+diverges from the canonical one in three ways, all handled by the translation:
+
+- `command` is a **single array** — the binary followed by its args.
+- the stdio environment key is **`environment`**, not `env`.
+- every entry carries an explicit `type` (`local` / `remote`) and `enabled: true`.
+
+```json
+"config": {
+  "mcpServers": {
+    "nodum":  { "command": "nodum", "args": ["mcp", "serve"],
+                "env": { "NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}" } },
+    "buffer": { "url": "https://mcp.buffer.com/mcp",
+                "headers": { "Authorization": "Bearer ${BUFFER_KEY}" } }
+  }
+}
+```
+
+becomes
+
+```json
+"mcp": {
+  "nodum":  { "type": "local", "command": ["nodum", "mcp", "serve"],
+              "environment": { "NODUM_AGENT_TOKEN": "{env:NODUM_AGENT_TOKEN}" }, "enabled": true },
+  "buffer": { "type": "remote", "url": "https://mcp.buffer.com/mcp",
+              "headers": { "Authorization": "Bearer {env:BUFFER_KEY}" }, "enabled": true }
+}
+```
+
+- **`${VAR}` is respelled to `{env:VAR}`**, opencode's own syntax, and never resolved — the
+  token stays out of `OPENCODE_CONFIG_CONTENT` and out of `--dry-run` output. opencode
+  expands it as `(config.env?.[VAR] ?? process.env[VAR]) || ""`, so name the var in
+  `requiredEnv`: an unset one silently becomes the empty string and surfaces much later as
+  an auth failure.
+- The block is merged **before** [`opencodeConfig`](#opencodeconfig), so a launcher can
+  still override a single server in opencode's own dialect (e.g. `{"mcp": {"nodum":
+  {"enabled": false}}}`) without abandoning the shared base it extends.

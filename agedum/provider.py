@@ -185,6 +185,9 @@ def load_merged_config(
     own keys applied last (child wins). A base may itself ``extends`` (recursive). The meta
     keys (``extends`` / ``abstract``) are stripped from the result. A circular ``extends``
     chain raises :class:`ProviderError`.
+
+    ``requiredEnv`` is the one key that **unions** rather than being overwritten — see
+    :func:`_merge_extends`.
     """
     providers = base_dir or providers_dir()
     resolved = path.resolve()
@@ -196,8 +199,28 @@ def load_merged_config(
     merged: dict = {}
     for ref in _extends_refs(raw):
         base = load_merged_config(resolve_config_path(ref, providers), providers, seen)
-        merged = _deep_merge(merged, base)
-    return _deep_merge(merged, _without_meta(raw))
+        merged = _merge_extends(merged, base)
+    return _merge_extends(merged, _without_meta(raw))
+
+
+def _merge_extends(base: dict, overlay: dict) -> dict:
+    """Deep-merge one ``extends`` step, unioning ``requiredEnv`` instead of replacing it.
+
+    A plain deep-merge replaces lists wholesale, which for ``requiredEnv`` silently *drops*
+    a base's requirement the moment the child declares one of its own — the child would
+    launch with the base's token unvalidated and unexported, and whatever the base
+    configured with it (an MCP server's `${VAR}`, a provider key) would fail at first use
+    rather than at launch. Requirements accumulate down an ``extends`` chain, so they are
+    unioned; base order first, child's additions appended, duplicates dropped.
+    """
+    merged = _deep_merge(base, overlay)
+    required = [
+        *(value for value in base.get("requiredEnv") or []),
+        *(value for value in overlay.get("requiredEnv") or []),
+    ]
+    if required:
+        merged["requiredEnv"] = list(dict.fromkeys(required))
+    return merged
 
 
 @dataclass(frozen=True)
@@ -525,12 +548,134 @@ def with_prompt(launch: Launch, rest: list[str], text: str, *, interactive: bool
 
 
 # ---------------------------------------------------------------------------
+# canonical `mcpServers` -> each harness's own MCP dialect
+# ---------------------------------------------------------------------------
+
+# The placeholder an `mcpServers` value uses for something that must come from the
+# environment at launch (an API token, a path). agedum **respells** it per harness and never
+# resolves it: resolving would bake the secret into argv (claude's --mcp-config) or into an
+# env var (opencode's config document), where --dry-run and the process list would show it.
+# Left as a placeholder, the value is expanded by the harness itself, out of the environment
+# `requiredEnv` populated from the agents .env.
+_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _mcp_servers(block: dict) -> dict:
+    """The config's canonical ``mcpServers`` map, validated; ``{}`` when absent.
+
+    An entry is either **stdio** — ``command`` plus optional ``args`` / ``env`` / ``cwd`` —
+    or **remote** — ``url`` plus optional ``headers`` / ``transport``. The two forms are
+    mutually exclusive, and each harness's emitter below translates them into its own
+    dialect. Values may carry ``${VAR}`` placeholders (see :data:`_ENV_PLACEHOLDER`).
+    """
+    servers = block.get("mcpServers")
+    if not servers:
+        return {}
+    if not isinstance(servers, dict):
+        raise ProviderError("`mcpServers` must be an object keyed by server name")
+    for name, entry in servers.items():
+        if not isinstance(entry, dict):
+            raise ProviderError(f"`mcpServers.{name}` must be an object")
+        command = str(entry.get("command") or "").strip()
+        url = str(entry.get("url") or "").strip()
+        if command and url:
+            raise ProviderError(
+                f"`mcpServers.{name}` sets both `command` and `url`; an entry is stdio or remote"
+            )
+        if not command and not url:
+            raise ProviderError(
+                f"`mcpServers.{name}` needs a `command` (stdio) or a `url` (remote)"
+            )
+        args = entry.get("args")
+        if args is not None and not isinstance(args, list):
+            raise ProviderError(f"`mcpServers.{name}.args` must be a list")
+    return servers
+
+
+def _rewrite_env_placeholders(value: object, respell) -> object:
+    """Recursively respell every ``${VAR}`` in ``value``'s strings via ``respell(var)``."""
+    if isinstance(value, str):
+        return _ENV_PLACEHOLDER.sub(lambda match: respell(match.group(1)), value)
+    if isinstance(value, dict):
+        return {key: _rewrite_env_placeholders(item, respell) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_env_placeholders(item, respell) for item in value]
+    return value
+
+
+def _claude_mcp_flags(block: dict) -> list[str]:
+    """Canonical ``mcpServers`` → claude's ``--mcp-config '<json>'`` flag pair (or ``[]``).
+
+    Claude Code's own stdio dialect *is* the canonical one (``command`` / ``args`` / ``env``
+    / ``cwd``), so those entries pass through untouched; a remote entry becomes
+    ``{type, url, headers}``. ``${VAR}`` is left verbatim — Claude Code expands it against
+    its own environment. ``--strict-mcp-config`` is deliberately not passed, so a
+    provider-declared server is *additive* to the user's own MCP configuration rather than
+    replacing it.
+    """
+    servers = _mcp_servers(block)
+    if not servers:
+        return []
+    document: dict = {}
+    for name, entry in servers.items():
+        url = str(entry.get("url") or "").strip()
+        if url:
+            transport = str(entry.get("transport") or "http").strip()
+            if transport not in ("http", "sse"):
+                raise ProviderError(
+                    f"`mcpServers.{name}.transport` must be http or sse, got {transport!r}"
+                )
+            server: dict = {"type": transport, "url": url}
+            if entry.get("headers"):
+                server["headers"] = entry["headers"]
+        else:
+            server = {"command": str(entry["command"]), "args": entry.get("args") or []}
+            for key in ("env", "cwd"):
+                if entry.get(key):
+                    server[key] = entry[key]
+        document[name] = server
+    return ["--mcp-config", json.dumps({"mcpServers": document}, sort_keys=True)]
+
+
+def _opencode_mcp_block(block: dict) -> dict:
+    """Canonical ``mcpServers`` → opencode's ``mcp`` config block (or ``{}``).
+
+    opencode's dialect diverges from the canonical one in three ways: ``command`` is a
+    single array (binary followed by its args), the stdio env key is ``environment``, and
+    every entry carries an explicit ``type`` and ``enabled``. ``${VAR}`` is respelled to
+    opencode's own ``{env:VAR}``, which it resolves from the process environment at load.
+    """
+    servers = _mcp_servers(block)
+    result: dict = {}
+    for name, entry in servers.items():
+        url = str(entry.get("url") or "").strip()
+        if url:
+            server: dict = {"type": "remote", "url": url, "enabled": True}
+            if entry.get("headers"):
+                server["headers"] = entry["headers"]
+        else:
+            args = [str(arg) for arg in entry.get("args") or []]
+            server = {
+                "type": "local",
+                "command": [str(entry["command"]), *args],
+                "enabled": True,
+            }
+            if entry.get("env"):
+                server["environment"] = entry["env"]
+            if entry.get("cwd"):
+                server["cwd"] = entry["cwd"]
+        result[name] = _rewrite_env_placeholders(server, lambda var: f"{{env:{var}}}")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # per-harness env/command builders -> (env_to_set, env_to_unset, base_command, config_files)
 # ---------------------------------------------------------------------------
 
 
 def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
+    command = ["claude", *_claude_mcp_flags(block)]
     if not base_url:
         # A proxy option without a baseUrl has nothing to sit in front of — fail loudly
         # rather than silently run vanilla Claude against the real Anthropic API.
@@ -540,7 +685,7 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
                 "baseUrl for it to proxy"
             )
         # Native Claude: no provider overrides (the all-empty config). Run bare.
-        return {}, [], ["claude"], ()
+        return {}, [], command, ()
     if not secret_env:
         raise ProviderError("claude config has a baseUrl but no secretEnv to supply the API token")
 
@@ -655,7 +800,7 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
             if value is not None:
                 env[str(name)] = str(value)
 
-    return env, unset, ["claude"], ()
+    return env, unset, command, ()
 
 
 # The provider name agedum assigns to a generated custom-endpoint kimi provider in the
@@ -907,6 +1052,17 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
     if mcp_servers:
         if not isinstance(mcp_servers, dict):
             raise ProviderError("kimi `mcpServers` must be an object keyed by server name")
+        # claude and opencode respell `${VAR}` into their own expansion syntax; Kimi Code is
+        # not known to expand anything in mcp.json, so the placeholder would reach the server
+        # as a literal. A shared MCP base extended by a kimi launcher must fail here rather
+        # than silently hand the server the string `${TOKEN}`.
+        for server_name, entry in mcp_servers.items():
+            if _ENV_PLACEHOLDER.search(json.dumps(entry)):
+                raise ProviderError(
+                    f"kimi `mcpServers.{server_name}` uses a `${{VAR}}` placeholder, which Kimi "
+                    "Code is not known to expand in mcp.json; use `bearerTokenEnvVar` for a "
+                    "remote token, or write the value literally"
+                )
         mcp_path = str(data_dir / "mcp.json")
         mcp_doc = _kimi_mcp_json(mcp_servers)
         config_files.append(
@@ -1820,6 +1976,12 @@ def _opencode_config_doc(block: dict) -> dict:
                 agents[name] = entry
     if agents:
         document["agent"] = agents
+
+    # Canonical `mcpServers`, translated into opencode's `mcp` dialect. Merged before the
+    # passthrough below, so an explicit `opencodeConfig.mcp` entry still wins on conflict.
+    mcp = _opencode_mcp_block(block)
+    if mcp:
+        document["mcp"] = mcp
 
     # `opencodeConfig` is a literal opencode config object, deep-merged into the
     # document last so it wins on conflict with the modeled keys — the escape hatch

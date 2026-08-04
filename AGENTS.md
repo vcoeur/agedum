@@ -228,7 +228,9 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   root** (`<providers_dir>/<ref>`, `.json` appended if absent), or absolute when it starts with
   `/`; nested paths are allowed (`agedum claude/deepseek.json`) and not-found is an error (no CWD
   fallback). A config may **`extends`** one or more bases (a string or list, same resolution):
-  bases are deep-merged left→right and the child applied last (recursive; cycles error). An
+  bases are deep-merged left→right and the child applied last (recursive; cycles error), except
+  **`requiredEnv`, which unions** down the chain — a plain list-replace would silently drop a
+  base's requirement the moment a child declared its own. An
   **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
   abstractness is not inherited. A config's **identity/label is its path** (the `name` field is
   gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
@@ -236,7 +238,14 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   virtual-FS launch as wrapper mode. The harness is read **from the config**; no `--harness` flag.
   `--dry-run` prints the resolved env (secrets masked), the injected virtual files, and the argv.
   An optional top-level `sandbox` field (`{readWrite: [...]}`) requests the same write-confinement
-  as wrapper `--sandbox`. This is the primary, user-facing entry.
+  as wrapper `--sandbox`. `config.mcpServers` is a **canonical cross-harness** key: one stdio
+  (`command`/`args`/`env`/`cwd`) or remote (`url`/`headers`/`transport`) vocabulary, translated
+  per harness — claude gets `--mcp-config '<json>'` (additive; never `--strict-mcp-config`),
+  opencode gets an `mcp` block merged **before** `opencodeConfig` so the passthrough still wins,
+  kimi keeps its older verbatim `mcp.json` passthrough. A `${VAR}` value is **respelled, never
+  resolved** (claude verbatim, opencode `{env:VAR}`), so no token reaches argv, the config
+  documents, or `--dry-run`; kimi rejects a placeholder outright since it is not known to expand
+  one. This is the primary, user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
   The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
   context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi` / `codex`);
