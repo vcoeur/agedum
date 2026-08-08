@@ -2167,6 +2167,27 @@ def _codex_mcp_overrides(block: dict) -> list[tuple[str, object]]:
     return overrides
 
 
+def _flatten_codex_config(codex_config: dict) -> list[tuple[str, object]]:
+    """Flatten a ``codexConfig`` table into dotted-key override pairs.
+
+    Nested tables become dotted keys (``sandbox_workspace_write.writable_roots``) — the
+    same dotted-key TOML shape the ``mcp_servers`` overrides use, so codex merges them
+    onto ``~/.codex/config.toml`` exactly like the written table.
+    """
+    overrides: list[tuple[str, object]] = []
+
+    def walk(prefix: str, value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                walk(f"{prefix}.{key}", item)
+        else:
+            overrides.append((prefix, value))
+
+    for key, value in codex_config.items():
+        walk(key, value)
+    return overrides
+
+
 def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # codex selects its model and provider from CLI flags, so an endpoint is passed via
     # repeatable `-c key=value` overrides (codex parses each value as TOML), winning over
@@ -2218,8 +2239,8 @@ def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
     if codex_config is not None:
         if not isinstance(codex_config, dict):
             raise ProviderError("codex config `codexConfig` must be a table of key → value")
-        for key, value in codex_config.items():
-            command += ["-c", f"{key}={_toml_scalar(value)}"]
+        for key, value in _flatten_codex_config(codex_config):
+            command += ["-c", f"{key}={_toml_config_value(value)}"]
 
     # Canonical `mcpServers`, translated into codex's config dialect as `-c mcp_servers.<name>…`
     # overrides — the same `-c` mechanism as the endpoint and codexConfig overrides above.

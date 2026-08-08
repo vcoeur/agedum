@@ -150,7 +150,9 @@ match); top-level skills keep their declared name.
   `base_url` override to the proxy address. The proxy surfaces a thinking model's streamed
   `delta.reasoning_content` (Kimi K2.7) as a Responses `reasoning` item so codex renders it.
   **`codexConfig`** is a table of arbitrary codex config keys → `-c key=<toml>` overrides (bool/int
-  bare, else quoted) — carries metadata codex can't learn from a translated endpoint, chiefly
+  bare, else quoted); nested tables flatten to dotted keys (e.g.
+  `sandbox_workspace_write.writable_roots`), the same shape the `mcpServers` translation emits —
+  carries metadata codex can't learn from a translated endpoint, chiefly
   `model_context_window` (context-meter denominator; the `/models` probe is answered empty) and
   `model_supports_reasoning_summaries` / `model_reasoning_summary` (enable reasoning rendering).
   **`mcpServers`** — the canonical cross-harness key now works for codex: each stdio/remote
