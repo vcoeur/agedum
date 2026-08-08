@@ -153,6 +153,10 @@ match); top-level skills keep their declared name.
   bare, else quoted) — carries metadata codex can't learn from a translated endpoint, chiefly
   `model_context_window` (context-meter denominator; the `/models` probe is answered empty) and
   `model_supports_reasoning_summaries` / `model_reasoning_summary` (enable reasoning rendering).
+  **`mcpServers`** — the canonical cross-harness key now works for codex: each stdio/remote
+  server is emitted as `-c mcp_servers.<name>…` dotted-key TOML overrides, merged onto
+  `~/.codex/config.toml`; `${VAR}` placeholders are rejected (codex is not known to expand them
+  in config values).
   **`codexModelCatalog`** (`{contextWindow, displayName?, description?}`) makes codex fully
   *recognise* a custom model: agedum runs `codex debug models`, clones its first entry (for
   version-correct `base_instructions`) as this `model`, writes `~/.codex/agedum-model-catalog.json`,
@@ -242,6 +246,7 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   (`command`/`args`/`env`/`cwd`) or remote (`url`/`headers`/`transport`) vocabulary, translated
   per harness — claude gets `--mcp-config '<json>'` (additive; never `--strict-mcp-config`),
   opencode gets an `mcp` block merged **before** `opencodeConfig` so the passthrough still wins,
+  codex gets `-c mcp_servers.<name>…` overrides (dotted-key TOML; `${VAR}` rejected),
   kimi keeps its older verbatim `mcp.json` passthrough. A `${VAR}` value is **respelled, never
   resolved** (claude verbatim, opencode `{env:VAR}`), so no token reaches argv, the config
   documents, or `--dry-run`; kimi rejects a placeholder outright since it is not known to expand

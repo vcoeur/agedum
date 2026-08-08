@@ -187,6 +187,31 @@ meter live.
     launch never fails on it. The generated catalog carries only the one custom model, so pair it
     with a launcher that pins `-m <model>` (the other bundled models aren't selectable under it).
 
+### MCP servers (`mcpServers`) { #mcp-servers }
+
+The canonical cross-harness `config.mcpServers` key works for codex too (agedum ≥ 0.50.0):
+codex reads its MCP servers from config, so each server is emitted as `-c mcp_servers.<name>…`
+dotted-key TOML overrides — `command` / `args` / `env.*` / `cwd` for a stdio entry,
+`url` / `headers` for a remote one — merged onto `~/.codex/config.toml` at launch, exactly
+like the endpoint `model_providers` overrides. A `${VAR}` placeholder is **rejected**: codex
+is not known to expand one in config values (the kimi precedent), and a literal token must
+never reach a `-c` arg.
+
+```json
+{
+  "harness": "codex",
+  "slug": "codex-context7",
+  "config": {
+    "mcpServers": {
+      "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"] }
+    }
+  }
+}
+```
+
+→ adds `-c mcp_servers.context7.command="npx" -c mcp_servers.context7.args=["-y",
+"@upstash/context7-mcp@latest"]` to the launch.
+
 ### Custom subagents (`subagentModel`, `codexAgents`, `codexProjectAgents`) { #subagent-routing }
 
 codex has **no global "route all subagents to a fast model" knob** (openai/codex#19482) and no
