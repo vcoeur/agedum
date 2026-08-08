@@ -2716,6 +2716,31 @@ def test_codex_config_passthrough_typed_scalars():
         assert command[command.index(token) - 1] == "-c"
 
 
+def test_codex_config_passthrough_nested_tables_flatten_to_dotted_keys():
+    # a nested codexConfig table (e.g. [sandbox_workspace_write]) becomes dotted-key
+    # -c overrides — the same shape the mcp_servers translation emits — with lists as
+    # TOML arrays and bools bare.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "config": {
+                "codexConfig": {
+                    "sandbox_mode": "workspace-write",
+                    "sandbox_workspace_write": {
+                        "writable_roots": ["/home/alice/src/worktrees"],
+                        "network_access": True,
+                    },
+                }
+            },
+        },
+        base_env={},
+    )
+    command = launch.command
+    assert 'sandbox_mode="workspace-write"' in command
+    assert 'sandbox_workspace_write.writable_roots=["/home/alice/src/worktrees"]' in command
+    assert "sandbox_workspace_write.network_access=true" in command
+
+
 def test_codex_config_rejects_non_table():
     with pytest.raises(ProviderError, match="codexConfig"):
         build_launch(
