@@ -2724,6 +2724,67 @@ def test_codex_config_rejects_non_table():
         )
 
 
+def test_codex_mcp_servers_stdio():
+    # canonical mcpServers -> `-c mcp_servers.<name>…` overrides: command quoted, args as a
+    # TOML array; each override preceded by its own -c.
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "config": {
+                "mcpServers": {
+                    "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+                }
+            },
+        },
+        base_env={},
+    )
+    command = launch.command
+    for token in (
+        'mcp_servers.context7.command="npx"',
+        'mcp_servers.context7.args=["-y", "@upstash/context7-mcp@latest"]',
+    ):
+        assert token in command
+        assert command[command.index(token) - 1] == "-c"
+
+
+def test_codex_mcp_servers_env_cwd_remote():
+    launch = build_launch(
+        {
+            "harness": "codex",
+            "config": {
+                "mcpServers": {
+                    "stdio": {"command": "my-mcp", "env": {"K": "v"}, "cwd": "/tmp"},
+                    "remote": {
+                        "url": "https://mcp.example.com/mcp",
+                        "headers": {"Authorization": "Bearer tok"},
+                    },
+                }
+            },
+        },
+        base_env={},
+    )
+    command = launch.command
+    for token in (
+        'mcp_servers.stdio.command="my-mcp"',
+        'mcp_servers.stdio.env.K="v"',
+        'mcp_servers.stdio.cwd="/tmp"',
+        'mcp_servers.remote.url="https://mcp.example.com/mcp"',
+        'mcp_servers.remote.headers={"Authorization" = "Bearer tok"}',
+    ):
+        assert token in command
+
+
+def test_codex_mcp_placeholder_rejected():
+    with pytest.raises(ProviderError, match=r"mcpServers\.ctx"):
+        build_launch(
+            {
+                "harness": "codex",
+                "config": {"mcpServers": {"ctx": {"command": "npx", "args": ["${TOKEN}"]}}},
+            },
+            base_env={},
+        )
+
+
 _FAKE_CATALOG = {
     "models": [
         {

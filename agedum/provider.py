@@ -1769,6 +1769,24 @@ def _toml_scalar(value: object) -> str:
     return f'"{_toml_escape(str(value))}"'
 
 
+def _toml_config_value(value: object) -> str:
+    """Render a config value for a codex ``-c key=<value>`` override: scalars via
+    :func:`_toml_scalar` (bool/int bare, else quoted), lists as TOML arrays, dicts as
+    inline tables."""
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_config_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{"
+            + ", ".join(
+                f'"{_toml_escape(str(key))}" = {_toml_config_value(item)}'
+                for key, item in value.items()
+            )
+            + "}"
+        )
+    return _toml_scalar(value)
+
+
 def _codex_debug_models() -> dict | None:
     """codex's resolved model catalog (``codex debug models``), or ``None`` if unavailable.
 
@@ -2107,6 +2125,48 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 CODEX_PROVIDER_NAME = "agedum"
 
 
+def _codex_mcp_overrides(block: dict) -> list[tuple[str, object]]:
+    """Canonical ``mcpServers`` → codex ``-c mcp_servers.<name>…`` override pairs.
+
+    codex reads its MCP servers from config (``[mcp_servers.<name>]`` tables), so each
+    server becomes one dotted-key override per field — ``command`` / ``args`` / ``env.*`` /
+    ``cwd`` for a stdio entry, ``url`` / ``headers`` for a remote one — merged onto
+    ``~/.codex/config.toml`` at launch, exactly like the endpoint ``model_providers``
+    overrides. ``${VAR}`` placeholders are rejected: codex is not known to expand them in
+    config values (the kimi precedent), and a literal token must never reach a ``-c`` arg.
+    """
+    servers = _mcp_servers(block)
+    overrides: list[tuple[str, object]] = []
+    for name, entry in servers.items():
+        if _ENV_PLACEHOLDER.search(json.dumps(entry)):
+            raise ProviderError(
+                f"codex `mcpServers.{name}` uses a `${{VAR}}` placeholder, which codex is "
+                "not known to expand in its config; write the value literally"
+            )
+        prefix = f"mcp_servers.{name}"
+        command = str(entry.get("command") or "").strip()
+        if command:
+            overrides.append((f"{prefix}.command", command))
+            args = entry.get("args") or []
+            if args:
+                overrides.append((f"{prefix}.args", [str(arg) for arg in args]))
+            env = entry.get("env") or {}
+            if not isinstance(env, dict):
+                raise ProviderError(f"`mcpServers.{name}.env` must be an object")
+            for key, value in env.items():
+                overrides.append((f"{prefix}.env.{key}", value))
+            if entry.get("cwd"):
+                overrides.append((f"{prefix}.cwd", entry["cwd"]))
+        else:
+            overrides.append((f"{prefix}.url", entry["url"]))
+            headers = entry.get("headers") or {}
+            if not isinstance(headers, dict):
+                raise ProviderError(f"`mcpServers.{name}.headers` must be an object")
+            if headers:
+                overrides.append((f"{prefix}.headers", dict(headers)))
+    return overrides
+
+
 def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     # codex selects its model and provider from CLI flags, so an endpoint is passed via
     # repeatable `-c key=value` overrides (codex parses each value as TOML), winning over
@@ -2160,6 +2220,11 @@ def _codex_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builde
             raise ProviderError("codex config `codexConfig` must be a table of key → value")
         for key, value in codex_config.items():
             command += ["-c", f"{key}={_toml_scalar(value)}"]
+
+    # Canonical `mcpServers`, translated into codex's config dialect as `-c mcp_servers.<name>…`
+    # overrides — the same `-c` mechanism as the endpoint and codexConfig overrides above.
+    for key, value in _codex_mcp_overrides(block):
+        command += ["-c", f"{key}={_toml_config_value(value)}"]
 
     # codex has no global "route subagents to a fast model" knob (openai/codex#19482) and no
     # inline agent config — custom agents are standalone TOML files under ~/.codex/agents/
