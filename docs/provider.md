@@ -194,8 +194,11 @@ requirement come along.
 An optional top-level `sandbox` block confines what the launched harness can **write**.
 Without it, the harness shares your whole filesystem read-write — the namespace isolates only
 *what the harness reads as config*, not where it can write. With it, the host is mounted
-**read-only** and the harness can write only to the **project root**, its own **state/config
-dir** (agedum knows each harness's dir — `~/.claude`, `~/.cline`, `~/.codex`, … — and always
+**read-only** and the harness can write only to the **launch directory** (the current dir —
+the working tree it was launched in; the walked-up project root is used for *finding* sources
+and injection targets, never as the writable grant, so a launch from a home subdir cannot
+mount the whole home writable), its own **state/config dir** (agedum knows each harness's dir —
+`~/.claude`, `~/.cline`, `~/.codex`, … — and always
 makes it writable so the harness can persist sessions/settings/auth), a private `/tmp`, and each
 path in **`readWrite`**:
 
@@ -212,11 +215,11 @@ path in **`readWrite`**:
 ```
 
 `readWrite` paths are templates resolved at launch: `~` → your home, `$VAR` → the
-environment, `${PROJECT_ROOT}` → the project root. An entry holding a shell glob
+environment, `${PROJECT_ROOT}` → the launch directory. An entry holding a shell glob
 (`*`, `?`, `[…]`) is expanded against the filesystem and every existing match is added — so
 `~/src/*` makes each immediate subdirectory of `~/src` writable (the `~/src` dir itself is not
-bound, and an unmatched glob adds nothing). A path already inside the project root is
-redundant (the project root is always writable) and folded in. An empty `"sandbox": {}` still
+bound, and an unmatched glob adds nothing). A path already inside the launch directory is
+redundant (the launch dir is always writable) and folded in. An empty `"sandbox": {}` still
 confines — only the always-writable set applies. This is the provider-mode equivalent of
 wrapper mode's [`--sandbox` / `--rw-dir`](wrapper.md#sandbox); `agedum <name> --dry-run` lists
 the resulting writable set under a `sandbox · write-confinement` heading. It confines the

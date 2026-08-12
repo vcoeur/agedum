@@ -465,9 +465,7 @@ def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]
         dir_targets = {target for src, target in plan.binds if src.is_dir()}
         # Resolve the writable set while the compiled sources still exist (rmtree below).
         sandbox_roots = (
-            writable_roots(plan, sandbox, project.root)
-            if sandbox is not None and sandbox.enabled
-            else None
+            writable_roots(plan, sandbox) if sandbox is not None and sandbox.enabled else None
         )
     finally:
         shutil.rmtree(dest, ignore_errors=True)
