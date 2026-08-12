@@ -57,7 +57,8 @@ def _effective_binds(plan: Plan) -> list[tuple[Path, Path]]:
 def _resolve_rw(raw: str, project_root: Path) -> list[Path]:
     """Resolve a sandbox ``read_write`` template to absolute paths.
 
-    Expands ``${PROJECT_ROOT}`` to the project root, ``$VAR`` from the environment, and a
+    Expands ``${PROJECT_ROOT}`` to the root passed in (in sandbox context the launch
+    directory — see :func:`writable_roots`), ``$VAR`` from the environment, and a
     leading ``~`` to the home dir. If the result holds a shell glob metacharacter
     (``*`` / ``?`` / ``[``) it is expanded against the filesystem and **every existing match**
     is returned, sorted (``~/src/*`` → each immediate child of ``~/src``); an unmatched glob
@@ -81,14 +82,13 @@ def _nearest_existing_dir(path: Path) -> Path:
     return current
 
 
-def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Path]:
+def writable_roots(plan: Plan, sandbox: Sandbox) -> list[Path]:
     """The directories a write-confinement launch mounts read-write.
 
     The union of four sources, de-duplicated with descendants dropped (a parent bind
     already makes them writable):
 
-    * the **project root** — the agent's working tree, and where project-scope files are
-      injected;
+    * the **launch directory** — the harness's working tree, where the agent works;
     * the **nearest existing ancestor of every injected file** — so bwrap can create the
       mount point (it cannot on a read-only parent);
     * the **harness's own state/config dir(s)** (``plan.writable_dirs``) — so it can persist
@@ -98,14 +98,23 @@ def writable_roots(plan: Plan, sandbox: Sandbox, project_root: Path) -> list[Pat
     * each ``sandbox.read_write`` entry, resolved (and glob-expanded) to zero or more paths —
       extra data the agent may modify.
 
+    The root grant is the **current working directory**, never the walked-up project root
+    (the nearest ancestor holding ``AGENTS.md``/``.agents``/``.git``, which is still used to
+    locate sources and injection targets). The walk can land on ``$HOME`` — home is never a
+    project, yet ``~/.agents`` or ``~/.git`` match it — and a home-rooted grant would mount
+    the **whole home** writable. The launch dir is where the harness actually works; broader
+    grants (``~/src/*``, …) ride the ``readWrite`` templates, and ``${PROJECT_ROOT}`` in a
+    template likewise expands to the launch dir.
+
     ``/tmp`` is writable separately (a private tmpfs), not via this list.
     """
-    roots: list[Path] = [project_root]
+    cwd = Path.cwd().resolve()
+    roots: list[Path] = [cwd]
     for _, target in _effective_binds(plan):
         roots.append(_nearest_existing_dir(target.parent))
     roots += plan.writable_dirs
     for raw in sandbox.read_write:
-        roots += _resolve_rw(raw, project_root)
+        roots += _resolve_rw(raw, cwd)
     return _dedupe_roots(roots)
 
 
@@ -124,7 +133,6 @@ def build_bwrap_argv(
     command: list[str],
     *,
     sandbox: Sandbox | None = None,
-    project_root: Path | None = None,
 ) -> list[str]:
     """Compose the ``bwrap`` argv: bind each compiled tree at its absolute target.
 
@@ -134,21 +142,18 @@ def build_bwrap_argv(
     (write-confinement) the host is bound **read-only**, only :func:`writable_roots` (plus a
     private ``/tmp``) are writable, and ``--dev`` / ``--proc`` supply the device and process
     mounts a read-only root would otherwise lack — so the harness cannot modify files
-    outside its working set. ``project_root`` is required when a sandbox is enabled (it seeds
-    the writable set and resolves ``${PROJECT_ROOT}``).
+    outside its working set (the launch dir + declared grants).
 
     Directory binds are overlaid per-child (see :func:`_effective_binds`) so a skills bind
     adds agedum's skills without erasing hand-authored ones already in the target dir.
     ``safe_overrides`` are tmpfs-shadowed — an empty mount hides the real path without
     touching disk."""
     if sandbox is not None and sandbox.enabled:
-        if project_root is None:
-            raise LauncherError("a sandbox launch requires the project root")
         argv = [
             "bwrap", "--ro-bind", "/", "/",
             "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
         ]  # fmt: skip
-        for writable in writable_roots(plan, sandbox, project_root):
+        for writable in writable_roots(plan, sandbox):
             argv += ["--bind", str(writable), str(writable)]
     else:
         argv = ["bwrap", "--dev-bind", "/", "/"]
@@ -254,9 +259,7 @@ def run_virtualfs(
     assert_safe(project_root, plan)
     if sandbox is not None and sandbox.enabled:
         _ensure_writable_dirs(plan)
-    argv = build_bwrap_argv(
-        plan, [*command, *plan.extra_args], sandbox=sandbox, project_root=project_root
-    )
+    argv = build_bwrap_argv(plan, [*command, *plan.extra_args], sandbox=sandbox)
     candidates = _cleanup_candidates(plan)
     pre_existing = {p: p.exists() for p in candidates}
     stdin = subprocess.DEVNULL if close_stdin else None

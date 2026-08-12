@@ -98,7 +98,9 @@ namespace isolates only *what the harness reads as config*, not where it can wri
 `--sandbox` to switch to **write-confinement**: the host is mounted **read-only**, and the
 command can write only to
 
-- the **project root** — the working tree it was launched in;
+- the **launch directory** — the current dir it was launched in (the walked-up project root
+  still locates sources and injection targets, but is never the writable grant, so launching
+  from a dir under `$HOME` with no closer project cannot mount the whole home writable);
 - the **harness's own state/config dir** — so it can persist sessions, settings, and auth
   (e.g. `~/.claude` for Claude Code, `~/.cline` for Cline, `~/.codex` for Codex); agedum knows
   each harness's dir and grants it write access (creating it if missing), whether or not the
@@ -113,13 +115,13 @@ Everything else on the host stays readable but cannot be modified, so an autonom
 cannot alter or delete files outside its working set.
 
 ```bash
-agedum --wrapper claude --sandbox -- claude -p "…"            # confine writes to the project
+agedum --wrapper claude --sandbox -- claude -p "…"            # confine writes to the launch dir
 agedum --wrapper claude --rw-dir ~/scratch -- claude -p "…"   # + a writable scratch dir
 ```
 
 `--dry-run` prints the resolved writable set under a `sandbox · write-confinement` heading,
 so you can see exactly what the command will be able to write before launching. A `--rw-dir`
-that already lives inside the project root is folded in — a parent bind covers it.
+that already lives inside the launch directory is folded in — a parent bind covers it.
 
 This confines the **filesystem** only: the network is untouched, so the harness still reaches
 its model endpoint. Like all of wrapper mode it is Linux-only and relies on `bwrap`.

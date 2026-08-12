@@ -273,39 +273,44 @@ def test_run_virtualfs_stdin_handling(monkeypatch, tmp_path):
 # --- write-confinement sandbox ---
 
 
-def test_build_bwrap_argv_default_is_full_read_write(tmp_path):
+def test_build_bwrap_argv_default_is_full_read_write():
     # No sandbox (or a disabled one) keeps the legacy full read-write host bind.
     plan = Plan()
-    argv = build_bwrap_argv(plan, ["claude"], sandbox=Sandbox(enabled=False), project_root=tmp_path)
+    argv = build_bwrap_argv(plan, ["claude"], sandbox=Sandbox(enabled=False))
     assert argv[:4] == ["bwrap", "--dev-bind", "/", "/"]
     assert "--bind" not in argv
 
 
-def test_build_bwrap_argv_sandbox_confines(tmp_path):
-    plan = Plan(binds=[(tmp_path / "c.md", tmp_path / "CLAUDE.md")])
+def test_build_bwrap_argv_sandbox_confines(tmp_path, monkeypatch):
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+    # A global-scope injection: its nearest existing ancestor (home/.claude) is writable so the
+    # ro-bind can land — independent of the launch-dir grant.
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    plan = Plan(binds=[(tmp_path / "c.md", home / ".claude" / "CLAUDE.md")])
     sandbox = Sandbox(enabled=True, read_write=("/var/data",))
-    argv = build_bwrap_argv(plan, ["claude"], sandbox=sandbox, project_root=tmp_path)
+    argv = build_bwrap_argv(plan, ["claude"], sandbox=sandbox)
     # Host read-only, with device / process / scratch mounts a read-only root lacks.
     assert argv[:10] == [
         "bwrap", "--ro-bind", "/", "/",
         "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
     ]  # fmt: skip
     writable = _binds(argv, "--bind")
-    assert (str(tmp_path), str(tmp_path)) in writable  # project root writable
+    assert (str(launch), str(launch)) in writable  # launch dir writable
     assert ("/var/data", "/var/data") in writable  # declared rw path writable
-    # The compiled file is still injected read-only, over the now-writable project root.
-    assert (str(tmp_path / "c.md"), str(tmp_path / "CLAUDE.md")) in _binds(argv, "--ro-bind")
+    # The compiled file is still injected read-only over its writable parent.
+    assert (str(tmp_path / "c.md"), str(home / ".claude" / "CLAUDE.md")) in _binds(
+        argv, "--ro-bind"
+    )
     assert argv[-2:] == ["--", "claude"]
 
 
-def test_build_bwrap_argv_sandbox_requires_project_root():
-    with pytest.raises(LauncherError):
-        build_bwrap_argv(Plan(), ["x"], sandbox=Sandbox(enabled=True), project_root=None)
-
-
-def test_writable_roots_unions_project_injection_parents_and_rw(tmp_path):
+def test_writable_roots_unions_launch_dir_injection_parents_and_rw(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
+    monkeypatch.chdir(proj)
     # A global-scope injection (e.g. ~/.claude/CLAUDE.md) lives outside the project: its
     # nearest existing ancestor must be writable so bwrap can create the mount point and the
     # harness can persist its own state.
@@ -313,16 +318,17 @@ def test_writable_roots_unions_project_injection_parents_and_rw(tmp_path):
     (home / ".claude").mkdir(parents=True)
     plan = Plan(binds=[(tmp_path / "g.md", home / ".claude" / "CLAUDE.md")])
     sandbox = Sandbox(enabled=True, read_write=("/data",))
-    roots = writable_roots(plan, sandbox, proj)
-    assert proj in roots
+    roots = writable_roots(plan, sandbox)
+    assert proj in roots  # the launch dir is always writable
     assert home / ".claude" in roots
     assert Path("/data") in roots
 
 
-def test_writable_roots_drops_paths_nested_under_the_project(tmp_path):
-    # A read_write path inside the project root is redundant — the project root bind covers it.
+def test_writable_roots_drops_paths_nested_under_the_launch_dir(tmp_path, monkeypatch):
+    # A read_write path inside the launch dir is redundant — the launch-dir bind covers it.
+    monkeypatch.chdir(tmp_path)
     sandbox = Sandbox(enabled=True, read_write=("${PROJECT_ROOT}/out", "/elsewhere"))
-    roots = writable_roots(Plan(), sandbox, tmp_path)
+    roots = writable_roots(Plan(), sandbox)
     assert tmp_path in roots
     assert tmp_path / "out" not in roots
     assert Path("/elsewhere") in roots
@@ -331,13 +337,11 @@ def test_writable_roots_drops_paths_nested_under_the_project(tmp_path):
 def test_writable_roots_expands_glob_read_write(tmp_path):
     # A glob read_write entry makes every matching child writable (e.g. `~/src/*` → each repo
     # under ~/src), without binding the glob parent itself.
-    proj = tmp_path / "proj"
-    proj.mkdir()
     src = tmp_path / "src"
     (src / "one").mkdir(parents=True)
     (src / "two").mkdir()
     sandbox = Sandbox(enabled=True, read_write=(str(src / "*"),))
-    roots = writable_roots(Plan(), sandbox, proj)
+    roots = writable_roots(Plan(), sandbox)
     assert src / "one" in roots
     assert src / "two" in roots
     assert src not in roots
@@ -346,25 +350,37 @@ def test_writable_roots_expands_glob_read_write(tmp_path):
 def test_writable_roots_includes_harness_state_dirs(tmp_path):
     # A harness's own state dir (Plan.writable_dirs) is writable even with no bind landing under
     # it and no matching read_write entry — this is what keeps ~/.cline/data writable for Cline.
-    proj = tmp_path / "proj"
-    proj.mkdir()
     state = tmp_path / "home" / ".cline"
     sandbox = Sandbox(enabled=True, read_write=())
-    roots = writable_roots(Plan(writable_dirs=[state]), sandbox, proj)
+    roots = writable_roots(Plan(writable_dirs=[state]), sandbox)
     assert state in roots
 
 
 def test_writable_roots_drops_state_dir_under_a_broader_rw_grant(tmp_path):
     # A harness config dir nested under a config-granted parent (e.g. ~/.config/opencode under a
     # readWrite ~/.config) is redundant and folded out — the parent bind already covers it.
-    proj = tmp_path / "proj"
-    proj.mkdir()
     config = tmp_path / "home" / ".config"
     opencode = config / "opencode"
     sandbox = Sandbox(enabled=True, read_write=(str(config),))
-    roots = writable_roots(Plan(writable_dirs=[opencode]), sandbox, proj)
+    roots = writable_roots(Plan(writable_dirs=[opencode]), sandbox)
     assert config in roots
     assert opencode not in roots
+
+
+def test_writable_roots_never_grants_home_when_ancestor_walk_lands_there(tmp_path, monkeypatch):
+    # The $HOME regression: launched from a dir under home with no closer marker, the ancestor
+    # walk resolves $HOME as the project root (home holds ~/.agents / ~/.git) — which used to
+    # mount the whole home writable. The sandbox writable set must confine to the launch dir
+    # and never include home itself.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".agents").mkdir()  # makes $HOME match find_project_root
+    cwd = tmp_path / "Documents" / "Sante"
+    cwd.mkdir(parents=True)
+    monkeypatch.chdir(cwd)
+    sandbox = Sandbox(enabled=True, read_write=())
+    roots = writable_roots(Plan(), sandbox)
+    assert cwd in roots
+    assert tmp_path not in roots  # home itself never writable
 
 
 def test_ensure_writable_dirs_creates_missing(tmp_path):
@@ -398,17 +414,19 @@ def test_resolve_rw_expands_globs(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
-def test_virtualfs_sandbox_confines_writes(tmp_path):
-    # The decisive behaviour: writes land inside the working set and nowhere else.
+def test_virtualfs_sandbox_confines_writes(tmp_path, monkeypatch):
+    # The decisive behaviour: writes land inside the working set and nowhere else. The working
+    # set is the launch dir (the cwd), not the walked-up project root.
     proj = tmp_path / "proj"
     proj.mkdir()
+    monkeypatch.chdir(proj)
     outside = tmp_path / "outside"
     outside.mkdir()
     sandbox = Sandbox(enabled=True)
 
     rc_in = run_virtualfs(proj, Plan(), ["touch", str(proj / "inside.txt")], sandbox=sandbox)
     assert rc_in == 0
-    assert (proj / "inside.txt").exists()  # the in-project write reached the host
+    assert (proj / "inside.txt").exists()  # the in-launch-dir write reached the host
 
     rc_out = run_virtualfs(proj, Plan(), ["touch", str(outside / "leak.txt")], sandbox=sandbox)
     assert rc_out != 0
