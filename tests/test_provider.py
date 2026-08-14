@@ -1165,6 +1165,35 @@ def test_opencode_config_passthrough_rejects_non_object():
         )
 
 
+def test_opencode_permission_key_order_is_preserved():
+    # opencode evaluates a permission map in key insertion order and keeps the LAST
+    # matching rule, so a trailing guard is what bounds a permissive prefix glob.
+    # Serializing the doc sorted moved every `*…` guard ahead of the alphabetic allows
+    # and inverted the outcome: `git log … | sh` matched `git log*` last and was allowed.
+    authored = {
+        "*": "deny",
+        "git log*": "allow",
+        "condash projects list*": "allow",
+        "*|*": "deny",
+        "*;*": "deny",
+    }
+    launch = build_launch(
+        {
+            "harness": "opencode",
+            "config": {
+                "opencodeConfig": {"agent": {"explorer": {"permission": {"bash": authored}}}}
+            },
+        },
+        base_env={},
+    )
+    emitted = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    keys = list(emitted["agent"]["explorer"]["permission"]["bash"])
+    assert keys == list(authored)
+    # The guards must land after the allow they exist to override, or they never win.
+    assert keys.index("*|*") > keys.index("git log*")
+    assert keys != sorted(authored)
+
+
 def _opencode_agents(config):
     """Build an opencode launch and return its config doc's `agent` block."""
     launch = build_launch({"harness": "opencode", "config": config}, base_env={})

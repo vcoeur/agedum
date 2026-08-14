@@ -183,6 +183,27 @@ hatch you need for opencode: the modeled keys cover the common cases tersely and
 consistent with the other harnesses, and anything else is written in opencode's own format
 here.
 
+**Key order is preserved.** opencode evaluates a `permission` map in key order and keeps
+the **last** matching rule, so order carries meaning — a trailing guard is what bounds a
+permissive prefix glob:
+
+```json
+{
+  "bash": {
+    "*": "deny",
+    "git log*": "allow",
+    "*|*": "deny"
+  }
+}
+```
+
+Here `git log --oneline | sh` matches `git log*` and then `*|*`, and the deny wins because
+it is last. agedum emits the document in authored order — including across an `extends`
+chain, where a base's keys keep their position and a child's additions append after them,
+so a child override is evaluated last. Until v0.53.0 the document was serialized with
+sorted keys, which moved every `*…` guard ahead of the alphabetic allow-list and inverted
+exactly this case.
+
 ### `agentAppend` — per-agent instruction append { #agentappend }
 
 An agent's narrative `prompt` describes its role. Some rules are neither role description
