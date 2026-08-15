@@ -420,9 +420,14 @@ def _redact(text: str, secret_values: list[str]) -> str:
 
 
 def _pretty_json(text: str) -> str:
-    """Re-render a compact JSON string indented; pass it through unchanged if unparseable."""
+    """Re-render a compact JSON string indented; pass it through unchanged if unparseable.
+
+    Key order is preserved so a dry-run shows the order the harness will actually read —
+    an opencode permission map is evaluated in key order, so sorting the display would
+    hide the very thing a reviewer inspects a dry-run to check.
+    """
     try:
-        return json.dumps(json.loads(text), indent=2, sort_keys=True)
+        return json.dumps(json.loads(text), indent=2)
     except json.JSONDecodeError:
         return text
 

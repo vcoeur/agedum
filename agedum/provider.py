@@ -1086,7 +1086,13 @@ def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Bui
     for provider_def in _provider_defs(block.get("providerDef")):
         document = _apply_provider_def(document, provider_def, base_env)
     if document:
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document, sort_keys=True)
+        # Key order is semantic, never cosmetic: opencode evaluates a permission map in
+        # config key insertion order and keeps the *last* matching rule, so the shipped
+        # `{"*": "deny", "git log*": "allow", …, "*|*": "deny"}` shape relies on its
+        # trailing guards being read after the allow-list. Sorting the keys here moved
+        # every `*…` guard ahead of the alphabetic allows and silently inverted that —
+        # `git log … | sh` matched the allow last and was permitted. Emit authored order.
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document)
     return env, [], ["opencode"], ()
 
 

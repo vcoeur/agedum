@@ -224,6 +224,12 @@ are documented there — keep `docs/` in sync when the source layout or a compil
   is a no-op success, not a "File already exists" failure.
 - `.github/workflows/docs.yml` — on push to `main` touching `docs/**` or `mkdocs.yml`,
   build the site with `mkdocs build --strict` and deploy to GitHub Pages.
+- **The `[build-system]` backends are pinned on purpose — don't float them.** `uv.lock`
+  does not lock build backends, so an unpinned `hatchling` resolves to whatever is newest
+  at build time, and the wheel's `Metadata-Version` can change without any source change
+  (1.31.0 → 2.4, 1.32.0 → 2.5). A publish validator that predates 2.5 then rejects the
+  upload *after* every other gate has passed, so the failure only ever surfaces at tag
+  time. Verify with `uv build` + reading the wheel's `METADATA` before tagging.
 
 ## CLI contract
 
