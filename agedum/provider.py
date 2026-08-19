@@ -241,6 +241,22 @@ class ProviderSummary:
     error: str | None = None
 
 
+def _summary_model(block: dict) -> str:
+    """The model to show for one config in the ``--providers`` roster.
+
+    ``config.model`` is the usual home, but a native claude launcher has no endpoint for the
+    model env to attach to and pins its default through ``config.settings`` instead — so fall
+    back to that, or the roster reports the launcher as model-less.
+    """
+    model = str(block.get("model") or "").strip()
+    if model:
+        return model
+    settings = block.get("settings")
+    if isinstance(settings, dict):
+        return str(settings.get("model") or "").strip()
+    return ""
+
+
 def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
     """Summarise every launchable provider config under ``directory`` (default:
     :func:`providers_dir`), recursively, sorted by name.
@@ -271,7 +287,7 @@ def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
             continue
         harness = config.get("harness")
         block = config.get("config")
-        model = str(block.get("model") or "").strip() if isinstance(block, dict) else ""
+        model = _summary_model(block) if isinstance(block, dict) else ""
         summaries.append(
             ProviderSummary(
                 name,
@@ -637,6 +653,26 @@ def _claude_mcp_flags(block: dict) -> list[str]:
     return ["--mcp-config", json.dumps({"mcpServers": document}, sort_keys=True)]
 
 
+def _claude_settings_flags(block: dict) -> list[str]:
+    """``settings`` → claude's ``--settings '<json>'`` flag pair (or ``[]``).
+
+    Claude Code takes a settings **JSON string** on the command line, exactly as it does for
+    ``--mcp-config``, so nothing is written to disk. The document is an *additional* settings
+    layer that wins over the user's own ``settings.json`` key-by-key rather than replacing it
+    — which is what makes it the right home for a per-launcher default ``model``: the launcher
+    pins the model while the user layer's permissions, hooks and statusline still apply.
+    ``${VAR}`` is left verbatim, as with ``--mcp-config`` — Claude Code expands it itself.
+    """
+    settings = block.get("settings")
+    if settings is None:
+        return []
+    if not isinstance(settings, dict):
+        raise ProviderError("`settings` must be a JSON object")
+    if not settings:
+        return []
+    return ["--settings", json.dumps(settings, sort_keys=True)]
+
+
 def _opencode_mcp_block(block: dict) -> dict:
     """Canonical ``mcpServers`` → opencode's ``mcp`` config block (or ``{}``).
 
@@ -675,7 +711,7 @@ def _opencode_mcp_block(block: dict) -> dict:
 
 def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
     base_url = str(block.get("baseUrl") or "").strip()
-    command = ["claude", *_claude_mcp_flags(block)]
+    command = ["claude", *_claude_mcp_flags(block), *_claude_settings_flags(block)]
     if not base_url:
         # A proxy option without a baseUrl has nothing to sit in front of — fail loudly
         # rather than silently run vanilla Claude against the real Anthropic API.
@@ -684,7 +720,8 @@ def _claude_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Build
                 "claude config sets a proxy option (foldSystemMessages / upstreamApi) but no "
                 "baseUrl for it to proxy"
             )
-        # Native Claude: no provider overrides (the all-empty config). Run bare.
+        # Native Claude: no endpoint/auth/model env to set. The --mcp-config and --settings
+        # flags built above still ride along — they are config, not provider overrides.
         return {}, [], command, ()
     if not secret_env:
         raise ProviderError("claude config has a baseUrl but no secretEnv to supply the API token")

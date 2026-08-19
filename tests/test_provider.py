@@ -127,6 +127,26 @@ def test_list_providers_summarises_name_harness_model(tmp_path):
     ]
 
 
+def test_list_providers_falls_back_to_the_settings_model(tmp_path):
+    # A native claude launcher pins its model through config.settings; without the fallback
+    # the roster would report it as model-less.
+    (tmp_path / "opus.json").write_text(
+        json.dumps({"harness": "claude", "config": {"settings": {"model": "opus"}}})
+    )
+    (summary,) = list_providers(tmp_path)
+    assert summary.model == "opus"
+
+
+def test_list_providers_prefers_config_model_over_the_settings_model(tmp_path):
+    (tmp_path / "x.json").write_text(
+        json.dumps(
+            {"harness": "claude", "config": {"model": "env-model", "settings": {"model": "opus"}}}
+        )
+    )
+    (summary,) = list_providers(tmp_path)
+    assert summary.model == "env-model"
+
+
 def test_list_providers_sorted_by_name(tmp_path):
     for name in ("zeta", "alpha", "mid"):
         (tmp_path / f"{name}.json").write_text(json.dumps({"harness": "kimi"}))
@@ -637,6 +657,80 @@ def test_opencode_mcp_passthrough_wins_over_the_canonical_block():
     payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
     assert payload["mcp"]["nodum"]["enabled"] is False
     assert payload["mcp"]["nodum"]["command"] == ["nodum", "mcp", "serve"]
+
+
+# --- claude settings layer ---
+
+
+def _claude_settings_document(launch):
+    """The `--settings` payload claude was launched with."""
+    assert "--settings" in launch.command
+    return json.loads(launch.command[launch.command.index("--settings") + 1])
+
+
+def test_claude_settings_becomes_a_settings_flag():
+    # Claude Code takes a JSON string, so nothing is written to disk — and the layer is
+    # additive, so a launcher pins `model` without disturbing the user's own settings.json.
+    launch = build_launch(
+        {"harness": "claude", "config": {"settings": {"model": "fable"}}},
+        base_env={},
+    )
+    assert launch.command[0] == "claude"
+    assert _claude_settings_document(launch) == {"model": "fable"}
+
+
+def test_claude_settings_reaches_a_bare_native_launch():
+    # The no-baseUrl path returns early; the settings layer must survive it — a native
+    # launcher pinning its default model is the whole reason the key exists.
+    launch = build_launch(
+        {"harness": "claude", "config": {"settings": {"model": "opus"}}},
+        base_env={},
+    )
+    assert launch.env == {}
+    assert _claude_settings_document(launch) == {"model": "opus"}
+
+
+def test_claude_settings_rides_alongside_mcp_config():
+    launch = build_launch(
+        {
+            "harness": "claude",
+            "config": {
+                "mcpServers": {"nodum": {"command": "nodum", "args": ["mcp", "serve"]}},
+                "settings": {"model": "fable"},
+            },
+        },
+        base_env={},
+    )
+    assert _claude_mcp_document(launch)["mcpServers"]["nodum"]["command"] == "nodum"
+    assert _claude_settings_document(launch) == {"model": "fable"}
+
+
+def test_claude_settings_leaves_env_placeholders_verbatim():
+    # Same contract as --mcp-config: Claude Code expands ${VAR} against its own environment,
+    # so no secret is baked into argv.
+    launch = build_launch(
+        {"harness": "claude", "config": {"settings": {"apiKeyHelper": "echo ${TOKEN}"}}},
+        base_env={},
+    )
+    assert _claude_settings_document(launch) == {"apiKeyHelper": "echo ${TOKEN}"}
+
+
+def test_claude_without_settings_adds_no_flag():
+    launch = build_launch({"harness": "claude", "config": {}}, base_env={})
+    assert launch.command == ["claude"]
+
+
+def test_claude_empty_settings_adds_no_flag():
+    launch = build_launch({"harness": "claude", "config": {"settings": {}}}, base_env={})
+    assert launch.command == ["claude"]
+
+
+def test_claude_settings_rejects_a_non_object():
+    with pytest.raises(ProviderError, match="settings"):
+        build_launch(
+            {"harness": "claude", "config": {"settings": '{"model": "fable"}'}},
+            base_env={},
+        )
 
 
 # --- kimi env/command mapping ---

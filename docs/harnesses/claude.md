@@ -88,8 +88,11 @@ run `claude`; a provider is only for overriding the endpoint/model/auth.
 }
 ```
 
-When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise the
-`config` block maps to environment variables:
+When `baseUrl` is empty the harness sets no provider **environment** — a native launch keeps
+Claude Code's own endpoint, auth and model resolution. The two flag-shaped keys, `mcpServers`
+and `settings`, are still applied: they are configuration, not provider overrides, and a
+native launcher is exactly where they earn their keep. Otherwise the `config` block maps to
+environment variables:
 
 | `config` key | Set as |
 |---|---|
@@ -114,6 +117,7 @@ When `baseUrl` is empty the harness runs bare (no provider overrides). Otherwise
 | `autoCompactWindow` (> 0) | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
 | `extraEnv` (object) | arbitrary env for the claude child, stringified + applied last (escape hatch, e.g. `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `DISABLE_COMPACT`) |
 | `mcpServers` (object) | MCP servers, in the canonical cross-harness vocabulary — see [below](#mcp) |
+| `settings` (object) | an additional Claude Code settings layer — see [below](#settings) |
 
 - `secretEnv` (mapped to the auth token) must be present in the [env file](../provider.md#the-env-file);
   `baseUrl` without a `secretEnv` is an error.
@@ -160,6 +164,42 @@ entry becomes `{type, url, headers}`. The document is appended to the command as
   `CLAUDE_CODE_MCP_ALLOWLIST_ENV` and under `CLAUDE_CODE_ENTRYPOINT=local-agent`, and even
   the inheriting path scrubs `OTEL_*` / `INPUT_*` / `CLAUDE_BG_*` — so declare what the
   server needs rather than relying on it.
+
+## Settings layer { #settings }
+
+`settings` is a Claude Code settings document appended to the command as
+`--settings '<json>'`. Like `--mcp-config`, the flag takes a JSON **string**, so nothing is
+written to disk.
+
+```json
+"config": {
+  "settings": { "model": "opus" }
+}
+```
+
+- **Additive, and it wins.** The document is an extra settings layer merged over the user's
+  own `settings.json` key-by-key — it does not replace it. A launcher can therefore pin one
+  key while the user's permissions, hooks and statusline still apply.
+- **This is how a native launcher pins its default model.** The `model` env mapping in the
+  table above needs a `baseUrl`; a native launch has none, so `config.model` would be
+  ignored. `settings: {"model": "opus"}` is the supported way to say "this launcher is Opus"
+  — see the two-launcher pattern below.
+- **`${VAR}` is left verbatim**, as with `--mcp-config` — Claude Code expands it against its
+  own environment, so no token lands in argv.
+- **`--providers` reads it too.** The roster's model column falls back to `settings.model`
+  when `config.model` is absent, so a native launcher lists the model it actually opens on.
+
+Two launchers differing only in default model, sharing everything else through a base:
+
+```json
+// providers/claude/opus.json
+{ "extends": "base/mcp-nodum.json", "harness": "claude", "favorite": true,
+  "config": { "settings": { "model": "opus" } } }
+
+// providers/claude/fable.json
+{ "extends": "base/mcp-nodum.json", "harness": "claude", "favorite": true,
+  "config": { "settings": { "model": "fable" } } }
+```
 
 ## System-role fold proxy { #fold-proxy }
 

@@ -258,7 +258,12 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   kimi keeps its older verbatim `mcp.json` passthrough. A `${VAR}` value is **respelled, never
   resolved** (claude verbatim, opencode `{env:VAR}`), so no token reaches argv, the config
   documents, or `--dry-run`; kimi rejects a placeholder outright since it is not known to expand
-  one. This is the primary, user-facing entry.
+  one. `config.settings` (claude only) is the flag-shaped sibling: a settings document passed as
+  `--settings '<json>'`, an **additional** layer merged over the user's own `settings.json` rather
+  than replacing it. Both flag-shaped keys survive the **native** (no-`baseUrl`) path, which sets
+  no env at all — so `settings: {"model": …}` is how a native launcher pins its default model,
+  since the `model` → `ANTHROPIC_MODEL` mapping needs an endpoint. This is the primary,
+  user-facing entry.
 - **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
   The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
   context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi` / `codex`);
