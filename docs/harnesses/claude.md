@@ -186,6 +186,8 @@ written to disk.
   — see the two-launcher pattern below.
 - **`${VAR}` is left verbatim**, as with `--mcp-config` — Claude Code expands it against its
   own environment, so no token lands in argv.
+- **`--providers` reads it too.** The roster's model column falls back to `settings.model`
+  when `config.model` is absent, so a native launcher lists the model it actually opens on.
 
 Two launchers differing only in default model, sharing everything else through a base:
 

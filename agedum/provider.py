@@ -241,6 +241,22 @@ class ProviderSummary:
     error: str | None = None
 
 
+def _summary_model(block: dict) -> str:
+    """The model to show for one config in the ``--providers`` roster.
+
+    ``config.model`` is the usual home, but a native claude launcher has no endpoint for the
+    model env to attach to and pins its default through ``config.settings`` instead — so fall
+    back to that, or the roster reports the launcher as model-less.
+    """
+    model = str(block.get("model") or "").strip()
+    if model:
+        return model
+    settings = block.get("settings")
+    if isinstance(settings, dict):
+        return str(settings.get("model") or "").strip()
+    return ""
+
+
 def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
     """Summarise every launchable provider config under ``directory`` (default:
     :func:`providers_dir`), recursively, sorted by name.
@@ -271,7 +287,7 @@ def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
             continue
         harness = config.get("harness")
         block = config.get("config")
-        model = str(block.get("model") or "").strip() if isinstance(block, dict) else ""
+        model = _summary_model(block) if isinstance(block, dict) else ""
         summaries.append(
             ProviderSummary(
                 name,

@@ -127,6 +127,26 @@ def test_list_providers_summarises_name_harness_model(tmp_path):
     ]
 
 
+def test_list_providers_falls_back_to_the_settings_model(tmp_path):
+    # A native claude launcher pins its model through config.settings; without the fallback
+    # the roster would report it as model-less.
+    (tmp_path / "opus.json").write_text(
+        json.dumps({"harness": "claude", "config": {"settings": {"model": "opus"}}})
+    )
+    (summary,) = list_providers(tmp_path)
+    assert summary.model == "opus"
+
+
+def test_list_providers_prefers_config_model_over_the_settings_model(tmp_path):
+    (tmp_path / "x.json").write_text(
+        json.dumps(
+            {"harness": "claude", "config": {"model": "env-model", "settings": {"model": "opus"}}}
+        )
+    )
+    (summary,) = list_providers(tmp_path)
+    assert summary.model == "env-model"
+
+
 def test_list_providers_sorted_by_name(tmp_path):
     for name in ("zeta", "alpha", "mid"):
         (tmp_path / f"{name}.json").write_text(json.dumps({"harness": "kimi"}))
