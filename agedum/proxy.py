@@ -1835,6 +1835,15 @@ class _FailoverHandler(_BaseProxyHandler):
     def do_PATCH(self) -> None:  # noqa: N802
         self._failover(walk=False)
 
+    # Without these, OPTIONS/HEAD would inherit the base class's single-upstream
+    # _proxy() — whose `upstream` this handler never binds — and die in a wrong-target
+    # 502 instead of the transparent per-route forward every other verb gets.
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
     # --- routing -----------------------------------------------------------
 
     def _split_route(self) -> tuple[str, str]:
@@ -1967,8 +1976,11 @@ class _FailoverHandler(_BaseProxyHandler):
         dropped; effort knobs are stripped and the rung model-key's own options
         applied — a foreign effort shape can never 400 the fallback; the body
         ``model`` becomes the rung's upstream id (explicit ``id`` override wins).
+        A ``@variant`` suffix on the rung is stripped before the catalogue lookup:
+        the rung's model-key ``options`` already carry the effort shape (D5), and a
+        suffixed key would miss the catalogue and send a bogus model id upstream.
         """
-        rung_provider, rung_key = rung.split("/", 1)
+        rung_provider, rung_key = _chain_base(rung).split("/", 1)
         rung_route = self.routes[rung_provider]
         entry = rung_route["models"].get(rung_key) or {}
         body = dict(parsed)

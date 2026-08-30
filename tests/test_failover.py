@@ -80,6 +80,8 @@ class _StubUpstream:
             do_POST = _respond
             do_GET = _respond
             do_PUT = _respond
+            do_OPTIONS = _respond
+            do_HEAD = _respond
 
             def log_message(self, *args):
                 pass
@@ -563,6 +565,50 @@ def test_non_post_forwarded_verbatim_without_walk():
     assert status == 429
     assert a.requests[0][0] == "GET"
     assert b.requests == []
+
+
+def test_options_and_head_route_per_provider():
+    # Regression: without overrides these verbs inherited the base class's
+    # single-upstream _proxy(), whose `upstream` the failover handler never binds —
+    # they must forward to the route's own upstream instead (and pass the 429
+    # through, no walk).
+    with (
+        _StubUpstream("p", script=[(429, "limit", {})] * 2) as a,
+        _StubUpstream("f1") as b,
+        _StubUpstream("f2") as c,
+    ):
+        spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
+        with FailoverProxy(spec) as proxy:
+            for method in ("OPTIONS", "HEAD"):
+                request = urllib.request.Request(proxy.base_url + "/oc/p/models", method=method)
+                try:
+                    with urllib.request.urlopen(request, timeout=10) as response:
+                        status = response.status
+                except urllib.error.HTTPError as error:
+                    status = error.code
+                assert status == 429
+    assert [r[0] for r in a.requests] == ["OPTIONS", "HEAD"]
+    assert b.requests == []
+
+
+def test_variant_suffixed_rung_rewrites_to_base_model_key():
+    # A rung carrying a @variant suffix validates against its base key and must
+    # rewrite to the base model key's catalogue entry — not send the suffix upstream.
+    with (
+        _StubUpstream("p", [(429, "limit", {})]) as a,
+        _StubUpstream("f1") as b,
+        _StubUpstream("f2") as c,
+    ):
+        spec = _spec(_three_routes(a, b, c), {"p/m1": ["f2/r2@low"]})
+        with FailoverProxy(spec) as proxy:
+            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+    assert status == 200
+    assert json.loads(body) == {"ok": "f2"}
+    _, _, headers, rung_body = c.requests[0]
+    parsed = json.loads(rung_body)
+    assert parsed["model"] == "r2"  # not "r2@low"
+    assert parsed["thinking"] == {"type": "enabled", "effort": "low"}
+    assert headers["Authorization"] == "Bearer key-f2"
 
 
 # ---------------------------------------------------------------------------
