@@ -135,6 +135,48 @@ baked-in key. Entries apply in order (later deep-merge over earlier), and every 
 }
 ```
 
+### `failover` — mechanical provider-wall failover { #failover }
+
+A top-level `failover` block (sibling of `requiredEnv`) makes agedum start a local
+**failover proxy** for the launch and point the routed providers' `options.baseURL` at it
+(`<proxy>/oc/<id>`; the built-in `openai` provider is overlaid the same way, OAuth
+untouched). The proxy forwards the primary attempt verbatim and — when it hits an
+**admission wall** before any byte reached opencode (a `detect.status` code, or a 4xx whose
+first 2 KB carries a `detect.messages` substring) — re-issues the request down the model's
+`chains` with per-rung auth, model id, and effort options, so the session lands on a
+surviving rung and opencode never sees the 429 to retry. Chain exhaustion returns the last
+upstream error verbatim (native retry/death behaviour, never worse); image-bearing requests
+walk only `vision: true` rungs; a per-launch rung pin skips a walled primary on later
+requests. `maxWalk` caps rungs tried per request.
+
+```json
+{
+  "harness": "opencode",
+  "requiredEnv": ["KIMI_API_KEY"],
+  "config": {
+    "providerDef": [
+      { "id": "kimi-coding", "npm": "@ai-sdk/openai-compatible", "baseUrl": "https://api.kimi.com/coding/v1", "apiKeyEnv": "KIMI_API_KEY" }
+    ],
+    "opencodeConfig": {
+      "agent": { "main": { "mode": "primary", "model": "kimi-coding/k3" } }
+    }
+  },
+  "failover": {
+    "detect": { "status": [429, 402], "messages": ["usage limit", "quota", "insufficient balance", "image"] },
+    "maxWalk": 3,
+    "vision": { "kimi-coding/k3": true, "kimi-coding/k3-low": true },
+    "chains": { "kimi-coding/k3": ["kimi-coding/k3-low"] }
+  }
+}
+```
+
+Validation is fail-loud: an unknown rung/model key, a chain key or rung missing from
+`vision`, or a chain containing its own key aborts the launch; `openai` rungs are pruned
+with a warning (not a fallback target in v1 — the OAuth bearer only arrives on openai
+primaries). The proxy is transparent: agents are never told a fallback answered, and the
+stderr walk lines are the user's only signal. Omitting the key starts no proxy and leaves
+the emitted config byte-identical — the rollback switch.
+
 ### `emitTranscript` — in-band transcript capture (default on) { #emittranscript }
 
 opencode runs as a full-screen alternate-screen TUI, so a terminal capturer (condash,
