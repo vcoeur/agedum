@@ -149,8 +149,9 @@ class _SSEFallbackUpstream:
 # Launch wiring + simulated opencode client
 # ---------------------------------------------------------------------------
 
-# The detect lists are the shipped oc/mix.json block verbatim — the harness
-# injects the shapes the proxy is actually configured to catch.
+# The detect lists mirror the shipped oc/mix.json block; they are a copy, not a
+# pin — if the shipped block changes, update here so the harness keeps injecting
+# the shapes the proxy is actually configured to catch.
 _MIX_DETECT = {
     "status": [429, 402],
     "messages": [
@@ -319,6 +320,43 @@ def test_session_costs_one_wall_not_five_per_request():
     assert statuses == [200, 200, 200]
     assert wall_hits_after == 1
     assert len(rung.requests) == 3
+
+
+def test_variant_request_walks_variant_chain(capsys):
+    """An effort-carrying body resolves the ``@variant`` chain key end-to-end —
+    the effort knob is stripped and the rung's own options applied (D5) — and the
+    walk line names the variant chain."""
+    with _WallUpstream(429, {"error": {"message": "usage limit reached"}}) as wall:
+        with _SSEFallbackUpstream() as rung:
+            config = _launcher_config(
+                wall.base_url,
+                _kimi_glm_defs(wall.base_url, rung.base_url),
+                chains={
+                    "kimi-coding/k3@high": ["glm/glm-5.3"],
+                    "kimi-coding/k3": ["glm/glm-5.3"],
+                },
+                vision={"kimi-coding/k3": True, "glm/glm-5.3": False},
+            )
+            # The rung model-key's options, applied after the effort strip (D5).
+            config["config"]["opencodeConfig"]["provider"]["glm"]["models"]["glm-5.3"][
+                "options"
+            ] = {"thinking": {"type": "enabled", "effort": "low"}}
+            with _launched(config, _BASE_ENV) as launch:
+                body = _chat_body()
+                body["reasoning_effort"] = "high"
+                status, response = _opencode_post(launch, "kimi-coding", body)
+
+    assert status == 200
+    assert _SSEFallbackUpstream.MARKER in response
+    assert len(wall.requests) == 1
+    _, _, rung_body = rung.requests[0]
+    rung_json = json.loads(rung_body)
+    # The variant chain was used, the origin's effort knob is gone, and the
+    # rung model-key's own options stand in for it.
+    assert rung_json["model"] == "glm-5.3"
+    assert "reasoning_effort" not in rung_json
+    assert rung_json["thinking"] == {"type": "enabled", "effort": "low"}
+    assert "agedum failover: kimi-coding/k3@high rung 0 (primary)" in (capsys.readouterr().err)
 
 
 # ---------------------------------------------------------------------------
