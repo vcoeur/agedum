@@ -40,7 +40,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import count
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 # Headers that must not be copied verbatim across a proxy hop (RFC 7230 §6.1), plus the
 # framing headers we recompute ourselves.
@@ -1711,4 +1711,465 @@ class ResponsesToChatProxy(_LocalProxy):
     def __init__(self, upstream: str) -> None:
         super().__init__(
             type("_BoundResponsesHandler", (_ResponsesToChatHandler,), {"upstream": upstream})
+        )
+
+
+# ---------------------------------------------------------------------------
+# Failover proxy — mechanical provider-wall failover for opencode launchers
+# ---------------------------------------------------------------------------
+#
+# An opencode launcher (oc/mix) declares a ``failover`` block: per-model chains of
+# fallback rungs lifted from the prompt rows. The launcher points every routed
+# provider's ``options.baseURL`` at this proxy (``<base_url>/oc/<provider-id>``); the
+# proxy routes on that path prefix, forwards the primary attempt verbatim, and — when
+# the primary hits an admission wall (429 / 402 / limit-or-modality text) *before any
+# byte reached opencode* — rewrites auth + model id + effort options per rung and
+# re-issues down the chain. Two-goal contract: the request LANDS on a surviving rung
+# (goal 1), and opencode sees one response, never a 429 to retry five times (goal 2).
+# Chain exhaustion returns the last upstream error verbatim — exactly today's native
+# retry/death path, never something worse.
+
+
+OPENAI_CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+
+# The path prefix every failover route lives under. CONSTRAINT (M0 source probe,
+# notes/05-m0-refresh-probe.md): opencode's codex OAuth fetch wrapper rewrites any
+# request whose URL pathname contains ``/v1/responses`` or ``/chat/completions`` to
+# ``https://chatgpt.com/backend-api/codex/responses`` (codex.ts:417-420 @ v1.18.23),
+# silently bypassing this proxy. The prefix — and every route id emitted under it —
+# must never contain either substring; pinned by tests and enforced at route-table
+# build time.
+_FAILOVER_PREFIX = "/oc"
+_FAILOVER_FORBIDDEN = ("/v1/responses", "/chat/completions")
+
+
+def failover_route_base(provider_id: str) -> str:
+    """The proxy-local path prefix one provider's requests arrive under: ``/oc/<id>``.
+
+    Raises ``ValueError`` if the resulting path would trip opencode's OAuth-mode URL
+    rewrite (see the constraint above) — a route the wrapper hijacks is a route that
+    silently never fails over.
+    """
+    route = f"{_FAILOVER_PREFIX}/{provider_id}"
+    for forbidden in _FAILOVER_FORBIDDEN:
+        if forbidden in route:
+            raise ValueError(
+                f"failover route prefix {route!r} contains {forbidden!r}: opencode's OAuth"
+                " fetch wrapper would rewrite such requests to chatgpt.com, bypassing the"
+                " proxy (codex.ts:417-420)"
+            )
+    return route
+
+
+def _sniff_variant(body: dict) -> str:
+    """The reasoning-effort variant a request body carries, ``""`` when none.
+
+    ``reasoning_effort`` → ``reasoningEffort`` → ``thinking.effort`` — first present
+    wins. Drives the ``<key>@<variant>`` chain lookup (only glm/glm-5.3 carries a
+    variant pair in oc/mix); a sniff-miss falls back to the bare chain key.
+    """
+    for key in ("reasoning_effort", "reasoningEffort"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        value = thinking.get("effort")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _body_has_image(body: object) -> bool:
+    """Whether a parsed request body carries image content anywhere — all roles,
+    including tool results, so an image surfaced mid-conversation re-classifies.
+
+    Matches content parts whose ``type`` is ``image_url`` (OpenAI chat-completions
+    shape — all three metered providers are ``@ai-sdk/openai-compatible``) or
+    ``input_image`` (Responses shape — the openai/OAuth route).
+    """
+    if isinstance(body, dict):
+        if body.get("type") in ("image_url", "input_image"):
+            return True
+        return any(_body_has_image(value) for value in body.values())
+    if isinstance(body, list):
+        return any(_body_has_image(item) for item in body)
+    return False
+
+
+def _chain_base(key: str) -> str:
+    """A chain key / rung without its ``@variant`` suffix (vision lookups strip it)."""
+    return key.split("@", 1)[0]
+
+
+class _FailoverHandler(_BaseProxyHandler):
+    """Per-connection failover mechanics: route on the path prefix, walk on a wall.
+
+    Class attributes are bound per :class:`FailoverProxy` instance (the ``type(...)``
+    pattern below), so several proxies can coexist — as the test suite does — without
+    sharing state. Only the rung pin is mutable shared state, guarded by a lock: one
+    launch's main + workers all ride the same proxy instance.
+    """
+
+    routes: dict = {}
+    detect_status: frozenset = frozenset()
+    detect_messages: tuple = ()
+    max_walk: int = 3
+    chains: dict = {}
+    vision: dict = {}
+    _pins: dict = {}
+    _pins_lock: threading.Lock = threading.Lock()
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server naming)
+        self._failover(walk=True)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    # Without these, OPTIONS/HEAD would inherit the base class's single-upstream
+    # _proxy() — whose `upstream` this handler never binds — and die in a wrong-target
+    # 502 instead of the transparent per-route forward every other verb gets.
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._failover(walk=False)
+
+    # --- routing -----------------------------------------------------------
+
+    def _split_route(self) -> tuple[str, str]:
+        """``/oc/<provider-id>/<rest>`` → ``(provider_id, rest)``; query dropped."""
+        parts = self.path.split("?", 1)[0].lstrip("/").split("/", 2)
+        if len(parts) < 3 or parts[0] != _FAILOVER_PREFIX.lstrip("/"):
+            return "", ""
+        return parts[1], parts[2]
+
+    def _failover(self, *, walk: bool) -> None:
+        self.close_connection = True
+        provider_id, rest = self._split_route()
+        route = self.routes.get(provider_id)
+        if route is None:
+            self._send_json(
+                404,
+                {"error": {"message": f"agedum failover proxy: no route for {provider_id!r}"}},
+            )
+            return
+        raw = self._read_body()
+        parsed = _parse_json_dict(raw) if walk else None
+        if parsed is None:
+            # Non-POST, a non-JSON body, or an empty one: nothing to classify — the
+            # transparent primary forward (R6: unexpected paths forward, not fail).
+            self._forward_once(route, rest, raw)
+            return
+        self._walk(provider_id, route, rest, raw, parsed)
+
+    # --- the walk ----------------------------------------------------------
+
+    def _walk(self, provider_id: str, route: dict, rest: str, raw: bytes, parsed: dict) -> None:
+        vision_class = "vision" if _body_has_image(parsed) else "text"
+        chain_key, chain = self._resolve_chain(provider_id, route, parsed)
+        if chain is None:
+            # This model key has no mechanical chain: transparent primary forward — an
+            # unmapped model degrades to exactly today's behaviour, never to something
+            # worse (goal 1's floor).
+            self._forward_once(route, rest, raw)
+            return
+
+        # attempts[0] is the primary (the route's own provider); the rest are the chain
+        # rungs in walk order. The primary is exempt from the vision filter (opencode
+        # routed the request there); a modality rejection from it matches the safety
+        # net below and the walk continues.
+        attempts: list[str | None] = [None, *chain]
+        index = self._pinned_rung(chain_key, vision_class)
+        last_error: tuple[int, list[tuple[str, str]], bytes] | None = None
+        rungs_tried = 0
+        while index < len(attempts):
+            rung = attempts[index]
+            if (
+                rung is not None
+                and vision_class == "vision"
+                and not self.vision.get(_chain_base(rung), False)
+            ):
+                index += 1
+                continue
+            if rung is not None and rungs_tried >= self.max_walk:
+                break
+            if rung is None:
+                upstream = urlsplit(route["upstream"])
+                attempt = (raw, self._inbound_headers(), upstream, _join(upstream, rest))
+            else:
+                attempt = self._prepare_rung(rung, parsed, rest)
+            try:
+                connection, response = self._open(*attempt)
+            except (OSError, http.client.HTTPException) as exc:
+                # A rung that cannot be reached at all is as walled as a 429: walk on.
+                self._log_walk(chain_key, index, rung)
+                last_error = (
+                    502,
+                    [],
+                    f"agedum failover proxy: upstream error: {exc}".encode(),
+                )
+                if rung is not None:
+                    rungs_tried += 1
+                index += 1
+                continue
+            wall, head = self._classify(response)
+            if wall:
+                self._log_walk(chain_key, index, rung)
+                last_error = self._capture_error(response, head)
+                connection.close()
+                if rung is not None:
+                    rungs_tried += 1
+                index += 1
+                continue
+            if rung is not None and 200 <= response.status < 300:
+                self._pin_rung(chain_key, vision_class, index)
+            try:
+                if head:
+                    self._relay_buffered(response, head)
+                else:
+                    self._relay_passthrough(response)
+            except (OSError, http.client.HTTPException):
+                # Mid-stream death after the first forwarded byte: no walk (v1 is
+                # admission-time only) — the broken stream passes through and
+                # opencode's own retry policy applies.
+                self.close_connection = True
+            finally:
+                connection.close()
+            return
+        self._send_last_error(last_error)
+
+    def _resolve_chain(
+        self, provider_id: str, route: dict, parsed: dict
+    ) -> tuple[str, tuple[str, ...]] | tuple[str, None]:
+        """The chain key + rungs for a request, or ``("", None)`` when unmapped.
+
+        The wire model id maps back to launcher model keys through the resolved
+        catalogue (an alias entry's ``id`` override means two keys can share one wire
+        id — kimi's k3/k3-low both send ``k3``); the sniffed variant prefers the
+        ``<key>@<variant>`` chain before the bare key.
+        """
+        variant = _sniff_variant(parsed)
+        wire_model = str(parsed.get("model") or "")
+        for key in route["keys_by_wire"].get(wire_model, ()):
+            base = f"{provider_id}/{key}"
+            for candidate in (f"{base}@{variant}" if variant else "", base):
+                if candidate and candidate in self.chains:
+                    return candidate, self.chains[candidate]
+        return "", None
+
+    def _prepare_rung(
+        self, rung: str, parsed: dict, rest: str
+    ) -> tuple[bytes, dict[str, str], SplitResult, str]:
+        """Rewrite the original request for one fallback rung (design §3.4).
+
+        Auth becomes the rung provider's resolved key; ``ChatGPT-Account-Id`` is
+        dropped; effort knobs are stripped and the rung model-key's own options
+        applied — a foreign effort shape can never 400 the fallback; the body
+        ``model`` becomes the rung's upstream id (explicit ``id`` override wins).
+        A ``@variant`` suffix on the rung is stripped before the catalogue lookup:
+        the rung's model-key ``options`` already carry the effort shape (D5), and a
+        suffixed key would miss the catalogue and send a bogus model id upstream.
+        """
+        rung_provider, rung_key = _chain_base(rung).split("/", 1)
+        rung_route = self.routes[rung_provider]
+        entry = rung_route["models"].get(rung_key) or {}
+        body = dict(parsed)
+        for knob in ("reasoning_effort", "reasoningEffort", "thinking"):
+            body.pop(knob, None)
+        body["model"] = entry.get("id") or rung_key
+        for key, value in (entry.get("options") or {}).items():
+            body[key] = value
+        headers = self._inbound_headers()
+        headers["Authorization"] = f"Bearer {rung_route['api_key']}"
+        headers["Content-Type"] = "application/json"
+        for name in [name for name in headers if name.lower() == "chatgpt-account-id"]:
+            del headers[name]
+        upstream = urlsplit(rung_route["upstream"])
+        return (
+            json.dumps(body, separators=(",", ":")).encode(),
+            headers,
+            upstream,
+            _join(upstream, rest),
+        )
+
+    # --- one upstream hop --------------------------------------------------
+
+    def _inbound_headers(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in _HOP_BY_HOP and key.lower() not in ("host", "content-length")
+        }
+
+    def _open(
+        self, body: bytes, headers: dict[str, str], upstream: SplitResult, full_path: str
+    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+        sent = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in _HOP_BY_HOP and key.lower() not in ("host", "content-length")
+        }
+        sent["Content-Length"] = str(len(body))
+        # Identity encoding on every hop: the wall text rule reads 4xx bodies, and a
+        # gzipped error body would defeat the substring match.
+        sent["Accept-Encoding"] = "identity"
+        connection = (
+            http.client.HTTPSConnection(upstream.hostname, upstream.port, timeout=300)
+            if upstream.scheme == "https"
+            else http.client.HTTPConnection(upstream.hostname, upstream.port, timeout=300)
+        )
+        try:
+            connection.request(self.command, full_path, body=body or None, headers=sent)
+            return connection, connection.getresponse()
+        except (OSError, http.client.HTTPException):
+            connection.close()
+            raise
+
+    def _forward_once(self, route: dict, rest: str, raw: bytes) -> None:
+        """The transparent primary forward — opencode cannot tell the proxy is there."""
+        upstream = urlsplit(route["upstream"])
+        try:
+            connection, response = self._open(
+                raw, self._inbound_headers(), upstream, _join(upstream, rest)
+            )
+        except (OSError, http.client.HTTPException) as exc:
+            self._send_error(502, f"agedum failover proxy: upstream error: {exc}")
+            return
+        try:
+            self._relay_passthrough(response)
+        except (OSError, http.client.HTTPException):
+            self.close_connection = True
+        finally:
+            connection.close()
+
+    # --- wall detection + exhaustion ---------------------------------------
+
+    def _classify(self, response: http.client.HTTPResponse) -> tuple[bool, bytes]:
+        """``(is_wall, buffered_head)`` per the config-shaped detection rule.
+
+        A wall is a ``detect.status`` status, or a 4xx whose body's first 2 KB carries
+        a ``detect.messages`` substring (case-insensitive — the last three entries are
+        the modality safety net). Anything else passes through verbatim so bad keys
+        (401) and genuine 5xx keep opencode's native retry semantics. 2xx/3xx/5xx are
+        never read here, so SSE streams stay byte-identical.
+        """
+        if response.status in self.detect_status:
+            return True, b""
+        if not (400 <= response.status < 500):
+            return False, b""
+        head = response.read(2048)
+        lowered = head.decode("utf-8", "replace").lower()
+        return any(message in lowered for message in self.detect_messages), head
+
+    def _capture_error(
+        self, response: http.client.HTTPResponse, head: bytes
+    ) -> tuple[int, list[tuple[str, str]], bytes]:
+        """The last upstream error, captured for the exhaustion passthrough."""
+        rest = response.read()
+        headers = [
+            (key, value)
+            for key, value in response.getheaders()
+            if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
+        ]
+        return response.status, headers, head + rest
+
+    def _send_last_error(self, last_error: tuple[int, list[tuple[str, str]], bytes] | None) -> None:
+        """Chain exhausted: the last upstream error verbatim (``Retry-After`` survives —
+        it is not hop-by-hop), so opencode's hardcoded retry runs exactly as today."""
+        if last_error is None:
+            self._send_error(502, "agedum failover proxy: no upstream answered")
+            return
+        status, headers, body = last_error
+        self.send_response(status)
+        for key, value in headers:
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _relay_buffered(self, response: http.client.HTTPResponse, head: bytes) -> None:
+        """Relay a non-wall 4xx whose head the classifier already buffered."""
+        self.send_response(response.status)
+        for key, value in response.getheaders():
+            lowered = key.lower()
+            if lowered in _HOP_BY_HOP or lowered == "content-length":
+                continue
+            self.send_header(key, value)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(head)
+        while True:
+            chunk = response.read(8192)
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+        self.wfile.flush()
+
+    # --- rung pin (D6) ------------------------------------------------------
+
+    def _pinned_rung(self, chain_key: str, vision_class: str) -> int:
+        with self._pins_lock:
+            return self._pins.get(f"{chain_key}#{vision_class}", 0)
+
+    def _pin_rung(self, chain_key: str, vision_class: str, index: int) -> None:
+        with self._pins_lock:
+            self._pins[f"{chain_key}#{vision_class}"] = index
+
+    def _log_walk(self, chain_key: str, index: int, rung: str | None) -> None:
+        # The user's only signal that a failover happened (ruling 2026-08-30: agents
+        # are never told a fallback answered).
+        where = "primary" if rung is None else rung
+        print(
+            f"agedum failover: {chain_key} rung {index} ({where})",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _join(upstream: SplitResult, rest: str) -> str:
+    """The upstream URL path for a request whose proxy-local rest is ``rest``."""
+    return upstream.path.rstrip("/") + "/" + rest
+
+
+class FailoverProxy(_LocalProxy):
+    """A localhost failover proxy over a resolved route table.
+
+    The spec comes from :func:`agedum.provider.failover_spec`.
+
+    Use as a context manager; :attr:`base_url` is the address the launcher bakes into
+    ``provider.<id>.options.baseURL`` as ``<base_url>/oc/<id>`` while the ``with`` block
+    is open. ``spec`` carries the route table (per provider id: upstream, resolved key,
+    model catalogue, wire-id reverse map), the wall-detection lists, the mechanical
+    chains, the vision map, and the walk cap.
+    """
+
+    def __init__(self, spec: dict) -> None:
+        super().__init__(
+            type(
+                "_BoundFailoverHandler",
+                (_FailoverHandler,),
+                {
+                    "routes": spec["routes"],
+                    "detect_status": frozenset(spec["status"]),
+                    "detect_messages": tuple(m.lower() for m in spec["messages"]),
+                    "max_walk": int(spec["max_walk"]),
+                    "chains": spec["chains"],
+                    "vision": spec["vision"],
+                    # Fresh per proxy instance: two proxies in one process (tests) must
+                    # not share a pin table.
+                    "_pins": {},
+                    "_pins_lock": threading.Lock(),
+                },
+            )
         )

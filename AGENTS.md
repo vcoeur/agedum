@@ -32,6 +32,13 @@ match); top-level skills keep their declared name.
   searches those skills dirs before the project's raw `.agents/skills/`, so the
   overlaid (`SKILL.opencode.md`) copy wins. Matches condash's
   opencode layout; uniform with the Claude harness, no `extra_args`.
+  **`failover`** (top-level config key, sibling of `requiredEnv`) starts a launch-bound
+  `FailoverProxy` (`proxy.py`) and rewrites the routed providers' `options.baseURL` to
+  `<proxy>/oc/<id>` in `OPENCODE_CONFIG_CONTENT`: on an admission wall (429/402/limit
+  text) the proxy walks the model's configured chain — rewriting auth, model id, and
+  effort options per rung — so the session lands on a fallback instead of dying, and
+  opencode never enters its same-model retry loop. Absent key → no proxy, byte-identical
+  config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
 - **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
   is read natively at `./AGENTS.md` (Cline reads it as a cross-tool rules file), so agedum
   leaves it in place. Global `AGENTS.md` → the cross-tool path `~/.agents/AGENTS.md` (not

@@ -49,9 +49,11 @@ from agedum.launcher import LauncherError, run_virtualfs, writable_roots
 from agedum.provider import (
     CODEX_PROVIDER_NAME,
     ConfigFile,
+    FailoverPlan,
     ProviderError,
     build_launch,
     default_env_file,
+    failover_spec,
     list_providers,
     load_config,
     load_merged_config,
@@ -260,43 +262,50 @@ def _run_config(argv: list[str]) -> int:
             )
         config = load_merged_config(config_path)
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
-        launch = build_launch(config, {**os.environ, **dotenv}, label=provider)
-        command = (
-            with_prompt(launch, rest, prompt_text, interactive=prompt_interactive)
-            if prompt_text is not None
-            else [*launch.command, *rest]
-        )
+        base_env = {**os.environ, **dotenv}
+        # The failover proxy must be live before the opencode config document is built
+        # (the builder bakes the proxy address in), so this context wraps the whole
+        # build-and-run span. Absent `failover` block → yields None, zero behaviour
+        # change: that is the rollback switch.
+        with _maybe_failover_proxy(config, base_env) as failover:
+            launch = build_launch(config, base_env, label=provider, failover=failover)
+            command = (
+                with_prompt(launch, rest, prompt_text, interactive=prompt_interactive)
+                if prompt_text is not None
+                else [*launch.command, *rest]
+            )
+
+            for warning in launch.warnings:
+                _err.print(f"[yellow]agedum:[/] {warning}")
+
+            # Apply the resolved provider env before computing the plan — a harness whose
+            # compile targets depend on it (cline reads CLINE_DATA_DIR via cline_config_dir)
+            # then resolves to the same paths in the dry-run preview as in the real launch.
+            os.environ.update(launch.env)
+            for var in launch.unset:
+                os.environ.pop(var, None)
+
+            if dry_run:
+                _print_dry_run(launch, env_path, command, failover)
+                return 0
+
+            # `--run` is non-interactive: the prompt is in argv, so the harness must not
+            # inherit a live stdin to block on (see run_virtualfs). `--prompt` and a bare
+            # launch stay interactive.
+            non_interactive = prompt_text is not None and not prompt_interactive
+            return _run(
+                launch.harness,
+                command,
+                close_stdin=non_interactive,
+                config_files=launch.config_files,
+                sandbox=launch.sandbox,
+            )
     except ProviderError as exc:
         _err.print(f"[red]agedum:[/] {exc}")
         return 1
 
-    for warning in launch.warnings:
-        _err.print(f"[yellow]agedum:[/] {warning}")
 
-    # Apply the resolved provider env before computing the plan — a harness whose compile
-    # targets depend on it (cline reads CLINE_DATA_DIR via cline_config_dir) then resolves to
-    # the same paths in the dry-run preview as in the real launch.
-    os.environ.update(launch.env)
-    for var in launch.unset:
-        os.environ.pop(var, None)
-
-    if dry_run:
-        _print_dry_run(launch, env_path, command)
-        return 0
-
-    # `--run` is non-interactive: the prompt is in argv, so the harness must not inherit a
-    # live stdin to block on (see run_virtualfs). `--prompt` and a bare launch stay interactive.
-    non_interactive = prompt_text is not None and not prompt_interactive
-    return _run(
-        launch.harness,
-        command,
-        close_stdin=non_interactive,
-        config_files=launch.config_files,
-        sandbox=launch.sandbox,
-    )
-
-
-def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
+def _print_dry_run(launch, env_path: Path, command: list[str], failover=None) -> None:
     """Print the resolved launch (secrets masked) without running anything."""
     print(f"provider   {launch.label}")
     print(f"harness    {launch.harness}")
@@ -304,6 +313,10 @@ def _print_dry_run(launch, env_path: Path, command: list[str]) -> None:
     print()
     _print_environment(launch)
     _print_proxy(launch)
+    if failover is not None:
+        print("proxy")
+        print(f"  failover → {failover.base_url} (routes: {', '.join(failover.routes)})")
+        print()
     _print_config_files(launch)
     extra_args = _print_plan_sections(launch.harness, launch.sandbox)
     _print_command(command, extra_args, _secret_values(launch))
@@ -778,3 +791,32 @@ def _rewrite_codex_base_url(command: list[str], base_url: str) -> list[str]:
         f'{prefix}"{base_url}"' if isinstance(arg, str) and arg.startswith(prefix) else arg
         for arg in command
     ]
+
+
+@contextmanager
+def _maybe_failover_proxy(config: dict, base_env: dict[str, str]) -> Iterator[FailoverPlan | None]:
+    """Start the mechanical failover proxy for an opencode launcher declaring ``failover``.
+
+    Mirrors ``_maybe_codex_proxy`` but yields a :class:`~agedum.provider.FailoverPlan`:
+    an opencode config's ``failover`` block is parsed + validated (a bad chain fails the
+    launch), the :class:`~agedum.proxy.FailoverProxy` starts on an ephemeral loopback
+    port, and every routed provider's ``options.baseURL`` is rewritten to
+    ``<proxy>/oc/<id>`` by the config builder downstream. Absent block → ``None``, zero
+    behaviour change (the rollback switch); the bwrap namespace shares host loopback, so
+    the child reaches the proxy at ``127.0.0.1``.
+    """
+    if config.get("harness") != "opencode" or not config.get("failover"):
+        yield None
+        return
+
+    spec, warnings = failover_spec(config, base_env)
+    for warning in warnings:
+        _err.print(f"[yellow]agedum:[/] {warning}")
+    if spec is None:
+        yield None
+        return
+
+    from agedum.proxy import FailoverProxy
+
+    with FailoverProxy(spec) as proxy:
+        yield FailoverPlan(base_url=proxy.base_url, routes=tuple(spec["routes"]))

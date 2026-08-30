@@ -17,14 +17,17 @@ ends in ``.json``; absolute as-is, else relative to CWD) or a **provider name**
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 from agedum.harness import Sandbox, codex_config_dir, kimi_config_dir, pi_agent_dir
+from agedum.proxy import OPENAI_CODEX_UPSTREAM, failover_route_base
 
 HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "codex")
 
@@ -94,6 +97,236 @@ class Launch:
     config_files: tuple[ConfigFile, ...] = ()
     warnings: tuple[str, ...] = ()
     sandbox: Sandbox | None = None
+
+
+class FailoverPlan(NamedTuple):
+    """The live failover proxy's handle, baked into the emitted opencode config.
+
+    ``base_url`` is the running :class:`agedum.proxy.FailoverProxy`'s ephemeral
+    address; ``routes`` are the provider ids whose ``options.baseURL`` the config
+    builder rewrites to ``<base_url>/oc/<id>`` (the built-in ``openai`` provider among
+    them when mapped). ``None`` everywhere means no failover — the rollback switch.
+    """
+
+    base_url: str
+    routes: tuple[str, ...]
+
+
+def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
+    """Parse + validate a launcher's top-level ``failover`` block into the proxy spec.
+
+    Returns ``(spec, warnings)``; ``(None, [])`` when the block is absent. Raises
+    :class:`ProviderError` on an invalid block — a bad chain must fail the launch, not
+    silently degrade to no failover. The spec shape is what
+    :class:`agedum.proxy.FailoverProxy` consumes:
+
+    - ``routes`` — per provider id: the upstream base URL, the resolved API key, the
+      model catalogue (``id`` override + ``options`` per model key) and the wire-id
+      reverse map. Built from the launcher's ``providerDef`` list plus the built-in
+      ``openai`` OAuth route (D1 PASS: verbatim forwarding to the codex endpoint);
+      model keys the catalogue doesn't declare are seeded from the agents' ``model``
+      references (openai's models live in opencode's own registry, not the config).
+    - ``status`` / ``messages`` / ``max_walk`` / ``vision`` / ``chains`` — straight
+      from the block, with openai rungs pruned (D4: not a fallback target in v1 — the
+      OAuth bearer only arrives on openai primaries; a pruned rung is a warning) and
+      duplicate-provider rungs deduped (first occurrence wins).
+    """
+    block = config.get("failover")
+    if not block:
+        return None, []
+    if config.get("harness") != "opencode":
+        raise ProviderError("`failover` is only implemented for the opencode harness")
+    if not isinstance(block, dict):
+        raise ProviderError("`failover` must be a JSON object")
+
+    block_cfg = config.get("config") or {}
+    routes: dict[str, dict] = {}
+    for provider_def in _provider_defs(block_cfg.get("providerDef")):
+        provider_id = str(provider_def.get("id") or "").strip()
+        base_url = str(provider_def.get("baseUrl") or "").strip()
+        api_key_env = str(provider_def.get("apiKeyEnv") or "").strip()
+        fields = (("id", provider_id), ("baseUrl", base_url), ("apiKeyEnv", api_key_env))
+        missing = [name for name, value in fields if not value]
+        if missing:
+            raise ProviderError(
+                f"`failover` routing needs each providerDef to declare {', '.join(missing)}"
+            )
+        routes[provider_id] = {
+            "openai": False,
+            "upstream": base_url,
+            "api_key": base_env.get(api_key_env, ""),
+            "models": {},
+            "keys_by_wire": {},
+        }
+    # openai is a mapped primary (R1 PASS, notes/05): verbatim OAuth forwarding — the
+    # bearer and ChatGPT-Account-Id arrive from the client's own wrapper.
+    routes["openai"] = {
+        "openai": True,
+        "upstream": OPENAI_CODEX_UPSTREAM,
+        "api_key": "",
+        "models": {},
+        "keys_by_wire": {},
+    }
+    for provider_id in routes:
+        try:
+            failover_route_base(provider_id)
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    # Model catalogue per route: declared entries first (options + id overrides),
+    # then agent model references as seeds for undeclared keys.
+    oc_cfg = block_cfg.get("opencodeConfig") or {}
+    declared_providers = oc_cfg.get("provider") or {}
+    if not isinstance(declared_providers, dict):
+        declared_providers = {}
+    for provider_id, route in routes.items():
+        models_cfg = (declared_providers.get(provider_id) or {}).get("models") or {}
+        if isinstance(models_cfg, dict):
+            for key, entry in models_cfg.items():
+                if not isinstance(entry, dict):
+                    continue
+                route["models"][key] = {
+                    "id": str(entry.get("id") or key),
+                    "options": entry.get("options") or {},
+                }
+    agents_cfg = oc_cfg.get("agent") or {}
+    if isinstance(agents_cfg, dict):
+        for agent in agents_cfg.values():
+            if not isinstance(agent, dict):
+                continue
+            model = str(agent.get("model") or "")
+            provider_id, _, key = model.partition("/")
+            route = routes.get(provider_id)
+            if route is not None and key and key not in route["models"]:
+                route["models"][key] = {"id": key, "options": {}}
+    for route in routes.values():
+        keys_by_wire: dict[str, list[str]] = {}
+        for key, entry in route["models"].items():
+            keys_by_wire.setdefault(entry["id"], []).append(key)
+        route["keys_by_wire"] = keys_by_wire
+
+    def _resolve_key(base: str) -> None:
+        """A chain key / rung base resolves against the route table, or it's an error."""
+        provider_id, _, key = base.partition("/")
+        route = routes.get(provider_id)
+        if route is None:
+            raise ProviderError(
+                f"failover key {base!r}: unknown provider {provider_id!r} — not a"
+                " providerDef of this launcher"
+            )
+        if key not in route["models"]:
+            raise ProviderError(
+                f"failover key {base!r}: model key {key!r} is not declared for provider"
+                f" {provider_id!r}"
+            )
+
+    detect = block.get("detect")
+    if not isinstance(detect, dict):
+        raise ProviderError("`failover.detect` must be a JSON object")
+    status = detect.get("status")
+    if (
+        not isinstance(status, list)
+        or not status
+        or not all(isinstance(code, int) and not isinstance(code, bool) for code in status)
+    ):
+        raise ProviderError(
+            "`failover.detect.status` must be a non-empty list of HTTP status codes"
+        )
+    messages = detect.get("messages")
+    if (
+        not isinstance(messages, list)
+        or not messages
+        or not all(isinstance(entry, str) and entry for entry in messages)
+    ):
+        raise ProviderError("`failover.detect.messages` must be a non-empty list of substrings")
+    max_walk = block.get("maxWalk", 3)
+    if not isinstance(max_walk, int) or isinstance(max_walk, bool) or max_walk < 1:
+        raise ProviderError("`failover.maxWalk` must be a positive integer")
+    vision = block.get("vision")
+    if not isinstance(vision, dict) or not all(isinstance(flag, bool) for flag in vision.values()):
+        raise ProviderError("`failover.vision` must be a JSON object of model key -> boolean")
+
+    chains_raw = block.get("chains")
+    if not isinstance(chains_raw, dict) or not chains_raw:
+        raise ProviderError("`failover.chains` must be a non-empty JSON object")
+    warnings: list[str] = []
+    chains: dict[str, tuple[str, ...]] = {}
+    for key, rungs in chains_raw.items():
+        if (
+            not isinstance(rungs, list)
+            or not rungs
+            or not all(isinstance(rung, str) and rung for rung in rungs)
+        ):
+            raise ProviderError(f"failover chain {key!r} must be a non-empty list of rung keys")
+        base_key = _chain_base(key)
+        _resolve_key(base_key)
+        if base_key not in vision:
+            raise ProviderError(
+                f"failover chain key {base_key!r} has no `failover.vision` entry — a missing"
+                " flag is a launch error, not a silent default"
+            )
+        pruned: list[str] = []
+        seen: set[str] = set()
+        for rung in rungs:
+            rung_base = _chain_base(rung)
+            if rung_base == base_key:
+                raise ProviderError(f"failover chain {key!r} contains its own key as a rung")
+            if rung_base.partition("/")[0] == "openai":
+                warnings.append(
+                    f"failover chain {key!r}: openai rung {rung!r} pruned — openai is not a"
+                    " fallback target in v1 (the OAuth bearer only arrives on openai primaries)"
+                )
+                continue
+            _resolve_key(rung_base)
+            if rung_base not in vision:
+                raise ProviderError(
+                    f"failover rung {rung_base!r} (chain {key!r}) has no `failover.vision` entry"
+                )
+            if rung_base in seen:
+                continue
+            seen.add(rung_base)
+            pruned.append(rung)
+        if not pruned:
+            raise ProviderError(f"failover chain {key!r} has no eligible rungs after pruning")
+        chains[key] = tuple(pruned)
+
+    return (
+        {
+            "status": sorted(status),
+            "messages": list(messages),
+            "max_walk": max_walk,
+            "vision": dict(vision),
+            "chains": chains,
+            "routes": routes,
+        },
+        warnings,
+    )
+
+
+def _chain_base(key: str) -> str:
+    """A chain key / rung without its ``@variant`` suffix (vision lookups strip it)."""
+    return key.split("@", 1)[0]
+
+
+def _apply_failover_routes(document: dict, failover: FailoverPlan) -> dict:
+    """Point every routed provider's ``options.baseURL`` at the failover proxy.
+
+    The resolved ``apiKey`` value stays — the proxy receives it but rewrites
+    ``Authorization`` per rung, so the child never needs its real key to reach a
+    fallback. The built-in ``openai`` provider is overlaid (entry created when absent)
+    without touching its ``npm`` or the OAuth plugin — the R1-verified options-only
+    insertion.
+    """
+    providers = dict(document.get("provider") or {})
+    for provider_id in failover.routes:
+        entry = dict(providers.get(provider_id) or {})
+        options = dict(entry.get("options") or {})
+        options["baseURL"] = f"{failover.base_url}{failover_route_base(provider_id)}"
+        entry["options"] = options
+        providers[provider_id] = entry
+    merged = dict(document)
+    merged["provider"] = providers
+    return merged
 
 
 def default_env_file() -> Path:
@@ -370,7 +603,13 @@ def required_env(config: dict) -> list[str]:
     return result
 
 
-def build_launch(config: dict, base_env: dict[str, str], *, label: str | None = None) -> Launch:
+def build_launch(
+    config: dict,
+    base_env: dict[str, str],
+    *,
+    label: str | None = None,
+    failover: FailoverPlan | None = None,
+) -> Launch:
     """Resolve a parsed provider ``config`` into a :class:`Launch` using ``base_env``
     (typically ``os.environ`` overlaid with the parsed ``.env``).
 
@@ -378,6 +617,9 @@ def build_launch(config: dict, base_env: dict[str, str], *, label: str | None = 
     provider's display name — the config path the user invoked; it falls back to
     :func:`provider_label` when not given. Validates the harness and that every required var
     is present and non-empty in ``base_env``; raises :class:`ProviderError` otherwise.
+    ``failover`` (opencode only) rewrites the routed providers' ``options.baseURL`` to the
+    running failover proxy; ``None`` — any config without a ``failover`` block — changes
+    nothing (the rollback guarantee).
     """
     harness = config.get("harness")
     if harness not in HARNESSES:
@@ -409,7 +651,10 @@ def build_launch(config: dict, base_env: dict[str, str], *, label: str | None = 
         "pi": _pi_env,
         "codex": _codex_env,
     }
-    extra, unset, command, config_files = builders[harness](block, secret_env, base_env)
+    builder = builders[harness]
+    if harness == "opencode" and failover is not None:
+        builder = functools.partial(builder, failover=failover)
+    extra, unset, command, config_files = builder(block, secret_env, base_env)
     env.update(extra)
 
     secrets = set(required)
@@ -1115,13 +1360,21 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
     return env, [], command, tuple(config_files)
 
 
-def _opencode_env(block: dict, secret_env: str, base_env: dict[str, str]) -> BuilderResult:
+def _opencode_env(
+    block: dict,
+    secret_env: str,
+    base_env: dict[str, str],
+    *,
+    failover: FailoverPlan | None = None,
+) -> BuilderResult:
     env: dict[str, str] = {}
     if block.get("disableExternalSkills") is True:
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
     document = _opencode_config_doc(block)
     for provider_def in _provider_defs(block.get("providerDef")):
         document = _apply_provider_def(document, provider_def, base_env)
+    if failover is not None:
+        document = _apply_failover_routes(document, failover)
     if document:
         # Key order is semantic, never cosmetic: opencode evaluates a permission map in
         # config key insertion order and keeps the *last* matching rule, so the shipped
