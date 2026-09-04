@@ -126,10 +126,10 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
       ``openai`` OAuth route (D1 PASS: verbatim forwarding to the codex endpoint);
       model keys the catalogue doesn't declare are seeded from the agents' ``model``
       references (openai's models live in opencode's own registry, not the config).
-    - ``status`` / ``messages`` / ``max_walk`` / ``vision`` / ``chains`` — straight
-      from the block, with openai rungs pruned (D4: not a fallback target in v1 — the
-      OAuth bearer only arrives on openai primaries; a pruned rung is a warning) and
-      duplicate-provider rungs deduped (first occurrence wins).
+    - ``status`` / ``messages`` / ``max_walk`` / ``vision`` / ``chains`` /
+      ``rung_options`` — straight from the block, with openai rungs pruned (D4: not a
+      fallback target in v1 — the OAuth bearer only arrives on openai primaries; a pruned
+      rung is a warning) and duplicate runtime rungs deduped (first occurrence wins).
     """
     block = config.get("failover")
     if not block:
@@ -220,6 +220,20 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
                 f" {provider_id!r}"
             )
 
+    rung_options_raw = block.get("rungOptions", {})
+    if not isinstance(rung_options_raw, dict):
+        raise ProviderError("`failover.rungOptions` must be a JSON object")
+    rung_options: dict[str, dict] = {}
+    for rung, options in rung_options_raw.items():
+        if not isinstance(rung, str) or not rung:
+            raise ProviderError(
+                "`failover.rungOptions` keys must be non-empty runtime rung references"
+            )
+        if not isinstance(options, dict):
+            raise ProviderError(f"failover rungOptions entry {rung!r} must be a JSON object")
+        _resolve_key(_chain_base(rung))
+        rung_options[rung] = options
+
     detect = block.get("detect")
     if not isinstance(detect, dict):
         raise ProviderError("`failover.detect` must be a JSON object")
@@ -253,7 +267,9 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
     chains: dict[str, tuple[str, ...]] = {}
     for key, rungs in chains_raw.items():
         if (
-            not isinstance(rungs, list)
+            not isinstance(key, str)
+            or not key
+            or not isinstance(rungs, list)
             or not rungs
             or not all(isinstance(rung, str) and rung for rung in rungs)
         ):
@@ -282,13 +298,22 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
                 raise ProviderError(
                     f"failover rung {rung_base!r} (chain {key!r}) has no `failover.vision` entry"
                 )
-            if rung_base in seen:
+            if rung in seen:
                 continue
-            seen.add(rung_base)
+            seen.add(rung)
             pruned.append(rung)
         if not pruned:
             raise ProviderError(f"failover chain {key!r} has no eligible rungs after pruning")
         chains[key] = tuple(pruned)
+
+    unused_rung_options = sorted(
+        set(rung_options) - {rung for chain in chains.values() for rung in chain}
+    )
+    if unused_rung_options:
+        raise ProviderError(
+            "failover.rungOptions contains unused runtime rung reference(s): "
+            + ", ".join(repr(rung) for rung in unused_rung_options)
+        )
 
     return (
         {
@@ -297,6 +322,7 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
             "max_walk": max_walk,
             "vision": dict(vision),
             "chains": chains,
+            "rung_options": rung_options,
             "routes": routes,
         },
         warnings,

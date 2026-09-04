@@ -165,7 +165,10 @@ requests. `maxWalk` caps rungs tried per request.
     "detect": { "status": [429, 402], "messages": ["usage limit", "quota", "insufficient balance", "image"] },
     "maxWalk": 3,
     "vision": { "kimi-coding/k3": true, "kimi-coding/k3-low": true },
-    "chains": { "kimi-coding/k3": ["kimi-coding/k3-low"] }
+    "chains": { "kimi-coding/k3": ["kimi-coding/k3-low"] },
+    "rungOptions": {
+      "kimi-coding/k3-low": { "thinking": { "type": "enabled", "effort": "low" } }
+    }
   }
 }
 ```
@@ -173,9 +176,14 @@ requests. `maxWalk` caps rungs tried per request.
 Validation is fail-loud: an unknown rung/model key, a chain key or rung missing from
 `vision`, or a chain containing its own key aborts the launch; `openai` rungs are pruned
 with a warning (not a fallback target in v1 — the OAuth bearer only arrives on openai
-primaries). The proxy is transparent: agents are never told a fallback answered, and the
-stderr walk lines are the user's only signal. Omitting the key starts no proxy and leaves
-the emitted config byte-identical — the rollback switch.
+primaries). Chain keys and rungs may carry an explicit effort suffix such as `@low` or
+`@high`; those are distinct runtime rungs, while provider and `vision` validation uses the
+base model key. `rungOptions` supplies exact runtime-rung options and takes precedence over
+the base model catalogue options; incoming effort knobs are stripped before the selected
+options are applied. A request without a detected effort variant tries `@high` first and
+then the bare chain for compatibility. The proxy is transparent: agents are never told a
+fallback answered, and the stderr walk lines are the user's only signal. Omitting the key
+starts no proxy and leaves the emitted config byte-identical — the rollback switch.
 
 ### `emitTranscript` — in-band transcript capture (default on) { #emittranscript }
 

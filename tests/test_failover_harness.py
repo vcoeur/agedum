@@ -332,15 +332,13 @@ def test_variant_request_walks_variant_chain(capsys):
                 wall.base_url,
                 _kimi_glm_defs(wall.base_url, rung.base_url),
                 chains={
-                    "kimi-coding/k3@high": ["glm/glm-5.3"],
+                    "kimi-coding/k3@high": ["glm/glm-5.3@low"],
                     "kimi-coding/k3": ["glm/glm-5.3"],
                 },
                 vision={"kimi-coding/k3": True, "glm/glm-5.3": False},
             )
-            # The rung model-key's options, applied after the effort strip (D5).
-            config["config"]["opencodeConfig"]["provider"]["glm"]["models"]["glm-5.3"][
-                "options"
-            ] = {"thinking": {"type": "enabled", "effort": "low"}}
+            # Exact runtime-rung options override the base catalogue entry (D5).
+            config["failover"]["rungOptions"] = {"glm/glm-5.3@low": {"reasoningEffort": "low"}}
             with _launched(config, _BASE_ENV) as launch:
                 body = _chat_body()
                 body["reasoning_effort"] = "high"
@@ -351,11 +349,11 @@ def test_variant_request_walks_variant_chain(capsys):
     assert len(wall.requests) == 1
     _, _, rung_body = rung.requests[0]
     rung_json = json.loads(rung_body)
-    # The variant chain was used, the origin's effort knob is gone, and the
-    # rung model-key's own options stand in for it.
+    # The variant chain was used, the origin's effort knob is gone, and the exact
+    # runtime-rung options stand in for it.
     assert rung_json["model"] == "glm-5.3"
     assert "reasoning_effort" not in rung_json
-    assert rung_json["thinking"] == {"type": "enabled", "effort": "low"}
+    assert rung_json["reasoningEffort"] == "low"
     assert "agedum failover: kimi-coding/k3@high rung 0 (primary)" in (capsys.readouterr().err)
 
 

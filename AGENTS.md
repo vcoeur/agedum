@@ -36,7 +36,8 @@ match); top-level skills keep their declared name.
   `FailoverProxy` (`proxy.py`) and rewrites the routed providers' `options.baseURL` to
   `<proxy>/oc/<id>` in `OPENCODE_CONFIG_CONTENT`: on an admission wall (429/402/limit
   text) the proxy walks the model's configured chain — rewriting auth, model id, and
-  effort options per rung — so the session lands on a fallback instead of dying, and
+  effort options per exact runtime rung (including `rungOptions` overrides for
+  `<provider>/<model>@<effort>`) — so the session lands on a fallback instead of dying, and
   opencode never enters its same-model retry loop. Absent key → no proxy, byte-identical
   config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
 - **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
