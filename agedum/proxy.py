@@ -1766,7 +1766,7 @@ def _sniff_variant(body: dict) -> str:
 
     ``reasoning_effort`` → ``reasoningEffort`` → ``thinking.effort`` — first present
     wins. Drives the ``<key>@<variant>`` chain lookup (only glm/glm-5.3 carries a
-    variant pair in oc/mix); a sniff-miss falls back to the bare chain key.
+    variant pair in oc/mix); a sniff-miss is resolved as ``high`` by the chain lookup.
     """
     for key in ("reasoning_effort", "reasoningEffort"):
         value = body.get(key)
@@ -1802,6 +1802,18 @@ def _chain_base(key: str) -> str:
     return key.split("@", 1)[0]
 
 
+def _catalogue_keys_for_variant(route: dict, wire_model: str, variant: str) -> list[str]:
+    """Return wire aliases with matching catalogue effort options first."""
+    keys = list(route["keys_by_wire"].get(wire_model, ()))
+
+    def priority(key: str) -> int:
+        options = route["models"].get(key, {}).get("options") or {}
+        thinking = options.get("thinking") if isinstance(options, dict) else None
+        return 0 if isinstance(thinking, dict) and thinking.get("effort") == variant else 1
+
+    return sorted(keys, key=priority)
+
+
 class _FailoverHandler(_BaseProxyHandler):
     """Per-connection failover mechanics: route on the path prefix, walk on a wall.
 
@@ -1817,6 +1829,7 @@ class _FailoverHandler(_BaseProxyHandler):
     max_walk: int = 3
     chains: dict = {}
     vision: dict = {}
+    rung_options: dict = {}
     _pins: dict = {}
     _pins_lock: threading.Lock = threading.Lock()
 
@@ -1956,13 +1969,14 @@ class _FailoverHandler(_BaseProxyHandler):
         The wire model id maps back to launcher model keys through the resolved
         catalogue (an alias entry's ``id`` override means two keys can share one wire
         id — kimi's k3/k3-low both send ``k3``); the sniffed variant prefers the
-        ``<key>@<variant>`` chain before the bare key.
+        ``<key>@<variant>`` chain before the bare key, defaulting a missing variant to
+        ``high``.
         """
-        variant = _sniff_variant(parsed)
+        variant = _sniff_variant(parsed) or "high"
         wire_model = str(parsed.get("model") or "")
-        for key in route["keys_by_wire"].get(wire_model, ()):
+        for key in _catalogue_keys_for_variant(route, wire_model, variant):
             base = f"{provider_id}/{key}"
-            for candidate in (f"{base}@{variant}" if variant else "", base):
+            for candidate in (f"{base}@{variant}", base):
                 if candidate and candidate in self.chains:
                     return candidate, self.chains[candidate]
         return "", None
@@ -1987,7 +2001,8 @@ class _FailoverHandler(_BaseProxyHandler):
         for knob in ("reasoning_effort", "reasoningEffort", "thinking"):
             body.pop(knob, None)
         body["model"] = entry.get("id") or rung_key
-        for key, value in (entry.get("options") or {}).items():
+        options = self.rung_options[rung] if rung in self.rung_options else entry.get("options")
+        for key, value in (options or {}).items():
             body[key] = value
         headers = self._inbound_headers()
         headers["Authorization"] = f"Bearer {rung_route['api_key']}"
@@ -2166,6 +2181,7 @@ class FailoverProxy(_LocalProxy):
                     "max_walk": int(spec["max_walk"]),
                     "chains": spec["chains"],
                     "vision": spec["vision"],
+                    "rung_options": spec.get("rung_options", {}),
                     # Fresh per proxy instance: two proxies in one process (tests) must
                     # not share a pin table.
                     "_pins": {},

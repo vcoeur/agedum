@@ -236,7 +236,7 @@ def _three_routes(a, b, c):
 VISION = {"p/m1": True, "f1/r1": False, "f2/r2": True}
 
 
-def _spec(routes, chains, vision=VISION, *, status=(429, 402), max_walk=3):
+def _spec(routes, chains, vision=VISION, *, status=(429, 402), max_walk=3, rung_options=None):
     messages = ("usage limit", "quota", "insufficient balance", "image")
     return {
         "status": list(status),
@@ -245,6 +245,7 @@ def _spec(routes, chains, vision=VISION, *, status=(429, 402), max_walk=3):
         "vision": dict(vision),
         "chains": dict(chains),
         "routes": routes,
+        "rung_options": dict(rung_options or {}),
     }
 
 
@@ -399,7 +400,7 @@ def test_sniff_variant_precedence():
     assert _sniff_variant({}) == ""
 
 
-def test_variant_chain_key_preferred_with_sniff_miss_fallback():
+def test_missing_variant_defaults_to_high_before_bare_chain():
     with (
         _StubUpstream("p", script=[(429, "limit", {})] * 2) as a,
         _StubUpstream("high-rung") as b,
@@ -422,7 +423,7 @@ def test_variant_chain_key_preferred_with_sniff_miss_fallback():
             assert json.loads(body) == {"ok": "high-rung"}
             status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
             assert status == 200
-            assert json.loads(body) == {"ok": "bare-rung"}
+            assert json.loads(body) == {"ok": "high-rung"}
 
 
 def test_wire_alias_resolves_through_keys_by_wire():
@@ -463,6 +464,59 @@ def test_wire_alias_resolves_through_keys_by_wire():
     # key + vision class), so the walled primary was contacted only once.
     assert len(a.requests) == 1
     assert len(b.requests) == 2
+
+
+def test_wire_alias_prefers_the_matching_effort_chain(capsys):
+    with (
+        _StubUpstream("p", script=[(429, "limit", {})] * 2) as primary,
+        _StubUpstream("rung") as rung,
+    ):
+        routes = {
+            "p": _route(
+                primary.base_url,
+                api_key="key-p",
+                models={
+                    "k3": {
+                        "id": "k3",
+                        "options": {"thinking": {"type": "enabled", "effort": "high"}},
+                    },
+                    "k3-low": {
+                        "id": "k3",
+                        "options": {"thinking": {"type": "enabled", "effort": "low"}},
+                    },
+                },
+            ),
+            "f1": _route(rung.base_url, api_key="key-f1", models={"r1": {"id": "r1"}}),
+        }
+        spec = _spec(
+            routes,
+            {
+                "p/k3@high": ["f1/r1"],
+                "p/k3-low@low": ["f1/r1"],
+            },
+            vision={"p/k3": True, "p/k3-low": True, "f1/r1": True},
+        )
+        with FailoverProxy(spec) as proxy:
+            assert (
+                _post(
+                    proxy.base_url,
+                    "/oc/p/chat/completions",
+                    _chat_body(model="k3", thinking={"type": "enabled", "effort": "low"}),
+                )[0]
+                == 200
+            )
+            assert (
+                _post(
+                    proxy.base_url,
+                    "/oc/p/chat/completions",
+                    _chat_body(model="k3", reasoning_effort="high"),
+                )[0]
+                == 200
+            )
+
+    walk_log = capsys.readouterr().err
+    assert "p/k3-low@low rung 0 (primary)" in walk_log
+    assert "p/k3@high rung 0 (primary)" in walk_log
 
 
 def test_unmapped_model_forwards_transparently():
@@ -609,6 +663,57 @@ def test_variant_suffixed_rung_rewrites_to_base_model_key():
     assert parsed["model"] == "r2"  # not "r2@low"
     assert parsed["thinking"] == {"type": "enabled", "effort": "low"}
     assert headers["Authorization"] == "Bearer key-f2"
+
+
+def test_exact_variant_rung_options_keep_low_and_high_distinct():
+    with _StubUpstream("p", [(429, "limit", {})] * 2) as primary, _StubUpstream("rung") as rung:
+        routes = {
+            "p": _route(
+                primary.base_url,
+                api_key="key-p",
+                models={"m1": {"id": "m1", "options": {}}},
+            ),
+            "f1": _route(
+                rung.base_url,
+                api_key="key-f1",
+                models={
+                    "gpt": {
+                        "id": "gpt-5.6-luna",
+                        "options": {"thinking": {"type": "enabled", "effort": "catalogue"}},
+                    }
+                },
+            ),
+        }
+        chains = {
+            "p/m1@low": ["f1/gpt@low"],
+            "p/m1@high": ["f1/gpt@high"],
+        }
+        vision = {"p/m1": True, "f1/gpt": True}
+        rung_options = {
+            "f1/gpt@low": {"reasoning_effort": "low"},
+            "f1/gpt@high": {"reasoningEffort": "high"},
+        }
+        spec = _spec(routes, chains, vision, rung_options=rung_options)
+        with FailoverProxy(spec) as proxy:
+            status, _, _ = _post(
+                proxy.base_url,
+                "/oc/p/chat/completions",
+                _chat_body(thinking={"type": "enabled", "effort": "low"}),
+            )
+            assert status == 200
+            status, _, _ = _post(
+                proxy.base_url,
+                "/oc/p/chat/completions",
+                _chat_body(reasoningEffort="high"),
+            )
+            assert status == 200
+
+    low_body, high_body = [json.loads(request[3]) for request in rung.requests]
+    assert low_body["model"] == high_body["model"] == "gpt-5.6-luna"
+    assert "thinking" not in low_body
+    assert low_body["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in high_body
+    assert high_body["reasoningEffort"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +1003,42 @@ def test_failover_spec_resolves_routes_and_prunes_openai_rungs():
     assert len(warnings) == 1
     assert "openai rung" in warnings[0]
     assert spec["chains"]["kimi-coding/k3-low"] == ("kimi-coding/k3",)
+
+
+def test_failover_spec_preserves_full_rung_option_keys():
+    options = {"thinking": {"type": "enabled", "effort": "low"}}
+    config = _mix_like_config(rungOptions={"kimi-coding/k3-low": options})
+    spec, _ = failover_spec(config, {"KIMI_API_KEY": "sk-kimi"})
+    assert spec["rung_options"] == {"kimi-coding/k3-low": options}
+
+
+@pytest.mark.parametrize(
+    "rung_options,match",
+    [
+        ([], "rungOptions"),
+        ({"": {}}, "non-empty"),
+        ({"nope/no-model@low": {}}, "nope/no-model"),
+        ({"openai/gpt-5.6-luna@low": []}, "JSON object"),
+        ({"openai/gpt-5.6-luna@low": {"reasoning_effort": "low"}}, "unused"),
+    ],
+)
+def test_failover_spec_rejects_invalid_rung_options(rung_options, match):
+    with pytest.raises(ProviderError, match=match):
+        failover_spec(_mix_like_config(rungOptions=rung_options), {"KIMI_API_KEY": "sk"})
+
+
+def test_failover_spec_retains_effort_rungs_with_the_same_base_model():
+    config = _mix_like_config(
+        chains={
+            "kimi-coding/k3": ["kimi-coding/k3-low@low", "kimi-coding/k3-low@high"],
+            "kimi-coding/k3-low": ["kimi-coding/k3"],
+        }
+    )
+    spec, _ = failover_spec(config, {"KIMI_API_KEY": "sk"})
+    assert spec["chains"]["kimi-coding/k3"] == (
+        "kimi-coding/k3-low@low",
+        "kimi-coding/k3-low@high",
+    )
 
 
 def test_failover_spec_rejects_unknown_rung_with_the_offending_key():
