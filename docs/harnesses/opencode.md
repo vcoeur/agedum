@@ -144,10 +144,24 @@ untouched). The proxy forwards the primary attempt verbatim and — when it hits
 **admission wall** before any byte reached opencode (a `detect.status` code, or a 4xx whose
 first 2 KB carries a `detect.messages` substring) — re-issues the request down the model's
 `chains` with per-rung auth, model id, and effort options, so the session lands on a
-surviving rung and opencode never sees the 429 to retry. Chain exhaustion returns the last
+surviving rung and opencode never sees the 429 to retry.
+
+**openai primaries translate onto chat-completions rungs.** The OAuth/codex route speaks
+the Responses API, so a Responses-shaped request (`input` present) keeps its verbatim
+primary forward, but a fallback rung — a `providerDef`, always Chat Completions — receives
+it translated: `instructions` becomes the system message and `input` the `messages`, the
+hop targets `/chat/completions` with `Accept: text/event-stream`, and the upstream's
+Chat-Completions SSE stream is relayed back as Responses SSE events
+(`response.created` → reasoning/text/tool-call items → `response.completed`) through the
+same translator the codex harness uses. Non-200 responses keep the wall classification and
+error capture verbatim (substrate-independent), and a translated 200 pins the rung like
+any other. Untranslated hops (chat primaries → chat rungs) are unchanged.
+
+Chain exhaustion returns the last
 upstream error verbatim (native retry/death behaviour, never worse); image-bearing requests
 walk only `vision: true` rungs; a per-launch rung pin skips a walled primary on later
-requests. `maxWalk` caps rungs tried per request.
+requests. `maxWalk` caps rungs tried per request. The stderr walk lines name each wall and
+the rung that finally answered (a pinned replay is silent).
 
 ```json
 {
@@ -181,9 +195,13 @@ primaries). Chain keys and rungs may carry an explicit effort suffix such as `@l
 base model key. `rungOptions` supplies exact runtime-rung options and takes precedence over
 the base model catalogue options; incoming effort knobs are stripped before the selected
 options are applied. A request without a detected effort variant tries `@high` first and
-then the bare chain for compatibility. The proxy is transparent: agents are never told a
-fallback answered, and the stderr walk lines are the user's only signal. Omitting the key
-starts no proxy and leaves the emitted config byte-identical — the rollback switch.
+then the bare chain; failing both, it resolves to any effort-suffixed chain sharing the
+model key (sorted, deterministic) — the openai Responses wire carries no effort knob at
+all, so a knob-less primary still finds its model's authored chain, and a worker without
+an authored chain inherits its base model's chain. The proxy is transparent: agents are
+never told a fallback answered, and the stderr walk lines are the user's only signal.
+Omitting the key starts no proxy and leaves the emitted config byte-identical — the
+rollback switch.
 
 ### `emitTranscript` — in-band transcript capture (default on) { #emittranscript }
 

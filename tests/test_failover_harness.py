@@ -417,3 +417,104 @@ def test_exhausted_chain_caller_sees_one_error_verbatim(capsys):
     assert "rung 0 (primary)" in stderr
     assert "rung 1 (glm/glm-5.3)" in stderr
     assert "rung 2 (deepseek/deepseek-v4-flash-vision-exp)" in stderr
+
+
+# ---------------------------------------------------------------------------
+# Translated rung hop — the openai Responses primary onto a chat rung
+# ---------------------------------------------------------------------------
+
+
+def _responses_body():
+    """A Responses-shaped request body — what opencode sends on the openai/OAuth route."""
+    return {
+        "model": "gpt-5.6-sol",
+        "instructions": "You are a helpful assistant.",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "text": {"verbosity": "low"},
+        "store": False,
+    }
+
+
+def _opencode_responses_post(launch, provider_id, body):
+    """The opencode leg on the Responses route: post to the built-in openai baseURL."""
+    document = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    base_url = document["provider"][provider_id]["options"]["baseURL"]
+    data = json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"{base_url}/responses",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer oauth-token"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+def test_openai_primary_translates_onto_chat_rung_end_to_end(monkeypatch, capsys):
+    """The oc/gpt-first shape, launch wiring included: the built-in openai provider's
+    baseURL is rewritten, the walled primary is forwarded verbatim, and the walk lands
+    on the GLM rung with a translated chat-completions hop — the client sees the
+    Responses SSE sequence it expects."""
+    with _WallUpstream(429, {"error": {"message": "You've reached your usage limit"}}) as wall:
+        with _SSEFallbackUpstream() as rung:
+            monkeypatch.setattr("agedum.provider.OPENAI_CODEX_UPSTREAM", wall.base_url)
+            config = {
+                "harness": "opencode",
+                "requiredEnv": ["Z_API_KEY"],
+                "config": {
+                    "model": "openai/gpt-5.6-sol",
+                    "providerDef": [
+                        {
+                            "id": "glm",
+                            "npm": "@ai-sdk/openai-compatible",
+                            "baseUrl": rung.base_url,
+                            "apiKeyEnv": "Z_API_KEY",
+                        }
+                    ],
+                    "opencodeConfig": {
+                        "provider": {"glm": {"models": {"glm-5.3-flash": {"name": "GLM Flash"}}}},
+                        "agent": {
+                            "main-sol-low": {"mode": "primary", "model": "openai/gpt-5.6-sol"}
+                        },
+                    },
+                },
+                "failover": {
+                    "detect": _MIX_DETECT,
+                    "maxWalk": 3,
+                    "vision": {"openai/gpt-5.6-sol": True, "glm/glm-5.3-flash": True},
+                    # Authored on the effort-suffixed pair only — the Responses wire
+                    # carries no knob, so resolution reaches it via the base fallback.
+                    "chains": {"openai/gpt-5.6-sol@low": ["glm/glm-5.3-flash@high"]},
+                    "rungOptions": {"glm/glm-5.3-flash@high": {"reasoning_effort": "high"}},
+                },
+            }
+            with _launched(config, {"Z_API_KEY": "sk-zai"}) as launch:
+                status, body = _opencode_responses_post(launch, "openai", _responses_body())
+
+    assert status == 200
+    # The rung's chat-SSE marker came back inside a translated Responses stream.
+    assert _SSEFallbackUpstream.MARKER in body
+    assert b"event: response.created" in body
+    assert b"event: response.completed" in body
+
+    # The walled primary saw the Responses request verbatim, exactly once.
+    assert len(wall.requests) == 1
+    assert wall.requests[0][0] == "/responses"
+
+    # The rung hop arrived in chat-completions shape with rung auth, model id, and
+    # the exact runtime-rung effort option.
+    rung_path, rung_headers, rung_body = rung.requests[0]
+    assert rung_path == "/chat/completions"
+    assert rung_headers["Authorization"] == "Bearer sk-zai"
+    chat = json.loads(rung_body)
+    assert chat["model"] == "glm-5.3-flash"
+    assert chat["reasoning_effort"] == "high"
+    assert chat["messages"][0] == {"role": "system", "content": "You are a helpful assistant."}
+    assert chat["messages"][1] == {"role": "user", "content": "hi"}
+
+    stderr = capsys.readouterr().err
+    assert "agedum failover: openai/gpt-5.6-sol@low rung 0 (primary)" in stderr
+    assert "agedum failover: openai/gpt-5.6-sol@low rung 1 (glm/glm-5.3-flash@high)" in stderr
