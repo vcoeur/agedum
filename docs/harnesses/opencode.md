@@ -159,9 +159,10 @@ any other. Untranslated hops (chat primaries → chat rungs) are unchanged.
 
 Chain exhaustion returns the last
 upstream error verbatim (native retry/death behaviour, never worse); image-bearing requests
-walk only `vision: true` rungs; a per-launch rung pin skips a walled primary on later
-requests. `maxWalk` caps rungs tried per request. The stderr walk lines name each wall and
-the rung that finally answered (a pinned replay is silent).
+walk only `vision: true` rungs — though a translated hop flattens the image away
+(`input_image` parts are dropped, the rung answers on the text alone); a per-launch rung pin
+skips a walled primary on later requests. `maxWalk` caps rungs tried per request. The stderr
+walk lines name each wall and the rung that finally answered (a pinned replay is silent).
 
 ```json
 {
