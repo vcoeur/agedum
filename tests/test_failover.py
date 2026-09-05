@@ -28,6 +28,7 @@ from agedum.proxy import (
     OPENAI_CODEX_UPSTREAM,
     FailoverProxy,
     _body_has_image,
+    _FailoverHandler,
     _sniff_variant,
     failover_route_base,
 )
@@ -1172,3 +1173,344 @@ def test_failover_spec_never_touches_a_non_opencode_harness():
     config["harness"] = "claude"
     with pytest.raises(ProviderError, match="opencode"):
         failover_spec(config, {})
+
+
+# ---------------------------------------------------------------------------
+# Chain resolution base fallback (Responses primaries have no effort knob)
+# ---------------------------------------------------------------------------
+
+
+def _resolver(chains):
+    """A minimal ``_FailoverHandler`` stand-in: ``_resolve_chain`` reads only ``chains``."""
+    handler = object.__new__(_FailoverHandler)
+    handler.chains = chains
+    return handler
+
+
+def test_resolve_chain_base_fallback_finds_sole_suffixed_chain():
+    # The openai Responses wire carries no effort knob at all: sniff → "" → defaults
+    # high, so an @low-keyed chain is reachable only through the base fallback.
+    route = _route("http://up", models={"gpt-5.6-sol": {"id": "gpt-5.6-sol"}})
+    chains = {"openai/gpt-5.6-sol@low": ("f1/r1",)}
+    assert _resolver(chains)._resolve_chain("openai", route, {"model": "gpt-5.6-sol"}) == (
+        "openai/gpt-5.6-sol@low",
+        ("f1/r1",),
+    )
+
+
+def test_resolve_chain_exact_variant_still_preferred_over_fallback():
+    # Knob-less (defaults high) with both variants authored: @high wins in the main
+    # lookup — the fallback never fires.
+    route = _route("http://up", models={"m1": {"id": "m1"}})
+    chains = {"p/m1@low": ("f1/r1",), "p/m1@high": ("f2/r2",)}
+    assert _resolver(chains)._resolve_chain("p", route, {"model": "m1"}) == (
+        "p/m1@high",
+        ("f2/r2",),
+    )
+
+
+def test_resolve_chain_base_fallback_is_sorted_and_deterministic():
+    # A variant with no authored chain (medium) misses both exact candidates; the
+    # fallback picks the sorted-first surviving chain sharing the base.
+    route = _route("http://up", models={"m1": {"id": "m1"}})
+    chains = {"p/m1@low": ("f1/r1",), "p/m1@high": ("f2/r2",)}
+    assert _resolver(chains)._resolve_chain(
+        "p", route, {"model": "m1", "reasoning_effort": "medium"}
+    ) == ("p/m1@high", ("f2/r2",))
+
+
+def test_resolve_chain_base_fallback_needs_a_matching_base():
+    # A model whose base has no chain at all stays unmapped: transparent forward.
+    route = _route("http://up", models={"m1": {"id": "m1"}})
+    chains = {"p/other@low": ("f1/r1",)}
+    assert _resolver(chains)._resolve_chain("p", route, {"model": "m1"}) == ("", None)
+
+
+# ---------------------------------------------------------------------------
+# Translated rung hop — Responses primary → chat-completions rung
+# ---------------------------------------------------------------------------
+
+
+class _ChatSSEUpstream:
+    """A healthy chat-completions rung: records requests, streams canned Chat SSE.
+
+    One ``reasoning_content`` delta (the GLM Flash thinking shape) then the answer
+    text and a usage frame — enough for the translated relay's full Responses
+    sequence to be asserted.
+    """
+
+    MARKER = "TRANSLATED-STUB-OK"
+    THINKING = "thinking out loud"
+    FRAMES = (
+        b'data: {"id":"c1","choices":[{"delta":{"reasoning_content":"thinking out loud"}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{"content":"TRANSLATED-STUB-OK"}}]}\n\n',
+        b'data: {"id":"c1","choices":[{"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}\n\n',
+        b"data: [DONE]\n\n",
+    )
+
+    def __init__(self):
+        self.requests = []
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def _handler(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                stub.requests.append((self.command, self.path, dict(self.headers.items()), body))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.end_headers()
+                for frame in stub.FRAMES:
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+    @property
+    def base_url(self):
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _responses_body(model="gpt-5.6-sol", **extra):
+    """A Responses-shaped request body — the openai/OAuth wire opencode actually sends."""
+    return {
+        "model": model,
+        "instructions": "You are a helpful assistant.",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "text": {"verbosity": "low"},
+        "store": False,
+        **extra,
+    }
+
+
+def _sse_events(raw: bytes) -> list[tuple[str, dict]]:
+    """Parsed ``(event, data)`` pairs from a Responses SSE body."""
+    events: list[tuple[str, dict]] = []
+    for frame in raw.split(b"\n\n"):
+        if not frame.strip():
+            continue
+        event_type = ""
+        data = b"{}"
+        for line in frame.split(b"\n"):
+            if line.startswith(b"event: "):
+                event_type = line[len(b"event: ") :].decode()
+            elif line.startswith(b"data: "):
+                data = line[len(b"data: ") :]
+        events.append((event_type, json.loads(data)))
+    return events
+
+
+def _openai_routes(wall, rung):
+    """The openai (Responses/OAuth) primary + one chat-completions rung."""
+    return {
+        "openai": _route(
+            wall.base_url,
+            openai=True,
+            models={"gpt-5.6-sol": {"id": "gpt-5.6-sol", "options": {}}},
+        ),
+        "f1": _route(rung.base_url, api_key="key-f1", models={"r1": {"id": "r1", "options": {}}}),
+    }
+
+
+def test_translated_rung_speaks_chat_and_client_sees_responses_sse(capsys):
+    with (
+        _StubUpstream("openai", [(429, "usage limit exceeded", {})]) as wall,
+        _ChatSSEUpstream() as rung,
+    ):
+        spec = _spec(
+            _openai_routes(wall, rung),
+            {"openai/gpt-5.6-sol@low": ["f1/r1"]},
+            vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
+            rung_options={"f1/r1": {"reasoning_effort": "high"}},
+        )
+        with FailoverProxy(spec) as proxy:
+            status, headers, body = _post(
+                proxy.base_url,
+                "/oc/openai/responses",
+                _responses_body(),
+                headers={"Authorization": "Bearer oauth-token", "ChatGPT-Account-Id": "acc-1"},
+            )
+    assert status == 200
+    assert "text/event-stream" in headers["Content-Type"]
+
+    # The rung hop arrived as a chat-completions request: system + flattened
+    # messages body, rung model id, the rungOptions effort, SSE negotiated, rung
+    # auth (no OAuth account header), and none of the Responses-only fields.
+    method, path, rung_headers, rung_body = rung.requests[0]
+    assert (method, path) == ("POST", "/chat/completions")
+    rung_lower = {key.lower(): value for key, value in rung_headers.items()}
+    assert rung_lower["authorization"] == "Bearer key-f1"
+    assert rung_lower["accept"] == "text/event-stream"
+    assert "chatgpt-account-id" not in rung_lower
+    chat = json.loads(rung_body)
+    assert chat["model"] == "r1"
+    assert chat["messages"] == [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "hi"},
+    ]
+    assert chat["reasoning_effort"] == "high"
+    assert chat["stream"] is True
+    for responses_only in ("input", "instructions", "text", "store"):
+        assert responses_only not in chat
+
+    # The client saw one full Responses SSE sequence — created → reasoning item →
+    # message item → completed — with the rung's answer as the message text.
+    events = _sse_events(body)
+    assert [event for event, _ in events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+        "response.output_item.done",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    completed = events[-1][1]["response"]
+    assert completed["status"] == "completed"
+    assert completed["model"] == "r1"
+    assert completed["usage"] == {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+    reasoning_item, message_item = completed["output"]
+    assert reasoning_item["type"] == "reasoning"
+    assert reasoning_item["summary"][0]["text"] == _ChatSSEUpstream.THINKING
+    assert message_item["type"] == "message"
+    assert message_item["content"][0]["text"] == _ChatSSEUpstream.MARKER
+
+    # The primary saw the Responses request verbatim (and wall'ed), exactly once.
+    assert len(wall.requests) == 1
+    primary_method, primary_path, _, primary_body = wall.requests[0]
+    assert (primary_method, primary_path) == ("POST", "/responses")
+    assert json.loads(primary_body)["input"]
+
+    # The stderr walk lines — the user's only failover signal.
+    walk_log = capsys.readouterr().err
+    assert "agedum failover: openai/gpt-5.6-sol@low rung 0 (primary)" in walk_log
+    assert "agedum failover: openai/gpt-5.6-sol@low rung 1 (f1/r1)" in walk_log
+
+
+def test_translated_rung_pin_skips_walled_primary(capsys):
+    with (
+        _StubUpstream("openai", [(429, "usage limit exceeded", {})]) as wall,
+        _ChatSSEUpstream() as rung,
+    ):
+        spec = _spec(
+            _openai_routes(wall, rung),
+            {"openai/gpt-5.6-sol@low": ["f1/r1"]},
+            vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
+        )
+        with FailoverProxy(spec) as proxy:
+            for _ in range(2):
+                status, _, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+                assert status == 200
+                assert _ChatSSEUpstream.MARKER.encode() in body
+    assert len(wall.requests) == 1  # pinned: the walled primary was never re-hit
+    assert [request[1] for request in rung.requests] == ["/chat/completions"] * 2
+    # The walk logged the wall and the rung that answered — once; the pinned replay
+    # never walked, so it stayed silent.
+    assert capsys.readouterr().err.splitlines() == [
+        "agedum failover: openai/gpt-5.6-sol@low rung 0 (primary)",
+        "agedum failover: openai/gpt-5.6-sol@low rung 1 (f1/r1)",
+    ]
+
+
+def test_image_bearing_responses_request_walks_only_vision_rungs():
+    with (
+        _StubUpstream("openai", [(429, "limit", {})]) as wall,
+        _StubUpstream("f1") as text_only,
+        _ChatSSEUpstream() as vision_rung,
+    ):
+        routes = _openai_routes(wall, text_only)
+        routes["f2"] = _route(vision_rung.base_url, api_key="key-f2", models={"r2": {"id": "r2"}})
+        spec = _spec(
+            routes,
+            {"openai/gpt-5.6-sol@low": ["f1/r1", "f2/r2"]},
+            vision={"openai/gpt-5.6-sol": True, "f1/r1": False, "f2/r2": True},
+        )
+        image_body = _responses_body(
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "look"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,x"},
+                    ],
+                }
+            ]
+        )
+        with FailoverProxy(spec) as proxy:
+            status, _, body = _post(proxy.base_url, "/oc/openai/responses", image_body)
+    assert status == 200
+    assert _ChatSSEUpstream.MARKER.encode() in body
+    # The vision filter ran on the Responses shape: the text-only rung was skipped,
+    # the vision rung got the translated hop.
+    assert text_only.requests == []
+    assert vision_rung.requests[0][1] == "/chat/completions"
+    # The image part has no chat-completions equivalent in the MVP translator: the
+    # text parts survive the flattening.
+    assert json.loads(vision_rung.requests[0][3])["messages"] == [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "look"},
+    ]
+
+
+def test_translated_rung_exhaustion_returns_error_verbatim():
+    with (
+        _StubUpstream("openai", [(429, "usage limit exceeded", {})]) as wall,
+        _StubUpstream("f1", [(402, "Insufficient Balance", {"Retry-After": "9"})]) as rung,
+    ):
+        spec = _spec(
+            _openai_routes(wall, rung),
+            {"openai/gpt-5.6-sol@low": ["f1/r1"]},
+            vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
+        )
+        with FailoverProxy(spec) as proxy:
+            status, headers, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+    # The translated rung's wall classified as today: the walk exhausted and the
+    # last upstream error passed through verbatim.
+    assert status == 402
+    assert body == b"Insufficient Balance"
+    assert headers["Retry-After"] == "9"
+    assert rung.requests[0][1] == "/chat/completions"
+
+
+def test_translated_rung_non_wall_error_passes_through_without_walk():
+    with (
+        _StubUpstream("openai", [(429, "limit", {})]) as wall,
+        _StubUpstream("f1", [(401, "invalid api key", {})]) as rung,
+    ):
+        spec = _spec(
+            _openai_routes(wall, rung),
+            {"openai/gpt-5.6-sol@low": ["f1/r1"]},
+            vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
+        )
+        with FailoverProxy(spec) as proxy:
+            status, _, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+    # Bad keys keep native semantics even on a translated hop.
+    assert status == 401
+    assert body == b"invalid api key"
+    assert len(wall.requests) == 1

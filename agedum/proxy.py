@@ -1830,6 +1830,10 @@ class _FailoverHandler(_BaseProxyHandler):
     chains: dict = {}
     vision: dict = {}
     rung_options: dict = {}
+    # Stashed by _prepare_rung for the walk's relay (one handler instance per
+    # request): non-empty when the rung hop translated a Responses request onto a
+    # chat-completions rung, carrying the rung's upstream model id.
+    _translated_model: str = ""
     _pins: dict = {}
     _pins_lock: threading.Lock = threading.Lock()
 
@@ -1903,6 +1907,7 @@ class _FailoverHandler(_BaseProxyHandler):
         # net below and the walk continues.
         attempts: list[str | None] = [None, *chain]
         index = self._pinned_rung(chain_key, vision_class)
+        start_index = index
         last_error: tuple[int, list[tuple[str, str]], bytes] | None = None
         rungs_tried = 0
         while index < len(attempts):
@@ -1949,8 +1954,20 @@ class _FailoverHandler(_BaseProxyHandler):
             try:
                 if head:
                     self._relay_buffered(response, head)
+                elif self._translated_model and response.status == 200:
+                    # A translated hop's success is chat-completions SSE upstream;
+                    # the Responses-shaped client gets Responses SSE (mirrors
+                    # _ResponsesToChatHandler.relay_response).
+                    self._relay_translated(response)
                 else:
                     self._relay_passthrough(response)
+                served = rung is not None and not head and 200 <= response.status < 300
+                if served and index > start_index:
+                    # The serving rung is logged too — the walk line is the user's
+                    # only signal of where a failed-over request landed (one line
+                    # per wall, then one for the rung that answered). A pinned
+                    # replay enters the walk at its pin and never logs.
+                    self._log_walk(chain_key, index, rung)
             except (OSError, http.client.HTTPException):
                 # Mid-stream death after the first forwarded byte: no walk (v1 is
                 # admission-time only) — the broken stream passes through and
@@ -1971,14 +1988,31 @@ class _FailoverHandler(_BaseProxyHandler):
         id — kimi's k3/k3-low both send ``k3``); the sniffed variant prefers the
         ``<key>@<variant>`` chain before the bare key, defaulting a missing variant to
         ``high``.
+
+        When both exact lookups miss for every catalogue key, a base fallback picks
+        among the chains that share the base — sorted for determinism. The openai
+        Responses wire carries no effort knob at all (its only effort-shaped field,
+        ``text.verbosity``, is not an effort), so a knob-less body defaults to
+        ``high`` and would never reach an ``@low``-keyed chain without this fallback.
         """
         variant = _sniff_variant(parsed) or "high"
         wire_model = str(parsed.get("model") or "")
-        for key in _catalogue_keys_for_variant(route, wire_model, variant):
+        keys = _catalogue_keys_for_variant(route, wire_model, variant)
+        for key in keys:
             base = f"{provider_id}/{key}"
             for candidate in (f"{base}@{variant}", base):
                 if candidate and candidate in self.chains:
                     return candidate, self.chains[candidate]
+        # Base fallback: the ``@{variant}`` and bare candidates already missed, so
+        # any surviving chain for this base is an effort-suffixed one — take the
+        # sorted-first (effort fidelity on the fallback rung is best-effort).
+        for key in keys:
+            base = f"{provider_id}/{key}"
+            matches = sorted(
+                candidate for candidate in self.chains if _chain_base(candidate) == base
+            )
+            if matches:
+                return matches[0], self.chains[matches[0]]
         return "", None
 
     def _prepare_rung(
@@ -1993,11 +2027,25 @@ class _FailoverHandler(_BaseProxyHandler):
         A ``@variant`` suffix on the rung is stripped before the catalogue lookup:
         the rung's model-key ``options`` already carry the effort shape (D5), and a
         suffixed key would miss the catalogue and send a bogus model id upstream.
+
+        A Responses-shaped inbound body (``input`` present — the openai/OAuth wire)
+        landing on a chat-completions rung (any ``providerDef`` route; the built-in
+        ``openai`` route speaks Responses itself) is translated first
+        (:func:`responses_to_chat_request`), then the same rung rewrite applies to
+        the *chat* body, and the hop targets ``/chat/completions`` with
+        ``Accept: text/event-stream``. :attr:`_translated_model` is stashed so
+        ``_walk`` relays a 200 through :func:`translate_chat_stream` as Responses
+        SSE (one handler instance per request — the established stash pattern).
+        Untranslated hops keep the verbatim path and body shape.
         """
         rung_provider, rung_key = _chain_base(rung).split("/", 1)
         rung_route = self.routes[rung_provider]
         entry = rung_route["models"].get(rung_key) or {}
+        self._translated_model = ""
+        translate = "input" in parsed and not rung_route["openai"]
         body = dict(parsed)
+        if translate:
+            body = responses_to_chat_request(body)
         for knob in ("reasoning_effort", "reasoningEffort", "thinking"):
             body.pop(knob, None)
         body["model"] = entry.get("id") or rung_key
@@ -2007,6 +2055,12 @@ class _FailoverHandler(_BaseProxyHandler):
         headers = self._inbound_headers()
         headers["Authorization"] = f"Bearer {rung_route['api_key']}"
         headers["Content-Type"] = "application/json"
+        if translate:
+            self._translated_model = str(body["model"])
+            headers["Accept"] = "text/event-stream"
+            path = "/chat/completions"
+        else:
+            path = rest
         for name in [name for name in headers if name.lower() == "chatgpt-account-id"]:
             del headers[name]
         upstream = urlsplit(rung_route["upstream"])
@@ -2014,7 +2068,7 @@ class _FailoverHandler(_BaseProxyHandler):
             json.dumps(body, separators=(",", ":")).encode(),
             headers,
             upstream,
-            _join(upstream, rest),
+            _join(upstream, path),
         )
 
     # --- one upstream hop --------------------------------------------------
@@ -2131,6 +2185,22 @@ class _FailoverHandler(_BaseProxyHandler):
             self.wfile.write(chunk)
         self.wfile.flush()
 
+    def _relay_translated(self, response: http.client.HTTPResponse) -> None:
+        """Relay a translated rung's 200: chat-completions SSE in, Responses SSE out.
+
+        The chat stream is translated frame-by-frame with :func:`translate_chat_stream`
+        (reasoning items, text deltas, tool-call items, usage, ``response.completed``) —
+        the same surface codex's ``ResponsesToChatProxy`` relays through, so the
+        Responses-shaped client sees the event sequence it expects.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for frame in translate_chat_stream(response.read, model=self._translated_model):
+            self.wfile.write(frame)
+            self.wfile.flush()
+
     # --- rung pin (D6) ------------------------------------------------------
 
     def _pinned_rung(self, chain_key: str, vision_class: str) -> int:
@@ -2142,8 +2212,9 @@ class _FailoverHandler(_BaseProxyHandler):
             self._pins[f"{chain_key}#{vision_class}"] = index
 
     def _log_walk(self, chain_key: str, index: int, rung: str | None) -> None:
-        # The user's only signal that a failover happened (ruling 2026-08-30: agents
-        # are never told a fallback answered).
+        # One stderr line per walk event: every wall that walks on, and the rung
+        # that finally served — the user's only signal that a failover happened
+        # (ruling 2026-08-30: agents are never told a fallback answered).
         where = "primary" if rung is None else rung
         print(
             f"agedum failover: {chain_key} rung {index} ({where})",
