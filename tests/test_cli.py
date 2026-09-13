@@ -1417,6 +1417,59 @@ def test_abstract_config_refuses_to_launch(monkeypatch, tmp_path):
     assert exc.value.code == 1  # fail-loud, no launch
 
 
+def test_abstract_include_fragment_refuses_direct_launch(monkeypatch, tmp_path):
+    # An included fragment is composition only — launching it directly still hits the
+    # abstract refusal, exactly like an extends base.
+    _no_launch(monkeypatch)
+    providers = tmp_path / "providers"
+    (providers / "base").mkdir(parents=True)
+    (providers / "base" / "frag.json").write_text(
+        json.dumps({"abstract": True, "harness": "claude", "config": {}})
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    monkeypatch.setattr("sys.argv", ["agedum", "base/frag.json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1  # fail-loud, no launch
+
+
+def test_dry_run_output_unchanged_by_include_composition(monkeypatch, tmp_path, capsys):
+    # Composition detail is not reported — the dry-run of a config assembled via
+    # `include` is byte-identical to the dry-run of its flattened equivalent (the env
+    # print order follows requiredEnv, so the two unions must spell the same order).
+    flattened = {
+        "harness": "claude",
+        "secretEnv": "DEEPSEEK_API_KEY",
+        "requiredEnv": ["NODUM_AGENT_TOKEN", "DEEPSEEK_API_KEY"],
+        "config": {"effortLevel": "max", "model": "deepseek-v4-pro"},
+    }
+    monkeypatch.setenv("NODUM_AGENT_TOKEN", "tok")  # required by both variants
+    plain_out = _run_dry_run_output(monkeypatch, tmp_path, capsys, json_obj=flattened)
+    providers = tmp_path / "providers"
+    (providers / "base").mkdir(parents=True, exist_ok=True)
+    (providers / "base" / "frag.json").write_text(
+        json.dumps(
+            {
+                "abstract": True,
+                "requiredEnv": ["NODUM_AGENT_TOKEN"],
+                "config": {"effortLevel": "max"},
+            }
+        )
+    )
+    composed = {
+        "include": "base/frag.json",
+        "harness": "claude",
+        "secretEnv": "DEEPSEEK_API_KEY",
+        "requiredEnv": ["DEEPSEEK_API_KEY"],
+        "config": {"model": "deepseek-v4-pro"},
+    }
+    composed_out = _run_dry_run_output(monkeypatch, tmp_path, capsys, json_obj=composed)
+    assert composed_out == plain_out
+
+
 def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
     """A `writable` config file is seeded into its real (writable) target — no read-only bind —
     so a tool that rewrites it (cline's providers.json) doesn't hit EROFS. A stale read-only

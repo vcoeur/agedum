@@ -259,7 +259,7 @@ def _run_config(argv: list[str]) -> int:
         if load_config(config_path).get("abstract") is True:
             raise ProviderError(
                 f"{provider} is an abstract base config (abstract: true) and cannot be "
-                "launched directly — launch a config that extends it"
+                "launched directly — launch a config that extends or includes it"
             )
         merged = load_merged_config_with_format(config_path)
         config = merged.config

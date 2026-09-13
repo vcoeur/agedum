@@ -20,8 +20,16 @@ recognised config extension; absolute as-is, else relative to CWD) or a **provid
 name** (resolved under ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}``). A ref
 with no recognised extension tries ``.json``, then ``.yaml``, then ``.yml``; an explicit
 ``.json`` that does not exist falls back to its ``.yaml`` sibling, so converted YAML
-bases keep their old JSON referrers working. The same rule resolves both the
-``agedum <value>`` argument and an ``extends`` reference.
+bases keep their old JSON referrers working. The same rule resolves the ``agedum
+<value>`` argument, an ``extends`` reference, and an ``include`` reference.
+
+Composition: a config may **``include``** one or more fragment configs (a string or list,
+resolved like ``extends``) — pure composition, not inheritance. One file's effective
+config merges most-default first: every include target (recursively resolved),
+deep-merged left→right; then the ``extends`` chain, whose keys beat an included
+fragment's on conflict; then the file's own keys. ``requiredEnv`` unions across all
+three layers. ``include`` is a meta key like ``extends`` — consumed during resolution,
+never present in the merged result.
 """
 
 from __future__ import annotations
@@ -454,9 +462,9 @@ class LoadedConfig(NamedTuple):
 def load_config(path: Path) -> dict:
     """Read and parse a single provider config file (JSON, or YAML with the schema key).
 
-    This is the raw, one-file load — it does **not** resolve ``extends``. Use
-    :func:`load_merged_config` to get a config's effective (extends-resolved) form.
-    Raises :class:`ProviderError`.
+    This is the raw, one-file load — it does **not** resolve ``include`` / ``extends``. Use
+    :func:`load_merged_config` to get a config's effective (composition- and
+    inheritance-resolved) form. Raises :class:`ProviderError`.
     """
     return load_config_with_format(path).config
 
@@ -661,6 +669,7 @@ def _reject_yaml_boolean_traps(config: dict, path: Path) -> None:
     for key in ("harness", "secretEnv", "slug"):
         check_string(config.get(key), key)
     check_ref(config.get("extends"), "extends")
+    check_ref(config.get("include"), "include")
     check_string_list(config.get("requiredEnv"), "requiredEnv")
     sandbox = config.get("sandbox")
     if isinstance(sandbox, dict):
@@ -671,42 +680,58 @@ def _reject_yaml_boolean_traps(config: dict, path: Path) -> None:
 
 
 # File-level meta keys: consumed during resolution, never passed to the launch.
-_META_KEYS = ("extends", "abstract")
+_META_KEYS = ("extends", "include", "abstract")
 
 
 def _without_meta(config: dict) -> dict:
-    """A copy of ``config`` without the meta keys (``extends`` / ``abstract``).
+    """A copy of ``config`` without the meta keys (``extends`` / ``include`` / ``abstract``).
 
     ``abstract`` is a property of the file as authored, not of the merged result, so it is
-    dropped here — a config extending an abstract base never inherits its abstractness."""
+    dropped here — a config extending or including an abstract fragment never inherits its
+    abstractness."""
     return {key: value for key, value in config.items() if key not in _META_KEYS}
 
 
-def _extends_refs(config: dict) -> list[str]:
-    """Normalise a config's ``extends`` (string, list, or absent) to a list of refs."""
-    raw = config.get("extends")
+def _ref_list(config: dict, key: str) -> list[str]:
+    """Normalise a config's string-or-list-of-strings ref key (``extends`` / ``include``)."""
+    raw = config.get(key)
     if raw is None:
         return []
     if isinstance(raw, str):
         return [raw]
     if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
         return list(raw)
-    raise ProviderError("`extends` must be a string or a list of strings")
+    raise ProviderError(f"`{key}` must be a string or a list of strings")
+
+
+def _extends_refs(config: dict) -> list[str]:
+    """Normalise a config's ``extends`` (string, list, or absent) to a list of refs."""
+    return _ref_list(config, "extends")
+
+
+def _include_refs(config: dict) -> list[str]:
+    """Normalise a config's ``include`` (string, list, or absent) to a list of refs."""
+    return _ref_list(config, "include")
 
 
 def load_merged_config(
     path: Path, base_dir: Path | None = None, _seen: frozenset[Path] | None = None
 ) -> dict:
-    """Load a provider config and resolve its ``extends`` chain into one effective config.
+    """Load a provider config and resolve its ``include`` fragments + ``extends`` chain.
 
-    Each ``extends`` reference resolves by the providers-root rule (see
-    :func:`resolve_config_path`); bases are deep-merged left→right and the extending config's
-    own keys applied last (child wins). A base may itself ``extends`` (recursive). The meta
-    keys (``extends`` / ``abstract``) are stripped from the result. A circular ``extends``
-    chain raises :class:`ProviderError`.
+    Each ``include`` / ``extends`` reference resolves by the providers-root rule (see
+    :func:`resolve_config_path`). Merge order for one file, most-default first: every
+    ``include`` target (recursively resolved — a fragment may include and extend others),
+    deep-merged left→right (earlier include = more default); then the ``extends`` chain,
+    bases deep-merged left→right (a base's keys beat an included fragment's on conflict —
+    inheritance overrides composition); then the extending config's own keys last (child
+    wins). The meta keys (``extends`` / ``include`` / ``abstract``) are stripped from the
+    result, and ``abstract`` is never inherited through either mechanism. A cycle in the
+    combined include+extends graph raises :class:`ProviderError` (a file reached twice
+    through different paths is fine — a DAG merge, not a tree walk).
 
-    ``requiredEnv`` is the one key that **unions** rather than being overwritten — see
-    :func:`_merge_extends`.
+    ``requiredEnv`` is the one key that **unions** rather than being overwritten — across
+    includes, the extends chain, and the file's own keys alike; see :func:`_merge_extends`.
     """
     return load_merged_config_with_format(path, base_dir, _seen).config
 
@@ -716,32 +741,46 @@ def load_merged_config_with_format(
 ) -> LoadedConfig:
     """Like :func:`load_merged_config`, also returning the entry file's source format.
 
-    The reported format is the launched file's own, not its bases' — a JSON config
-    extending a YAML base still reports ``json``.
+    The reported format is the launched file's own, not its bases' or fragments' — a JSON
+    config extending a YAML base still reports ``json``.
     """
     providers = base_dir or providers_dir()
     resolved = path.resolve()
     seen = _seen or frozenset()
     if resolved in seen:
-        raise ProviderError(f"circular extends involving {path}")
+        raise ProviderError(f"circular extends/include involving {path}")
     seen = seen | {resolved}
     raw, fmt = load_config_with_format(path)
     merged: dict = {}
+    # (a) Includes — composition, the most-default layer: each target's *effective* config
+    # (resolved recursively, its own includes and extends already applied) pasted in list
+    # order, earlier include the more default.
+    for ref in _include_refs(raw):
+        fragment = load_merged_config_with_format(
+            resolve_config_path(ref, providers), providers, seen
+        )
+        merged = _merge_extends(merged, fragment.config)
+    # (b) The extends chain — inheritance overrides composition, so a base's keys beat an
+    # included fragment's on conflict.
     for ref in _extends_refs(raw):
         base = load_merged_config_with_format(resolve_config_path(ref, providers), providers, seen)
         merged = _merge_extends(merged, base.config)
+    # (c) The file's own keys last — the most specific layer.
     return LoadedConfig(_merge_extends(merged, _without_meta(raw)), fmt)
 
 
 def _merge_extends(base: dict, overlay: dict) -> dict:
-    """Deep-merge one ``extends`` step, unioning ``requiredEnv`` instead of replacing it.
+    """Deep-merge one resolution step, unioning ``requiredEnv`` instead of replacing it.
 
-    A plain deep-merge replaces lists wholesale, which for ``requiredEnv`` silently *drops*
-    a base's requirement the moment the child declares one of its own — the child would
-    launch with the base's token unvalidated and unexported, and whatever the base
-    configured with it (an MCP server's `${VAR}`, a provider key) would fail at first use
-    rather than at launch. Requirements accumulate down an ``extends`` chain, so they are
-    unioned; base order first, child's additions appended, duplicates dropped.
+    Serves both mechanisms: an ``extends`` chain step and an ``include`` composition step
+    (composition needs exactly this — a deep merge whose one list exception is the env
+    union). A plain deep-merge replaces lists wholesale, which for ``requiredEnv`` silently
+    *drops* a base's requirement the moment the child declares one of its own — the child
+    would launch with the base's token unvalidated and unexported, and whatever the base
+    configured with it (an MCP server's ``${VAR}``, a provider key) would fail at first use
+    rather than at launch. Requirements accumulate down an ``extends`` chain and across
+    includes, so they are unioned; earlier order first, later additions appended,
+    duplicates dropped.
     """
     merged = _deep_merge(base, overlay)
     required = [
