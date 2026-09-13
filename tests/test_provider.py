@@ -3703,6 +3703,210 @@ def test_load_merged_config_reports_the_entry_format(tmp_path):
     assert load_merged_config_with_format(tmp_path / "y-child.yaml", tmp_path).format == "yaml"
 
 
+# --- include fragments (composition, not inheritance) ---
+
+
+def test_include_string_form_pastes_the_fragment(tmp_path):
+    _write_config(
+        tmp_path,
+        "base/mcp.json",
+        {"abstract": True, "requiredEnv": ["NODUM_AGENT_TOKEN"], "config": {"mcpServers": {}}},
+    )
+    child = _write_config(
+        tmp_path,
+        "claude/opus.json",
+        {"include": "base/mcp.json", "harness": "claude", "config": {"model": "opus"}},
+    )
+    merged = load_merged_config(child, tmp_path)
+    # Fragment pasted in; meta keys (abstract, include) stripped from the result.
+    assert merged == {
+        "requiredEnv": ["NODUM_AGENT_TOKEN"],
+        "harness": "claude",
+        "config": {"mcpServers": {}, "model": "opus"},
+    }
+
+
+def test_include_list_form_merges_left_to_right(tmp_path):
+    _write_config(tmp_path, "a.json", {"config": {"x": 1, "y": 1}})
+    _write_config(tmp_path, "b.json", {"config": {"y": 2, "z": 2}})
+    child = _write_config(tmp_path, "child.json", {"include": ["a.json", "b.json"]})
+    # Earlier include is the more default: b's y beats a's y, the child keeps both.
+    assert load_merged_config(child, tmp_path)["config"] == {"x": 1, "y": 2, "z": 2}
+
+
+def test_own_keys_beat_included_keys(tmp_path):
+    _write_config(tmp_path, "frag.json", {"config": {"model": "fragment"}, "favorite": True})
+    child = _write_config(
+        tmp_path, "child.json", {"include": "frag.json", "config": {"model": "own"}}
+    )
+    merged = load_merged_config(child, tmp_path)
+    assert merged["config"] == {"model": "own"}  # the file's own keys win
+    assert merged["favorite"] is True  # …but everything not overridden still comes along
+
+
+def test_extends_chain_beats_included_keys(tmp_path):
+    # Inheritance overrides composition: a base's keys beat an included fragment's on
+    # conflict, and the file's own keys beat both.
+    _write_config(tmp_path, "frag.json", {"config": {"model": "from-include", "extra": 1}})
+    _write_config(tmp_path, "base.json", {"config": {"model": "from-extends"}})
+    child = _write_config(
+        tmp_path,
+        "child.json",
+        {"include": "frag.json", "extends": "base.json", "config": {"model": "own"}},
+    )
+    assert load_merged_config(child, tmp_path)["config"] == {"model": "own", "extra": 1}
+
+
+def test_required_env_unions_across_include_extends_and_own(tmp_path):
+    _write_config(tmp_path, "frag.json", {"requiredEnv": ["FRAG_KEY"]})
+    _write_config(tmp_path, "base.json", {"requiredEnv": ["BASE_KEY", "SHARED"]})
+    child = _write_config(
+        tmp_path,
+        "child.json",
+        {"include": "frag.json", "extends": "base.json", "requiredEnv": ["SHARED", "OWN_KEY"]},
+    )
+    # Include layer first, then the extends chain, then the file's own — deduped in order.
+    assert load_merged_config(child, tmp_path)["requiredEnv"] == [
+        "FRAG_KEY",
+        "BASE_KEY",
+        "SHARED",
+        "OWN_KEY",
+    ]
+
+
+def test_include_is_recursive(tmp_path):
+    _write_config(tmp_path, "deep.json", {"config": {"a": 1}})
+    _write_config(tmp_path, "mid.json", {"include": "deep.json", "config": {"b": 2}})
+    child = _write_config(tmp_path, "child.json", {"include": "mid.json", "config": {"c": 3}})
+    assert load_merged_config(child, tmp_path)["config"] == {"a": 1, "b": 2, "c": 3}
+
+
+def test_include_target_extends_chain_resolved_within_it(tmp_path):
+    # A fragment's own extends is resolved before it is pasted: the composition carries the
+    # fragment's *effective* config, not its raw body.
+    _write_config(tmp_path, "grand.json", {"config": {"a": 1, "deep": True}})
+    _write_config(tmp_path, "frag.json", {"extends": "grand.json", "config": {"b": 2}})
+    child = _write_config(tmp_path, "child.json", {"include": "frag.json", "config": {"c": 3}})
+    assert load_merged_config(child, tmp_path)["config"] == {"a": 1, "deep": True, "b": 2, "c": 3}
+
+
+def test_diamond_include_merges_once_without_duplicate_error(tmp_path):
+    # The same fragment reached through two paths is a DAG merge, not a cycle: it merges
+    # twice but idempotently (deep-merge is idempotent, requiredEnv dedupes).
+    _write_config(tmp_path, "shared.json", {"requiredEnv": ["K"], "config": {"shared": True}})
+    _write_config(tmp_path, "left.json", {"include": "shared.json", "config": {"l": 1}})
+    _write_config(tmp_path, "right.json", {"include": "shared.json", "config": {"r": 1}})
+    child = _write_config(tmp_path, "child.json", {"include": ["left.json", "right.json"]})
+    merged = load_merged_config(child, tmp_path)
+    assert merged["requiredEnv"] == ["K"]
+    assert merged["config"] == {"shared": True, "l": 1, "r": 1}
+
+
+def test_include_cycle_errors(tmp_path):
+    _write_config(tmp_path, "a.json", {"include": "b.json"})
+    _write_config(tmp_path, "b.json", {"include": "a.json"})
+    with pytest.raises(ProviderError, match="circular"):
+        load_merged_config(tmp_path / "a.json", tmp_path)
+
+
+def test_mixed_include_extends_cycle_errors(tmp_path):
+    # Cycle detection spans the combined graph: a extends b, b includes a.
+    _write_config(tmp_path, "a.json", {"extends": "b.json"})
+    _write_config(tmp_path, "b.json", {"include": "a.json"})
+    with pytest.raises(ProviderError, match="circular"):
+        load_merged_config(tmp_path / "a.json", tmp_path)
+
+
+def test_self_include_errors(tmp_path):
+    child = _write_config(tmp_path, "a.json", {"include": "a.json"})
+    with pytest.raises(ProviderError, match="circular"):
+        load_merged_config(child, tmp_path)
+
+
+def test_include_missing_target_errors(tmp_path):
+    child = _write_config(tmp_path, "child.json", {"include": "nope.json"})
+    with pytest.raises(ProviderError, match="cannot read"):
+        load_merged_config(child, tmp_path)
+
+
+def test_include_non_mapping_target_errors(tmp_path):
+    _write_yaml(tmp_path, "frag.yaml", "- a\n- b\n")
+    child = _write_config(tmp_path, "child.json", {"include": "frag.yaml"})
+    with pytest.raises(ProviderError, match="YAML mapping"):
+        load_merged_config(child, tmp_path)
+
+
+def test_include_must_be_string_or_list(tmp_path):
+    child = _write_config(tmp_path, "child.json", {"include": 5})
+    with pytest.raises(ProviderError, match="include"):
+        load_merged_config(child, tmp_path)
+
+
+def test_include_key_never_appears_in_merged_dict(tmp_path):
+    _write_config(tmp_path, "frag.json", {"config": {"a": 1}})
+    child = _write_config(tmp_path, "child.json", {"include": ["frag.json", "frag.json"]})
+    merged = load_merged_config(child, tmp_path)
+    assert "include" not in merged
+    assert "include" not in load_merged_config(tmp_path / "frag.json", tmp_path)
+
+
+def test_boolean_trap_in_included_fragment_names_the_fragment_file(tmp_path):
+    # The trap walk runs per-file at load, so the error names the fragment's own path —
+    # not the including config's.
+    _write_yaml(
+        tmp_path,
+        "frag.yaml",
+        "schema: agedum-provider/v1\nconfig:\n  extraEnv:\n    FOO: no\n",
+    )
+    child = _write_config(tmp_path, "child.json", {"include": "frag.yaml"})
+    with pytest.raises(YamlBooleanTrapError, match="frag.yaml.*config\\.extraEnv\\.FOO"):
+        load_merged_config(child, tmp_path)
+
+
+def test_abstract_include_target_is_a_fragment_not_a_launch(tmp_path):
+    # `abstract` is not inherited through include: the composition is fine and the merged
+    # result carries no abstract key; the fragment itself still refuses a direct launch
+    # (that refusal reads the raw file — exercised at the CLI level).
+    _write_config(
+        tmp_path,
+        "frag.json",
+        {"abstract": True, "harness": "claude", "config": {"effortLevel": "max"}},
+    )
+    child = _write_config(tmp_path, "child.json", {"include": "frag.json"})
+    merged = load_merged_config(child, tmp_path)
+    assert merged == {"harness": "claude", "config": {"effortLevel": "max"}}
+    # And the fragment stays out of --providers, exactly like an abstract base —
+    # while the child including it is listed, its harness arriving through the include.
+    (summary,) = list_providers(tmp_path)
+    assert (summary.name, summary.harness) == ("child", "claude")
+
+
+def test_json_config_includes_yaml_fragment_and_vice_versa(tmp_path):
+    _write_yaml(tmp_path, "frag.yaml", "schema: agedum-provider/v1\nconfig:\n  effortLevel: max\n")
+    json_child = _write_config(tmp_path, "j.json", {"include": "frag.yaml"})
+    assert load_merged_config(json_child, tmp_path)["config"] == {"effortLevel": "max"}
+
+    _write_config(tmp_path, "frag2.json", {"config": {"effortLevel": "max"}})
+    yaml_child = _write_yaml(
+        tmp_path, "y.yaml", "schema: agedum-provider/v1\ninclude: frag2.json\n"
+    )
+    assert load_merged_config(yaml_child, tmp_path)["config"] == {"effortLevel": "max"}
+
+
+def test_include_ref_falls_back_to_yaml_sibling(tmp_path):
+    # Include refs resolve by the same rule as extends: an explicit .json ref that only
+    # exists as .yaml still resolves (the conversion enabler).
+    _write_yaml(tmp_path, "base/mcp.yaml", "schema: agedum-provider/v1\nconfig:\n  m: 1\n")
+    child = _write_config(tmp_path, "child.json", {"include": "base/mcp.json"})
+    assert load_merged_config(child, tmp_path)["config"] == {"m": 1}
+
+
+def test_yaml_boolean_trap_in_include_ref(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\ninclude: on\n")
+    with pytest.raises(YamlBooleanTrapError, match="at include"):
+        load_config(tmp_path / "x.yaml")
+
+
 # --- provider listing across formats ---
 
 

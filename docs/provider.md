@@ -94,6 +94,7 @@ The config is the condash-style agent envelope:
 | `requiredEnv` | Vars validated and exported into the child. `secretEnv` is always appended if not listed. Declare a provider's API-key var here so a harness that reads it from the environment sees it. |
 | `config` | The per-harness option block — see the harness page table above. |
 | `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
+| `include` | Optional — a config reference **or list** of them; shared fragments pasted into this config (composition, not inheritance). See [Including fragments](#include). |
 | `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
 | `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, its own state/config dir (e.g. `~/.cline`), `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
 
@@ -180,6 +181,48 @@ with `/`:
 - `abstract: true` marks a config as a base only: it is skipped by `--providers` and refuses to
   launch directly (`agedum base/claude-deepseek.json` errors). Abstractness is **not** inherited
   — a config that extends an abstract base is itself launchable.
+
+## Including fragments — `include` { #include }
+
+`extends` expresses two different relationships today: real inheritance (a child specialising a
+base) and plain fragment sharing (a config extending a base just to paste in its MCP block).
+`include` is the second, said directly: it **pastes a shared fragment in** without making it a
+prototype. Like `extends`, it takes a config reference or a list of them, resolved by the same
+[rules](#resolving-the-provider) (`.json`/`.yaml` fallback included), and every reference of
+either kind may point at either format.
+
+The **merge order** for one config is, most-default first: every `include` target (each
+recursively resolved, its own `include`/`extends` already applied), deep-merged left→right —
+earlier include is the more default; then the `extends` chain, whose keys beat an included
+fragment's on conflict (inheritance overrides composition); then the file's own keys —
+`requiredEnv` unions across all three layers:
+
+```json
+// providers/base/mcp-nodum.json   (a shared fragment, not a prototype)
+{ "abstract": true, "requiredEnv": ["NODUM_AGENT_TOKEN"],
+  "config": { "mcpServers": { "nodum": { "command": "nodum", "args": ["mcp", "serve"] } } } }
+
+// providers/claude/opus.json
+{ "include": "base/mcp-nodum.json", "harness": "claude",
+  "config": { "settings": { "model": "opus" } } }
+```
+
+Rules:
+
+- **Composition only** — an included fragment is not a prototype: `abstract` is **not**
+  inherited through an include, and an included target is not "applied" in any launch sense.
+  Give fragments `abstract: true` (as above) so they stay out of `--providers` and refuse a
+  direct launch, exactly like bases.
+- **`include` is a meta key** like `extends` — consumed during resolution, never present in
+  the merged result.
+- **Cycles are detected across the combined include+extends graph**: a file included twice
+  through different paths is fine (a DAG merge — it simply merges twice, idempotently), but a
+  cycle (`a` includes `b`, `b` includes `a`; or `a` extends `b`, `b` includes `a`) is an error,
+  as is a reference that resolves to no file or a target that parses to a non-mapping.
+- **All the per-file checks apply to fragments too** — a YAML fragment's `schema` key and
+  [boolean-trap](#yaml-boolean-trap) walk run on the fragment's own file, so a trap inside an
+  included fragment names that fragment's path.
+- `--dry-run` output is unchanged: composition detail is not reported, the effective result is.
 
 ## MCP servers — `config.mcpServers` { #mcp }
 

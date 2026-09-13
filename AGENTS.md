@@ -253,20 +253,28 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   **YAML** (a document declaring `schema: agedum-provider/v1`; missing or different is a
   `ProviderSchemaError` naming the expected value, and a correct key is stripped so YAML yields
   the same dict the equivalent JSON would — parse, not translate). An unquoted YAML
-  `on`/`off`/`yes`/`no` in a string-valued slot (env values, `secretEnv`/`requiredEnv` entries,
-  `harness`, `extends` refs, the known string keys of `config`) is a `YamlBooleanTrapError` —
+   `on`/`off`/`yes`/`no` in a string-valued slot (env values, `secretEnv`/`requiredEnv` entries,
+   `harness`, `extends`/`include` refs, the known string keys of `config`) is a `YamlBooleanTrapError` —
   quote the value. The reference resolves **relative to the providers
   root** (`<providers_dir>/<ref>`; no recognised extension → `.json`/`.yaml`/`.yml`; an explicit
   `.json` that does not exist falls back to its `.yaml` sibling, so a converted YAML base keeps
   its old JSON referrers working; explicit `.yaml`/`.yml` as-is), or absolute when it starts with
   `/`; nested paths are allowed (`agedum claude/deepseek.json`) and not-found is an error (no CWD
-  fallback). A config may **`extends`** one or more bases (a string or list, same resolution):
-  bases are deep-merged left→right and the child applied last (recursive; cycles error), except
-  **`requiredEnv`, which unions** down the chain — a plain list-replace would silently drop a
-  base's requirement the moment a child declared its own. An
-  **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
-  abstractness is not inherited. A config's **identity/label is its path** (the `name` field is
-  gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
+   fallback). A config may **`extends`** one or more bases (a string or list, same resolution):
+   bases are deep-merged left→right and the child applied last (recursive; cycles error), except
+   **`requiredEnv`, which unions** down the chain — a plain list-replace would silently drop a
+   base's requirement the moment a child declared its own. A config may also **`include`** one
+   or more shared fragments (a string or list, same resolution) — composition, not inheritance:
+   merge order for one file is most-default first, every include target (recursively resolved)
+   deep-merged left→right (earlier include = more default), then the extends chain (a base's
+   keys beat an included fragment's on conflict), then the file's own keys; `requiredEnv` unions
+   across all three layers; cycles are detected across the combined include+extends graph (a
+   file reached twice through different paths is fine); `include` is a meta key like `extends`,
+   stripped from the merged result. An
+   **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
+   abstractness is not inherited (through extends or include); shared fragments carry it to stay
+   out of `--providers`. A config's **identity/label is its path** (the `name` field is
+   gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
   validate `requiredEnv`, set the provider/model/auth env in `os.environ`, and run the same
   virtual-FS launch as wrapper mode. The harness is read **from the config**; no `--harness` flag.
   `--dry-run` prints the resolved env (secrets masked), the config's **source format**
@@ -312,7 +320,7 @@ appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a rea
 + writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored
 with the `.json`→`.yaml` fallback / `load_config` raw — JSON, or YAML declaring
 `schema: agedum-provider/v1`, via `load_config_with_format` which carries the source format —
-+ `load_merged_config` resolving the `extends` chain into one effective config /
++ `load_merged_config` resolving the `include` fragments + `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
 per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (three localhost reverse
