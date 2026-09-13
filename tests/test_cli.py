@@ -4,8 +4,10 @@ import stat
 from pathlib import Path
 
 import pytest
+import yaml_fleet_fixtures as fleet
 
 from agedum import __version__
+from agedum import provider as provider
 from agedum.cli import main as cli
 
 
@@ -1586,3 +1588,103 @@ def test_inject_config_files_readonly_entry_still_binds(tmp_path):
     staged, bound_target = plan.binds[0]
     assert bound_target == target
     assert staged.read_text() == "content"
+
+
+# --- YAML fleet parity: kimi / pi / cline through the CLI (child 4) ---
+
+
+def _run_chain_dry_run(monkeypatch, tmp_path, capsys, specs, name):
+    """Dry-run one fleet launcher through a staged multi-file chain, hermetically.
+
+    ``_run_config`` applies ``launch.env`` to ``os.environ`` before the dry-run branch
+    (so the harness compilers resolve the same targets a real launch would), so
+    ``os.environ`` itself is replaced for the duration — otherwise ``KIMI_CODE_HOME`` /
+    ``CLINE_DATA_DIR`` leak into later tests, whose config-dir lookups would follow."""
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    providers = tmp_path / "providers"
+    for rel, kind, payload in specs:
+        path = providers / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload if kind == "yaml" else json.dumps(payload))
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("KIMI_API_KEY=sk-kimi-test\nDEEPSEEK_API_KEY=sk-deepseek-test\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setattr("sys.argv", ["agedum", name, "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "family,name",
+    [
+        ("kimi", "kimi"),
+        ("pi", "deepseek"),
+        ("pi", "deepseek-flash"),
+        ("pi", "flash"),
+        ("cline", "deepseek"),
+        ("cline", "flash"),
+        ("cline", "kimi-code-auto"),
+    ],
+)
+def test_dry_run_fleet_yaml_and_json_differ_only_in_the_source_line(
+    monkeypatch, tmp_path, capsys, family, name
+):
+    # Every live kimi/pi/cline launcher, resolved by ref through its real chain: the
+    # converted YAML tree's dry-run must match the JSON tree's byte for byte except the
+    # reported source line (the no-feature-loss gate the agentsconf half re-runs live).
+    json_out = _run_chain_dry_run(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        fleet.family_specs(family, name, to_yaml=False),
+        f"{family}/{name}",
+    )
+    assert "source     json" in json_out
+    for path in (tmp_path / "providers").rglob("*"):
+        if path.is_file():
+            path.unlink()
+    yaml_out = _run_chain_dry_run(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        fleet.family_specs(family, name, to_yaml=True),
+        f"{family}/{name}",
+    )
+    assert "source     yaml" in yaml_out
+    assert yaml_out.replace("source     yaml", "source     json") == json_out
+
+
+def test_inject_config_files_seeds_the_kimi_yaml_fixture_at_mode_0600(tmp_path, monkeypatch):
+    # The kimi fleet fixture through the YAML path, taken all the way through the real
+    # seeding step: config.toml (which bakes the resolved API key) and mcp.json land in
+    # the isolated KIMI_CODE_HOME writable and owner-only (0600) — a ro-bind would make
+    # Kimi's rename-over rewrite fail with EBUSY, and a lax mode would expose the key.
+    # HOME moves under tmp: the seed writes its real target, which must not be the
+    # host's ~/.cache.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    child = fleet.write_chain(tmp_path, fleet.kimi_specs(to_yaml=True))
+    launch = provider.build_launch(
+        provider.load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["kimi/kimi"],
+        label="kimi/kimi",
+    )
+    plan = cli.Plan()
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    cli._inject_config_files(plan, project_root, dest, launch.config_files)
+
+    assert len(plan.binds) == 0
+    for target, content, _merge_json, _writable in launch.config_files:
+        seeded = Path(target)
+        assert seeded.is_file()
+        assert seeded.read_text() == content
+        assert stat.S_IMODE(seeded.stat().st_mode) == 0o600
