@@ -1,18 +1,27 @@
-"""Resolve a provider config JSON into the launch environment and command.
+"""Resolve a provider config (JSON or YAML) into the launch environment and command.
 
 ``agedum <name|path>`` reads a condash-style provider config and computes, at run
 time: the variables to export/unset and the base command for the harness. The
 per-harness mapping mirrors condash's pre-4.0 agent launcher (``buildClaudeSpawn`` /
 ``buildKimiSpawn`` / ``buildOpencodeSpawn``).
 
+A config may be **JSON** (the legacy format, loaded exactly as always) or **YAML**
+(a document declaring the envelope version, ``schema: agedum-provider/v1``). YAML is
+parsed, not translated: it yields the same in-memory dict the equivalent JSON would,
+and no file is ever converted.
+
 Unlike the retired ``--build-script`` codegen — which emitted a shell wrapper that
 sourced the ``.env`` itself, so agedum never saw a token — this path reads the env
 file (``${AGENTS_ENV_FILE:-~/.config/agents/.env}``) into the agedum process and sets
 the resolved values in the child environment.
 
-Resolution: ``agedum <value>`` where ``value`` is a **path** (it contains ``/`` or
-ends in ``.json``; absolute as-is, else relative to CWD) or a **provider name**
-(resolved to ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}/<name>.json``).
+Resolution: ``agedum <value>`` where ``value`` is a **path** (it contains ``/`` or a
+recognised config extension; absolute as-is, else relative to CWD) or a **provider
+name** (resolved under ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}``). A ref
+with no recognised extension tries ``.json``, then ``.yaml``, then ``.yml``; an explicit
+``.json`` that does not exist falls back to its ``.yaml`` sibling, so converted YAML
+bases keep their old JSON referrers working. The same rule resolves both the
+``agedum <value>`` argument and an ``extends`` reference.
 """
 
 from __future__ import annotations
@@ -26,10 +35,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+import yaml
+
 from agedum.harness import Sandbox, codex_config_dir, kimi_config_dir, pi_agent_dir
 from agedum.proxy import OPENAI_CODEX_UPSTREAM, failover_route_base
 
 HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "codex")
+
+# The envelope-version key a YAML provider config must declare. JSON configs are the
+# legacy format and need no key — they load exactly as they always have.
+PROVIDER_SCHEMA_KEY = "schema"
+PROVIDER_SCHEMA_VERSION = "agedum-provider/v1"
+
+# The suffixes a config file may carry. ``.yaml`` / ``.yml`` both select the YAML
+# reader; every other suffix (``.json`` included, and none at all) selects JSON.
+YAML_SUFFIXES = (".yaml", ".yml")
+JSON_SUFFIX = ".json"
 
 # opencode's built-in agent names keep opencode's own mode; ``primary`` only
 # applies to custom agents.
@@ -64,6 +85,14 @@ BuilderResult = tuple[dict[str, str], list[str], list[str], tuple[ConfigFile, ..
 
 class ProviderError(RuntimeError):
     """A provider config could not be resolved into a launch."""
+
+
+class ProviderSchemaError(ProviderError):
+    """A YAML provider config is missing or carries an unsupported ``schema`` version."""
+
+
+class YamlBooleanTrapError(ProviderError):
+    """A YAML config has an unquoted on/off/yes/no where the envelope wants a string."""
 
 
 @dataclass(frozen=True)
@@ -378,36 +407,267 @@ def resolve_config_path(value: str, base_dir: Path | None = None) -> Path:
 
     A ``value`` starting with ``/`` is an absolute filesystem path; anything else resolves
     **relative to the providers root** (``base_dir`` or :func:`providers_dir`), so nested
-    references like ``claude/deepseek`` or ``base/claude.json`` work. ``.json`` is appended
-    when the value has no extension. The same rule resolves both the ``agedum <value>``
-    argument and an ``extends`` reference; a path that does not exist surfaces as an error at
-    load time (there is no fallback search).
+    references like ``claude/deepseek`` or ``base/claude.json`` work. A ref with no
+    recognised extension tries ``.json``, then ``.yaml``, then ``.yml``; an explicit ``.json``
+    that does not exist falls back to its ``.yaml`` sibling — so a base converted to YAML
+    keeps its old ``.json`` referrers working. An explicit ``.yaml`` / ``.yml`` resolves
+    as-is. The same rule resolves both the ``agedum <value>`` argument and an ``extends``
+    reference; a ref that resolves to no file surfaces as an error at load time.
     """
     candidate = Path(value) if value.startswith("/") else (base_dir or providers_dir()) / value
-    if candidate.suffix != ".json":
-        candidate = candidate.parent / f"{candidate.name}.json"
+    suffix = candidate.suffix
+    if suffix != JSON_SUFFIX and suffix not in YAML_SUFFIXES:
+        # No recognised extension: try the conventional spellings in order (.json wins
+        # when several exist, matching --providers), else keep the .json name so the
+        # load error names the conventional file.
+        for ext in (JSON_SUFFIX, ".yaml", ".yml"):
+            with_ext = candidate.parent / f"{candidate.name}{ext}"
+            if with_ext.is_file():
+                return with_ext
+        return candidate.parent / f"{candidate.name}{JSON_SUFFIX}"
+    if suffix == JSON_SUFFIX and not candidate.is_file():
+        yaml_sibling = candidate.with_suffix(".yaml")
+        if yaml_sibling.is_file():
+            return yaml_sibling
     return candidate
 
 
+def config_format(path: Path) -> str:
+    """The source format of a config file: ``"yaml"`` or ``"json"``.
+
+    The format is the dispatch key of :func:`load_config_with_format` — a function of the
+    suffix alone (``.yaml`` / ``.yml`` → YAML, anything else → JSON).
+    """
+    return "yaml" if path.suffix in YAML_SUFFIXES else "json"
+
+
+class LoadedConfig(NamedTuple):
+    """A parsed provider config plus its source format (``"yaml"`` or ``"json"``).
+
+    ``format`` lets ``--dry-run`` report the source without re-reading the file.
+    """
+
+    config: dict
+    format: str
+
+
 def load_config(path: Path) -> dict:
-    """Read and parse a single provider config JSON file; raise :class:`ProviderError`.
+    """Read and parse a single provider config file (JSON, or YAML with the schema key).
 
     This is the raw, one-file load — it does **not** resolve ``extends``. Use
     :func:`load_merged_config` to get a config's effective (extends-resolved) form.
+    Raises :class:`ProviderError`.
     """
+    return load_config_with_format(path).config
+
+
+def load_config_with_format(path: Path) -> LoadedConfig:
+    """Like :func:`load_config`, returning the source format alongside the parsed dict.
+
+    A ``.yaml`` / ``.yml`` file is parsed with ``yaml.safe_load``, must declare
+    ``schema: agedum-provider/v1`` (:class:`ProviderSchemaError` otherwise), and then
+    yields the same dict the equivalent JSON document would: the ``schema`` key is
+    stripped and every YAML 1.1 boolean trap in a string-valued slot is rejected
+    (:class:`YamlBooleanTrapError`). Any other suffix parses as JSON.
+    """
+    fmt = config_format(path)
     try:
         raw = path.read_text()
     except OSError as exc:
         raise ProviderError(f"cannot read provider config {path}: {exc}") from exc
+    if fmt == "yaml":
+        config = _load_yaml_document(raw, path)
+    else:
+        try:
+            config = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"invalid JSON in {path}: {exc}") from exc
+        if not isinstance(config, dict):
+            raise ProviderError(
+                f"provider config {path} must be a JSON object, not {type(config).__name__}"
+            )
+    return LoadedConfig(config, fmt)
+
+
+def _load_yaml_document(raw: str, path: Path) -> dict:
+    """Parse one YAML provider config into the envelope dict (see :func:`load_config`)."""
     try:
-        config = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ProviderError(f"invalid JSON in {path}: {exc}") from exc
+        config = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ProviderError(f"invalid YAML in {path}: {exc}") from exc
     if not isinstance(config, dict):
         raise ProviderError(
-            f"provider config {path} must be a JSON object, not {type(config).__name__}"
+            f"provider config {path} must be a YAML mapping, not {type(config).__name__}"
         )
+    schema = config.get(PROVIDER_SCHEMA_KEY)
+    if schema != PROVIDER_SCHEMA_VERSION:
+        raise ProviderSchemaError(
+            f"{path}: YAML provider config must declare `{PROVIDER_SCHEMA_KEY}: "
+            f"{PROVIDER_SCHEMA_VERSION}` (found {schema!r})"
+        )
+    _reject_yaml_boolean_traps(config, path)
+    # Normalize to the envelope: the JSON form of the same document carries no version
+    # key, so YAML must not land one in the merged config either (parse, not translate).
+    config.pop(PROVIDER_SCHEMA_KEY, None)
     return config
+
+
+# The ``config``-block keys every harness consumes as a plain string — model names,
+# endpoint URLs, auth styles, enum values (cline's ``compaction: off``, reasonix's
+# ``autoPlan: on``). Deliberately absent: the keys a harness consumes as a boolean
+# (``abstract``, claude's ``foldSystemMessages``, kimi's ``thinking``/``plan``/``yolo``,
+# opencode's ``disableExternalSkills``) and the verbatim passthroughs (claude
+# ``settings``, opencode ``opencodeConfig``, pi ``piSettings``/``piExtensionConfig``,
+# codex ``codexConfig``) where a boolean is a legitimate value.
+_STRING_CONFIG_KEYS = frozenset(
+    {
+        "model",
+        "subagentModel",
+        "baseUrl",
+        "authStyle",
+        "effortLevel",
+        "upstreamApi",
+        "openaiThinking",
+        "smallFastModel",
+        "haikuAlias",
+        "sonnetAlias",
+        "opusAlias",
+        "binary",
+        "providerType",
+        "defaultEffort",
+        "subagentEffort",
+        "provider",
+        "compaction",
+        "kind",
+        "plannerModel",
+        "autoPlan",
+        "weakModel",
+        "editorModel",
+        "reasoningEffort",
+        "api",
+        "wireApi",
+        "codexAgents",
+        "codexProjectAgents",
+    }
+)
+
+
+def _reject_yaml_boolean_traps(config: dict, path: Path) -> None:
+    """Reject unquoted YAML 1.1 booleans in the envelope's string-valued slots.
+
+    pyyaml turns an unquoted ``on`` / ``off`` / ``yes`` / ``no`` into a Python boolean,
+    so ``secretEnv: on`` or an ``extraEnv`` value of ``no`` would reach a harness as
+    ``"True"`` / ``"False"`` (or fail confusingly) instead of the word the author wrote.
+    Only the string-valued slots are walked — legitimate booleans are untouched — and
+    only for YAML: JSON has no implicit booleans, so a JSON ``true`` is always authorial.
+    Map-key collisions (``models: {on: …}`` also parses the key as a boolean) are not
+    rejected here; they surface as the consumers' own fail-loud lookup errors.
+    """
+
+    def trap(key_path: str) -> None:
+        raise YamlBooleanTrapError(
+            f"{path}: yaml boolean trap at {key_path}: unquoted on/off/yes/no parsed as "
+            "boolean — quote the value"
+        )
+
+    def check_string(value: object, key_path: str) -> None:
+        if isinstance(value, bool):
+            trap(key_path)
+
+    def check_string_list(value: object, key_path: str) -> None:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                check_string(item, f"{key_path}[{index}]")
+
+    def check_string_map(value: object, key_path: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                check_string(item, f"{key_path}.{key}")
+
+    def check_ref(value: object, key_path: str) -> None:
+        # A string-or-list-of-strings slot (``extends``, pi ``requireExtensions``).
+        check_string(value, key_path)
+        check_string_list(value, key_path)
+
+    def check_provider_defs(defs: object, key_path: str) -> None:
+        if isinstance(defs, dict):
+            defs = [defs]
+        if not isinstance(defs, list):
+            return
+        for index, entry in enumerate(defs):
+            if not isinstance(entry, dict):
+                continue
+            base = f"{key_path}[{index}]"
+            for key in ("id", "name", "npm", "kind", "baseUrl", "model", "apiKeyEnv", "api"):
+                check_string(entry.get(key), f"{base}.{key}")
+
+    def check_config_block(block: dict) -> None:
+        for key in _STRING_CONFIG_KEYS:
+            if key in block:
+                check_string(block[key], f"config.{key}")
+        # Env values are the classic trap (`extraEnv: {FOO: no}`), as are MCP entries.
+        check_string_map(block.get("extraEnv"), "config.extraEnv")
+        servers = block.get("mcpServers")
+        if isinstance(servers, dict):
+            for name, entry in servers.items():
+                if not isinstance(entry, dict):
+                    continue
+                base = f"config.mcpServers.{name}"
+                for key in ("command", "url", "cwd", "transport"):
+                    check_string(entry.get(key), f"{base}.{key}")
+                check_string_list(entry.get("args"), f"{base}.args")
+                check_string_map(entry.get("env"), f"{base}.env")
+                check_string_map(entry.get("headers"), f"{base}.headers")
+        check_provider_defs(block.get("providerDef"), "config.providerDef")
+        # opencode's option knobs flow through _clean_options, which silently drops any
+        # non-string value — both the launcher-wide defaultOptions and the per-agent rows
+        # (whose `agent` / `model` are likewise silently dropped or stringified).
+        default_options = block.get("defaultOptions")
+        if isinstance(default_options, dict):
+            for key in ("reasoningEffort", "textVerbosity", "reasoningSummary"):
+                check_string(default_options.get(key), f"config.defaultOptions.{key}")
+        agent_rows = block.get("agentOptions")
+        if isinstance(agent_rows, list):
+            for index, row in enumerate(agent_rows):
+                if not isinstance(row, dict):
+                    continue
+                base = f"config.agentOptions[{index}]"
+                check_string(row.get("agent"), f"{base}.agent")
+                check_string(row.get("model"), f"{base}.model")
+                for key in ("reasoningEffort", "textVerbosity", "reasoningSummary"):
+                    check_string(row.get(key), f"{base}.{key}")
+        # kimi's `models` map (entries with per-model string knobs) vs pi's list of ids.
+        declared = block.get("models")
+        if isinstance(declared, list):
+            check_string_list(declared, "config.models")
+        elif isinstance(declared, dict):
+            for model_id, entry in declared.items():
+                if not isinstance(entry, dict):
+                    continue
+                base = f"config.models.{model_id}"
+                check_string(entry.get("defaultEffort"), f"{base}.defaultEffort")
+                check_string_list(entry.get("capabilities"), f"{base}.capabilities")
+                check_string_list(entry.get("supportEfforts"), f"{base}.supportEfforts")
+        # kimi's single-model form carries the same knobs flat on the config block.
+        check_string_list(block.get("capabilities"), "config.capabilities")
+        check_string_list(block.get("supportEfforts"), "config.supportEfforts")
+        check_ref(block.get("requireExtensions"), "config.requireExtensions")
+        check_string_list(block.get("modelInputs"), "config.modelInputs")
+        catalog = block.get("codexModelCatalog")
+        if isinstance(catalog, dict):
+            check_string(catalog.get("displayName"), "config.codexModelCatalog.displayName")
+            check_string(catalog.get("description"), "config.codexModelCatalog.description")
+
+    for key in ("harness", "secretEnv", "slug"):
+        check_string(config.get(key), key)
+    check_ref(config.get("extends"), "extends")
+    check_string_list(config.get("requiredEnv"), "requiredEnv")
+    sandbox = config.get("sandbox")
+    if isinstance(sandbox, dict):
+        check_string_list(sandbox.get("readWrite"), "sandbox.readWrite")
+    block = config.get("config")
+    if isinstance(block, dict):
+        check_config_block(block)
 
 
 # File-level meta keys: consumed during resolution, never passed to the launch.
@@ -448,18 +708,29 @@ def load_merged_config(
     ``requiredEnv`` is the one key that **unions** rather than being overwritten — see
     :func:`_merge_extends`.
     """
+    return load_merged_config_with_format(path, base_dir, _seen).config
+
+
+def load_merged_config_with_format(
+    path: Path, base_dir: Path | None = None, _seen: frozenset[Path] | None = None
+) -> LoadedConfig:
+    """Like :func:`load_merged_config`, also returning the entry file's source format.
+
+    The reported format is the launched file's own, not its bases' — a JSON config
+    extending a YAML base still reports ``json``.
+    """
     providers = base_dir or providers_dir()
     resolved = path.resolve()
     seen = _seen or frozenset()
     if resolved in seen:
         raise ProviderError(f"circular extends involving {path}")
     seen = seen | {resolved}
-    raw = load_config(path)
+    raw, fmt = load_config_with_format(path)
     merged: dict = {}
     for ref in _extends_refs(raw):
-        base = load_merged_config(resolve_config_path(ref, providers), providers, seen)
-        merged = _merge_extends(merged, base)
-    return _merge_extends(merged, _without_meta(raw))
+        base = load_merged_config_with_format(resolve_config_path(ref, providers), providers, seen)
+        merged = _merge_extends(merged, base.config)
+    return LoadedConfig(_merge_extends(merged, _without_meta(raw)), fmt)
 
 
 def _merge_extends(base: dict, overlay: dict) -> dict:
@@ -487,7 +758,7 @@ class ProviderSummary:
     """One row of ``agedum --providers``: a provider config reduced to its listing fields.
 
     ``name`` is the reference passed to ``agedum <name>`` — the config's path **relative to
-    the providers root**, without ``.json`` (e.g. ``claude/deepseek``). ``harness`` and
+    the providers root**, without its extension (e.g. ``claude/deepseek``). ``harness`` and
     ``model`` come from the config's *effective* (extends-resolved) form (``None`` when
     absent). ``error`` is set instead when the file could not be read, parsed, or resolved,
     so a single bad config never aborts the listing.
@@ -520,18 +791,30 @@ def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
     """Summarise every launchable provider config under ``directory`` (default:
     :func:`providers_dir`), recursively, sorted by name.
 
-    Walks subdirectories; each config's ``name`` is its path relative to the root (no
-    ``.json``). ``abstract: true`` configs (bases) are skipped. ``harness`` / ``model`` come
-    from the effective (extends-resolved) config; an unreadable, invalid, or
-    unresolvable config yields a summary with ``error`` set rather than raising. A missing
-    directory yields an empty list.
+    Walks subdirectories for ``*.json``, ``*.yaml`` and ``*.yml``; each config's ``name``
+    is its path relative to the root, extension stripped. When both extensions exist for
+    the same stem the ``.json`` file is the one listed (the name would collide otherwise).
+    ``abstract: true`` configs (bases) are skipped. ``harness`` / ``model`` come from the
+    effective (extends-resolved) config; an unreadable, invalid, or unresolvable config
+    yields a summary with ``error`` set rather than raising. A missing directory yields an
+    empty list.
     """
     target = directory or providers_dir()
     summaries: list[ProviderSummary] = []
     if not target.is_dir():
         return summaries
-    for path in sorted(target.rglob("*.json")):
+    # sorted() over the merged set keeps today's name ordering and puts the .json file
+    # ahead of its .yaml sibling for the same stem ("x.json" < "x.yaml"), so the dedup
+    # below makes .json win.
+    all_paths = sorted(
+        {path for pattern in ("*.json", "*.yaml", "*.yml") for path in target.rglob(pattern)}
+    )
+    seen_names: set[str] = set()
+    for path in all_paths:
         name = path.relative_to(target).with_suffix("").as_posix()
+        if name in seen_names:
+            continue
+        seen_names.add(name)
         try:
             raw = load_config(path)
         except ProviderError as exc:

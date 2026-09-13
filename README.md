@@ -12,8 +12,9 @@ you run.
 
 agedum has two modes:
 
-- **`agedum <provider-name|config.json> [harness args]`** — the primary form. Read a
-  provider config JSON (a name resolved under `~/.config/agents/providers`, or a path),
+- **`agedum <provider-name|config.json|.yaml> [harness args]`** — the primary form. Read a
+  provider config — JSON, or YAML declaring `schema: agedum-provider/v1` — (a name resolved
+  under `~/.config/agents/providers`, or a path),
   resolve its secrets from a `.env`, set the provider/model/auth environment, and launch
   the harness named in the config — inside the virtual-file context below. `--prompt
   "<text>"` seeds an initial prompt and stays interactive; `--run "<text>"` runs it
@@ -130,7 +131,7 @@ agedum --providers                                # list the provider configs (n
 agedum --version
 ```
 
-`agedum --providers` lists every `*.json` config in `$AGENTS_PROVIDERS_DIR` (default
+`agedum --providers` lists every `*.json` / `*.yaml` / `*.yml` config in `$AGENTS_PROVIDERS_DIR` (default
 `~/.config/agents/providers`) as `name  harness  model` — the names you pass to
 `agedum <name>`.
 
@@ -146,7 +147,7 @@ Full docs at **[agedum.vcoeur.com](https://agedum.vcoeur.com)**:
 
 - [Source & scopes](https://agedum.vcoeur.com/source-shape/) — the `AGENTS.md` + `.agents/skills/` layout, and the project vs global scopes
 - [Wrapper mode](https://agedum.vcoeur.com/wrapper/) — run a command in the injected context; how each harness resolves
-- [Provider mode](https://agedum.vcoeur.com/provider/) — launch a harness from a provider config JSON
+- [Provider mode](https://agedum.vcoeur.com/provider/) — launch a harness from a provider config (JSON or YAML)
 - [Harnesses](https://agedum.vcoeur.com/harnesses/) — one page per harness: wrapper resolution + provider config
 - [CLI reference](https://agedum.vcoeur.com/cli/) and [Internals](https://agedum.vcoeur.com/internals/) — the mount-namespace launch and its safety rules
 

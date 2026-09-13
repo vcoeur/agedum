@@ -7,11 +7,15 @@ import pytest
 from agedum.provider import (
     Launch,
     ProviderError,
+    ProviderSchemaError,
+    YamlBooleanTrapError,
     build_launch,
     default_env_file,
     list_providers,
     load_config,
+    load_config_with_format,
     load_merged_config,
+    load_merged_config_with_format,
     parse_env_file,
     providers_dir,
     required_env,
@@ -3318,3 +3322,419 @@ def test_list_providers_recursive_skips_abstract(tmp_path):
 def test_build_launch_uses_given_label():
     launch = build_launch({"harness": "claude", "config": {}}, {}, label="claude/deepseek")
     assert launch.label == "claude/deepseek"
+
+
+# --- YAML source format ---
+
+
+def _write_yaml(root, rel, text):
+    """Write a YAML config at ``root/rel`` (creating parents); return its path."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _sample_envelope():
+    """A representative provider envelope shared by the JSON↔YAML parity tests."""
+    return {
+        "harness": "claude",
+        "secretEnv": "DEEPSEEK_API_KEY",
+        "requiredEnv": ["DEEPSEEK_API_KEY"],
+        "config": {
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "model": "deepseek-v4-pro",
+            "authStyle": "apikey",
+            "mcpServers": {
+                "nodum": {
+                    "command": "nodum",
+                    "args": ["mcp", "serve"],
+                    "env": {"NODUM_AGENT_TOKEN": "${NODUM_AGENT_TOKEN}"},
+                }
+            },
+        },
+    }
+
+
+def _sample_envelope_yaml():
+    """The YAML spelling of :func:`_sample_envelope` (plus the required schema key)."""
+    return """\
+schema: agedum-provider/v1
+harness: claude
+secretEnv: DEEPSEEK_API_KEY
+requiredEnv:
+  - DEEPSEEK_API_KEY
+config:
+  baseUrl: https://api.deepseek.com/anthropic
+  model: deepseek-v4-pro
+  authStyle: apikey
+  mcpServers:
+    nodum:
+      command: nodum
+      args: [mcp, serve]
+      env:
+        NODUM_AGENT_TOKEN: ${NODUM_AGENT_TOKEN}
+"""
+
+
+def test_yaml_config_loads_to_the_json_equivalent(tmp_path):
+    # Parse, not translate: the same envelope in either format yields one dict.
+    _write_config(tmp_path, "j.json", _sample_envelope())
+    _write_yaml(tmp_path, "y.yaml", _sample_envelope_yaml())
+    assert load_config(tmp_path / "y.yaml") == load_config(tmp_path / "j.json")
+
+
+def test_load_config_with_format_reports_the_source_format(tmp_path):
+    _write_config(tmp_path, "j.json", _sample_envelope())
+    _write_yaml(tmp_path, "y.yaml", _sample_envelope_yaml())
+    _write_yaml(tmp_path, "y.yml", _sample_envelope_yaml())
+    assert load_config_with_format(tmp_path / "j.json").format == "json"
+    assert load_config_with_format(tmp_path / "y.yaml").format == "yaml"
+    assert load_config_with_format(tmp_path / "y.yml").format == "yaml"
+
+
+def test_yaml_schema_key_is_required(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "harness: claude\n")
+    with pytest.raises(ProviderSchemaError, match="agedum-provider/v1"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_schema_key_wrong_value_names_the_expected_version(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v2\nharness: claude\n")
+    with pytest.raises(ProviderSchemaError, match=r"`schema: agedum-provider/v1`"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_schema_key_is_stripped_from_the_loaded_dict(tmp_path):
+    # JSON needs no version key, so the YAML form must not land one in the dict either.
+    _write_yaml(tmp_path, "x.yaml", _sample_envelope_yaml())
+    assert "schema" not in load_config(tmp_path / "x.yaml")
+
+
+def test_json_config_loads_exactly_as_before(tmp_path):
+    # JSON is the legacy format: no schema key required, none stripped.
+    path = _write_config(tmp_path, "x.json", _sample_envelope())
+    assert load_config(path) == _sample_envelope()
+
+
+def test_invalid_yaml_errors(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\nharness: [claude\n")
+    with pytest.raises(ProviderError, match="invalid YAML"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_non_mapping_yaml_errors(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "- a\n- b\n")
+    with pytest.raises(ProviderError, match="YAML mapping"):
+        load_config(tmp_path / "x.yaml")
+
+
+# --- YAML 1.1 boolean traps ---
+
+
+def test_yaml_boolean_trap_in_secret_env(tmp_path):
+    for word in ("on", "yes", "no", "off"):
+        _write_yaml(tmp_path, "x.yaml", f"schema: agedum-provider/v1\nsecretEnv: {word}\n")
+        with pytest.raises(
+            YamlBooleanTrapError,
+            match=r"yaml boolean trap at secretEnv.*parsed as boolean.*quote the value",
+        ):
+            load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_required_env_entry(tmp_path):
+    _write_yaml(
+        tmp_path, "x.yaml", "schema: agedum-provider/v1\nrequiredEnv: [DEEPSEEK_API_KEY, no]\n"
+    )
+    with pytest.raises(YamlBooleanTrapError, match=r"at requiredEnv\[1\]"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_env_value(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "x.yaml",
+        "schema: agedum-provider/v1\nconfig:\n  extraEnv:\n    FOO: no\n",
+    )
+    with pytest.raises(YamlBooleanTrapError, match=r"at config\.extraEnv\.FOO"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_mcp_env_value(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "x.yaml",
+        "schema: agedum-provider/v1\n"
+        "config:\n"
+        "  mcpServers:\n"
+        "    nodum:\n"
+        "      command: nodum\n"
+        "      env:\n"
+        "        TOKEN: yes\n",
+    )
+    with pytest.raises(YamlBooleanTrapError, match=r"at config\.mcpServers\.nodum\.env\.TOKEN"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_extends_ref(tmp_path):
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\nextends: on\n")
+    with pytest.raises(YamlBooleanTrapError, match="at extends"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_compaction_enum(tmp_path):
+    # cline's `compaction: off` is the exact trap: unquoted, `off` parses as False and
+    # would reach the consumer as the string "False".
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\nconfig:\n  compaction: off\n")
+    with pytest.raises(YamlBooleanTrapError, match="at config.compaction"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_opencode_default_options(tmp_path):
+    # _clean_options silently drops any non-string, so an unquoted trap word here would
+    # make the option silently absent instead of failing the load.
+    for key in ("reasoningEffort", "textVerbosity", "reasoningSummary"):
+        _write_yaml(
+            tmp_path,
+            "x.yaml",
+            "schema: agedum-provider/v1\n"
+            "harness: opencode\n"
+            "config:\n"
+            "  defaultOptions:\n"
+            f"    {key}: off\n",
+        )
+        with pytest.raises(YamlBooleanTrapError, match=rf"at config\.defaultOptions\.{key}"):
+            load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_opencode_agent_options_row(tmp_path):
+    # Each agentOptions row is consumed as `agent` (the agent name) + `model` + the same
+    # three option keys via _clean_options — a bool in any of them misbehaves silently.
+    row_fixtures = {
+        "agent": "    - agent: on\n      model: built-in/build\n",
+        "model": "    - agent: plan\n      model: off\n",
+        "reasoningEffort": (
+            "    - agent: plan\n      model: built-in/build\n      reasoningEffort: no\n"
+        ),
+    }
+    for key, row_text in row_fixtures.items():
+        _write_yaml(
+            tmp_path,
+            "x.yaml",
+            "schema: agedum-provider/v1\nharness: opencode\nconfig:\n  agentOptions:\n" + row_text,
+        )
+        with pytest.raises(YamlBooleanTrapError, match=rf"at config\.agentOptions\[0\]\.{key}"):
+            load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_opencode_provider_def_npm_and_name(tmp_path):
+    # providerDef.npm / .name are read as strings by _apply_provider_def: a bool `npm`
+    # surfaces as the confusing "missing required field(s): npm", a bool `name` bakes
+    # "False" into the generated config doc.
+    for key, word in (("npm", "on"), ("name", "no")):
+        _write_yaml(
+            tmp_path,
+            "x.yaml",
+            "schema: agedum-provider/v1\n"
+            "harness: opencode\n"
+            "config:\n"
+            "  providerDef:\n"
+            "    id: external\n"
+            f"    {key}: {word}\n"
+            "    baseUrl: https://x/v1\n"
+            "    model: m\n"
+            "    apiKeyEnv: K\n",
+        )
+        with pytest.raises(YamlBooleanTrapError, match=rf"at config\.providerDef\[0\]\.{key}"):
+            load_config(tmp_path / "x.yaml")
+
+
+def test_yaml_boolean_trap_in_codex_wire_api(tmp_path):
+    # A non-string wireApi is silently dropped by _codex_env, losing the wire override.
+    _write_yaml(
+        tmp_path,
+        "x.yaml",
+        "schema: agedum-provider/v1\nharness: codex\nsecretEnv: K\nconfig:\n  wireApi: off\n",
+    )
+    with pytest.raises(YamlBooleanTrapError, match=r"at config\.wireApi"):
+        load_config(tmp_path / "x.yaml")
+
+
+def test_quoted_yaml_booleans_pass_through_verbatim(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "x.yaml",
+        "schema: agedum-provider/v1\n"
+        'secretEnv: "on"\n'
+        "config:\n"
+        '  model: "yes"\n'
+        "  extraEnv:\n"
+        '    FOO: "off"\n',
+    )
+    config = load_config(tmp_path / "x.yaml")
+    assert config["secretEnv"] == "on"
+    assert config["config"]["model"] == "yes"
+    assert config["config"]["extraEnv"]["FOO"] == "off"
+
+
+def test_yaml_legitimate_booleans_load_untouched(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "x.yaml",
+        "schema: agedum-provider/v1\n"
+        "harness: claude\n"
+        "abstract: true\n"
+        "config:\n"
+        "  foldSystemMessages: true\n"
+        "  disableCaching: false\n",
+    )
+    config = load_config(tmp_path / "x.yaml")
+    assert config["abstract"] is True
+    assert config["config"]["foldSystemMessages"] is True
+    assert config["config"]["disableCaching"] is False
+
+
+# --- YAML values survive verbatim ---
+
+
+def test_yaml_var_placeholders_stay_verbatim(tmp_path):
+    # pyyaml does not interpolate ${VAR}; the placeholder must survive load untouched so
+    # the per-harness translation sees exactly what a JSON config would carry.
+    _write_yaml(tmp_path, "x.yaml", _sample_envelope_yaml())
+    servers = load_config(tmp_path / "x.yaml")["config"]["mcpServers"]
+    assert servers["nodum"]["env"]["NODUM_AGENT_TOKEN"] == "${NODUM_AGENT_TOKEN}"
+
+
+# --- resolution: suffix-swap fallback ---
+
+
+def test_resolve_no_suffix_prefers_json_when_both_exist(tmp_path):
+    _write_config(tmp_path, "x.json", {"harness": "claude"})
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\n")
+    assert resolve_config_path("x", tmp_path) == tmp_path / "x.json"
+
+
+def test_resolve_no_suffix_falls_back_to_yaml(tmp_path):
+    path = _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\n")
+    assert resolve_config_path("x", tmp_path) == path
+
+
+def test_resolve_no_suffix_falls_back_to_yml(tmp_path):
+    # A .yml-only config is rostered under its stripped id, so `agedum x` must reach it.
+    path = _write_yaml(tmp_path, "x.yml", "schema: agedum-provider/v1\n")
+    assert resolve_config_path("x", tmp_path) == path
+
+
+def test_resolve_explicit_json_falls_back_to_yaml_sibling(tmp_path):
+    # The conversion enabler: a base renamed .json → .yaml keeps its old referrers.
+    path = _write_yaml(tmp_path, "base/claude.yaml", "schema: agedum-provider/v1\n")
+    assert resolve_config_path("base/claude.json", tmp_path) == path
+
+
+def test_resolve_explicit_json_stays_when_the_file_exists(tmp_path):
+    path = _write_config(tmp_path, "x.json", {"harness": "claude"})
+    assert resolve_config_path("x.json", tmp_path) == path
+
+
+def test_resolve_explicit_yaml_resolves_as_is(tmp_path):
+    path = _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\n")
+    assert resolve_config_path("x.yaml", tmp_path) == path
+    assert resolve_config_path("x.yml", tmp_path) == tmp_path / "x.yml"
+
+
+def test_resolve_missing_ref_keeps_the_json_name(tmp_path):
+    # Neither spelling exists: the .json name is returned so the load error is the
+    # conventional one (no silent "tried everything" message).
+    assert resolve_config_path("nope", tmp_path) == tmp_path / "nope.json"
+
+
+# --- extends across formats ---
+
+
+def test_yaml_child_extends_json_base(tmp_path):
+    _write_config(tmp_path, "base/c.json", {"abstract": True, "config": {"effortLevel": "max"}})
+    _write_yaml(tmp_path, "child.yaml", "schema: agedum-provider/v1\nextends: base/c.json\n")
+    merged = load_merged_config(tmp_path / "child.yaml", tmp_path)
+    assert merged == {"config": {"effortLevel": "max"}}  # abstract not inherited
+
+
+def test_json_child_extends_yaml_base(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "base/c.yaml",
+        "schema: agedum-provider/v1\nabstract: true\nconfig:\n  effortLevel: max\n",
+    )
+    _write_config(tmp_path, "child.json", {"extends": "base/c.yaml"})
+    merged = load_merged_config(tmp_path / "child.json", tmp_path)
+    assert merged == {"config": {"effortLevel": "max"}}
+
+
+def test_required_env_union_across_formats(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "base.yaml",
+        "schema: agedum-provider/v1\nabstract: true\nrequiredEnv: [NODUM_AGENT_TOKEN]\n",
+    )
+    _write_config(tmp_path, "child.json", {"extends": "base.yaml", "requiredEnv": ["BUFFER_KEY"]})
+    merged = load_merged_config(tmp_path / "child.json", tmp_path)
+    assert merged["requiredEnv"] == ["NODUM_AGENT_TOKEN", "BUFFER_KEY"]
+
+
+def test_cycle_detection_across_formats(tmp_path):
+    _write_yaml(tmp_path, "a.yaml", "schema: agedum-provider/v1\nextends: b.json\n")
+    _write_config(tmp_path, "b.json", {"extends": "a.yaml"})
+    with pytest.raises(ProviderError, match="circular"):
+        load_merged_config(tmp_path / "a.yaml", tmp_path)
+
+
+def test_yaml_base_schema_is_checked_even_when_extended(tmp_path):
+    _write_yaml(tmp_path, "base.yaml", "abstract: true\n")  # schema missing
+    _write_config(tmp_path, "child.json", {"extends": "base.yaml"})
+    with pytest.raises(ProviderSchemaError, match="agedum-provider/v1"):
+        load_merged_config(tmp_path / "child.json", tmp_path)
+
+
+def test_load_merged_config_reports_the_entry_format(tmp_path):
+    _write_yaml(tmp_path, "base.yaml", "schema: agedum-provider/v1\nabstract: true\n")
+    _write_config(tmp_path, "j-child.json", {"extends": "base.yaml"})
+    _write_yaml(tmp_path, "y-child.yaml", "schema: agedum-provider/v1\nextends: base.yaml\n")
+    # The reported format is the launched file's own, not its bases'.
+    assert load_merged_config_with_format(tmp_path / "j-child.json", tmp_path).format == "json"
+    assert load_merged_config_with_format(tmp_path / "y-child.yaml", tmp_path).format == "yaml"
+
+
+# --- provider listing across formats ---
+
+
+def test_list_providers_includes_yaml_configs(tmp_path):
+    _write_config(tmp_path, "claude/ds.json", {"harness": "claude", "config": {"model": "m"}})
+    _write_yaml(tmp_path, "claude/opus.yaml", "schema: agedum-provider/v1\nharness: claude\n")
+    summaries = list_providers(tmp_path)
+    assert [(s.name, s.harness, s.error) for s in summaries] == [
+        ("claude/ds", "claude", None),
+        ("claude/opus", "claude", None),
+    ]
+
+
+def test_list_providers_json_wins_for_a_shared_stem(tmp_path):
+    # Both extensions for one id would collide in the roster; .json is the one listed.
+    _write_config(tmp_path, "x.json", {"harness": "claude", "config": {"model": "json-m"}})
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v1\nharness: kimi\n")
+    (summary,) = list_providers(tmp_path)
+    assert (summary.name, summary.harness, summary.model) == ("x", "claude", "json-m")
+
+
+def test_list_providers_skips_abstract_yaml(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "base/c.yaml",
+        "schema: agedum-provider/v1\nabstract: true\nconfig:\n  model: m\n",
+    )
+    assert list_providers(tmp_path) == []
+
+
+def test_list_providers_reports_a_broken_yaml_as_an_error_row(tmp_path):
+    _write_yaml(tmp_path, "bad.yaml", "schema: agedum-provider/v1\nharness: [claude\n")
+    (summary,) = list_providers(tmp_path)
+    assert summary.name == "bad"
+    assert summary.error is not None and "invalid YAML" in summary.error
