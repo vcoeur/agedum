@@ -11,21 +11,22 @@ mode is the lower-level entry it builds on: run any command in the injected cont
 no provider env.
 
 ```text
-agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
+agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [harness args...]
 agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi|codex> [--dry-run] -- <command> [args...]
 ```
 
 ## Provider mode
 
 ```text
-agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
+agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [harness args...]
 ```
 
-Launch a harness from a condash-style **provider config JSON**. agedum resolves the
+Launch a harness from a condash-style **provider config** — JSON, or YAML declaring
+`schema: agedum-provider/v1`. agedum resolves the
 provider's env from the env file, sets the provider/model/auth environment, and launches
 the harness named in the config — inside the virtual-file context. The single positional
 is a provider **name** (resolved under `$AGENTS_PROVIDERS_DIR`, default
-`~/.config/agents/providers`) or a **path** (it contains `/` or ends in `.json`). Full
+`~/.config/agents/providers`) or a **path** (it contains `/` or a config extension). Full
 reference: [Provider mode](provider.md).
 
 | Form | Effect |
@@ -85,12 +86,13 @@ agedum opencode-deepseek --run "explain this code"
 
 ### Listing providers
 
-`agedum --providers` prints every `*.json` config in the providers directory
-(`$AGENTS_PROVIDERS_DIR`, default `~/.config/agents/providers`) as aligned
+`agedum --providers` prints every `*.json` / `*.yaml` / `*.yml` config in the providers
+directory (`$AGENTS_PROVIDERS_DIR`, default `~/.config/agents/providers`) as aligned
 `name  harness  model` rows — the `name` column is exactly what you pass to
-`agedum <name>`. A config with no `config.model` shows `-`; one that won't parse is
-listed with an `[unreadable: …]` note rather than aborting the listing. A missing or
-empty directory is stated explicitly.
+`agedum <name>` (extensions are stripped; when both extensions exist for one stem the
+`.json` file is the one listed). A config with no `config.model` shows `-`; one that won't
+parse is listed with an `[unreadable: …]` note rather than aborting the listing. A missing
+or empty directory is stated explicitly.
 
 ```text
 $ agedum --providers

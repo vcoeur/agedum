@@ -347,6 +347,87 @@ def test_dry_run_shows_translate_proxy(monkeypatch, tmp_path, capsys):
     assert "translate openai-completions → https://opencode.ai/zen/go" in out
 
 
+def _run_dry_run_output(monkeypatch, tmp_path, capsys, *, yaml_text=None, json_obj=None, name="ds"):
+    """Dry-run one provider config (YAML text or JSON object) hermetically; return stdout.
+
+    Any previous file for ``name`` is removed first, so the same name can be run in both
+    formats without the resolution fallback picking the other extension.
+    """
+    providers = tmp_path / "providers"
+    providers.mkdir(exist_ok=True)
+    for ext in ("json", "yaml"):
+        (providers / f"{name}.{ext}").unlink(missing_ok=True)
+    if yaml_text is not None:
+        (providers / f"{name}.yaml").write_text(yaml_text)
+    else:
+        (providers / f"{name}.json").write_text(json.dumps(json_obj))
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=tok\n")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "claude", lambda project, global_, dest: cli.Plan())
+    _no_launch(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", name, "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    return capsys.readouterr().out
+
+
+def test_dry_run_reports_the_source_format(monkeypatch, tmp_path, capsys):
+    yaml_out = _run_dry_run_output(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        yaml_text=(
+            "schema: agedum-provider/v1\n"
+            "harness: claude\n"
+            "secretEnv: DEEPSEEK_API_KEY\n"
+            "config:\n"
+            "  baseUrl: https://x/anthropic\n"
+        ),
+    )
+    assert "source     yaml" in yaml_out
+    json_out = _run_dry_run_output(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        json_obj={
+            "harness": "claude",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {"baseUrl": "https://x/anthropic"},
+        },
+    )
+    assert "source     json" in json_out
+
+
+def test_dry_run_json_and_yaml_differ_only_in_the_source_line(monkeypatch, tmp_path, capsys):
+    # Parse-not-translate: the same envelope in either format resolves to the same
+    # launch, so the dry-runs must match except for the reported source.
+    envelope = {
+        "harness": "claude",
+        "secretEnv": "DEEPSEEK_API_KEY",
+        "config": {
+            "baseUrl": "https://api.deepseek.com/anthropic",
+            "model": "deepseek-v4-pro",
+            "authStyle": "apikey",
+        },
+    }
+    yaml_text = (
+        "schema: agedum-provider/v1\n"
+        "harness: claude\n"
+        "secretEnv: DEEPSEEK_API_KEY\n"
+        "config:\n"
+        "  baseUrl: https://api.deepseek.com/anthropic\n"
+        "  model: deepseek-v4-pro\n"
+        "  authStyle: apikey\n"
+    )
+    yaml_out = _run_dry_run_output(monkeypatch, tmp_path, capsys, yaml_text=yaml_text)
+    json_out = _run_dry_run_output(monkeypatch, tmp_path, capsys, json_obj=envelope)
+    assert yaml_out.replace("source     yaml", "source     json") == json_out
+
+
 def test_env_flag_after_provider(monkeypatch, tmp_path, capsys):
     # --env is also recognised after the provider name.
     providers = tmp_path / "providers"

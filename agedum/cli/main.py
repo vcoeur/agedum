@@ -2,12 +2,13 @@
 
 **provider** (the primary form): ``agedum <name|path> [harness args…]``. Reads a
 condash-style provider config (a name resolved under
-``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`` or a ``/``/``.json`` path),
+``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`` or a ``/``/config-extension
+path; JSON, or YAML declaring ``schema: agedum-provider/v1``),
 resolves its env from ``${AGENTS_ENV_FILE:-~/.config/agents/.env}`` (or ``--env``),
 sets the provider/model/auth environment, and launches the harness named in the config
 inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked),
-the virtual files that would be injected, and the final argv without launching. See
-:mod:`agedum.provider`.
+the config's source format, the virtual files that would be injected, and the final argv
+without launching. See :mod:`agedum.provider`.
 
 **wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
 ``--`` chooses which virtual files to build (Claude / kimi / opencode / cline / reasonix /
@@ -56,7 +57,7 @@ from agedum.provider import (
     failover_spec,
     list_providers,
     load_config,
-    load_merged_config,
+    load_merged_config_with_format,
     merge_json_onto_file,
     parse_env_file,
     providers_dir,
@@ -80,20 +81,20 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 }
 
 USAGE = (
-    "usage: agedum <provider-name|config.json> [--env <file>] [--prompt TEXT | --run TEXT] "
-    "[--dry-run] [harness args...]\n"
+    "usage: agedum <provider-name|config.json|.yaml> [--env <file>] "
+    "[--prompt TEXT | --run TEXT] [--dry-run] [harness args...]\n"
     "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi|codex> [--sandbox] "
     "[--rw-dir DIR]... [--dry-run] -- <command> [args...]"
 )
 HELP = f"""{USAGE}
 
-Provider mode (the normal way to launch) — run a harness from a provider config JSON,
-with the provider's env resolved from the env file and the agent-neutral source injected
-as virtual files:
+Provider mode (the normal way to launch) — run a harness from a provider config (JSON,
+or YAML declaring `schema: agedum-provider/v1`), with the provider's env resolved from
+the env file and the agent-neutral source injected as virtual files:
 
-  <provider-name>       resolve <name>.json under $AGENTS_PROVIDERS_DIR
+  <provider-name>       resolve <name>.json (or <name>.yaml/.yml) under $AGENTS_PROVIDERS_DIR
                         (default ~/.config/agents/providers)
-  <config.json> / path  a config path (contains / or ends in .json; CWD-relative)
+  <config-path>         a config path (contains / or a config extension; CWD-relative)
   --env <file>          override the env file ($AGENTS_ENV_FILE, default
                         ~/.config/agents/.env)
   --dry-run             print the resolved env (secrets masked), the virtual files that
@@ -260,7 +261,8 @@ def _run_config(argv: list[str]) -> int:
                 f"{provider} is an abstract base config (abstract: true) and cannot be "
                 "launched directly — launch a config that extends it"
             )
-        config = load_merged_config(config_path)
+        merged = load_merged_config_with_format(config_path)
+        config = merged.config
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
         base_env = {**os.environ, **dotenv}
         # The failover proxy must be live before the opencode config document is built
@@ -286,7 +288,7 @@ def _run_config(argv: list[str]) -> int:
                 os.environ.pop(var, None)
 
             if dry_run:
-                _print_dry_run(launch, env_path, command, failover)
+                _print_dry_run(launch, env_path, command, failover, source=merged.format)
                 return 0
 
             # `--run` is non-interactive: the prompt is in argv, so the harness must not
@@ -305,10 +307,17 @@ def _run_config(argv: list[str]) -> int:
         return 1
 
 
-def _print_dry_run(launch, env_path: Path, command: list[str], failover=None) -> None:
-    """Print the resolved launch (secrets masked) without running anything."""
+def _print_dry_run(
+    launch, env_path: Path, command: list[str], failover=None, source="json"
+) -> None:
+    """Print the resolved launch (secrets masked) without running anything.
+
+    ``source`` is the provider config's file format (``json`` / ``yaml``), reported so a
+    converted tree is visible at a glance.
+    """
     print(f"provider   {launch.label}")
     print(f"harness    {launch.harness}")
+    print(f"source     {source}")
     print(f"env file   {_abs_display(env_path)}")
     print()
     _print_environment(launch)

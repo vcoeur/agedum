@@ -1,19 +1,19 @@
 ---
 title: Provider mode · agedum
-description: Launch a harness from a provider config JSON — agedum resolves the provider's env from a .env, validates the required vars, sets the provider/model/auth environment, and launches the harness inside the virtual-file context.
+description: Launch a harness from a provider config (JSON or YAML) — agedum resolves the provider's env from a .env, validates the required vars, sets the provider/model/auth environment, and launches the harness inside the virtual-file context.
 ---
 
 # Provider mode
 
 ```text
-agedum <provider-name|config.json> [--env <file>] [--dry-run] [harness args...]
+agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [harness args...]
 ```
 
-Provider mode is the **normal way to launch** an agent. agedum reads a **provider config
-JSON**, resolves the provider's secrets from a `.env`, sets the provider/model/auth
-environment, and launches the harness named in the config — all in one process, inside the
-same virtual-file context [wrapper mode](wrapper.md) uses. There is no generated launcher
-script: the config JSON is read at run time.
+Provider mode is the **normal way to launch** an agent. agedum reads a **provider config**
+(JSON, or YAML declaring `schema: agedum-provider/v1`), resolves the provider's secrets from a
+`.env`, sets the provider/model/auth environment, and launches the harness named in the config
+— all in one process, inside the same virtual-file context [wrapper mode](wrapper.md) uses.
+There is no generated launcher script: the config is read at run time.
 
 ```bash
 agedum claude-deepseek-auto                   # resolve the named provider, launch claude
@@ -45,7 +45,11 @@ providers root** (`${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`):
 - a value starting with `/` is an **absolute** filesystem path;
 - anything else is **relative to the providers root** — nested paths included, so configs may
   be organised in subdirectories: `agedum claude/deepseek.json` → `<root>/claude/deepseek.json`;
-- `.json` is appended when the value has no extension (`agedum claude/deepseek` also works);
+- a value with **no recognised extension** tries `.json` first, then `.yaml`, then `.yml`
+  (`agedum claude/deepseek` also works);
+- an explicit **`.json` reference that does not exist falls back to its `.yaml` sibling** —
+  so a base converted from JSON to YAML keeps every old referrer working, and
+  **`.yaml` / `.yml` references resolve as-is**;
 - a reference that resolves to no file is an **error** — there is no CWD or fallback search.
 
 Run [`agedum --providers`](cli.md#listing-providers) to list the launchable configs by their
@@ -98,6 +102,50 @@ field. Save the config at the path you want to launch it by (e.g.
 `~/.config/agents/providers/claude/deepseek.json`), put the API token in
 `~/.config/agents/.env`, then `agedum claude/deepseek.json --dry-run` to check it.
 
+## YAML configs { #yaml }
+
+A config may also be a **YAML document** (`.yaml` or `.yml`). YAML configs are **versioned**:
+the document must declare the envelope version in a top-level `schema` key:
+
+```yaml
+# providers/claude/deepseek.yaml
+schema: agedum-provider/v1
+harness: claude
+secretEnv: DEEPSEEK_API_KEY
+requiredEnv:
+  - DEEPSEEK_API_KEY
+config:
+  baseUrl: https://api.deepseek.com/anthropic
+  model: deepseek-v4-pro
+```
+
+- `schema: agedum-provider/v1` is **required**. A missing or different value fails the load
+  with an error naming the expected version.
+- A valid config yields **exactly the same envelope the equivalent JSON would** — the
+  `schema` key is consumed by the loader, and everything downstream (extends merging, the
+  per-harness mapping, `--dry-run`) is identical. agedum *parses* YAML; it never converts
+  files, and JSON stays a permanent second input format.
+- JSON configs need no `schema` key and load exactly as they always have — the version key is
+  a YAML-only requirement.
+
+### The YAML boolean trap { #yaml-boolean-trap }
+
+YAML 1.1 reads an unquoted `on` / `off` / `yes` / `no` as a **boolean**, not a word. In a
+config that is almost never what you mean — `secretEnv: on`, `compaction: off`, or an env
+value `extraEnv: {FOO: no}` would reach the harness as `"True"`/`"False"`. agedum therefore
+**rejects** an unquoted boolean in any string-valued slot (env values, `secretEnv` /
+`requiredEnv` entries, `extends` references, `harness`, and the string keys of the `config`
+block such as `model`, `baseUrl`, `compaction`) with a named error:
+
+```text
+yaml boolean trap at config.extraEnv.FOO: unquoted on/off/yes/no parsed as boolean — quote the value
+```
+
+Quote the value (`secretEnv: "on"`) and it passes through verbatim. Booleans that *are*
+booleans — `abstract: true`, `foldSystemMessages: true`, kimi's `thinking`, codex's
+`codexConfig` flags — are untouched. `${VAR}` placeholders are never interpolated by the YAML
+reader; they survive verbatim exactly as in JSON.
+
 ## Extending configs — `extends` { #extends }
 
 A config can **`extends`** one or more **base** configs and inherit their settings, so shared
@@ -125,6 +173,9 @@ with `/`:
   fail at first use rather than at launch. Requirements accumulate down the chain — base
   order first, the child's additions appended, duplicates dropped.
 - **Recursive** — a base may itself `extends` another.
+- **Formats mix freely** — each reference resolves by the rules above, so a YAML child may
+  extend a JSON base and vice versa (an explicit `base/x.json` reference even keeps working
+  after `x` is converted to YAML, via the [`.yaml` sibling fallback](#yaml)).
 - A **cycle** (a → b → a) or a base that resolves to no file is an **error**.
 - `abstract: true` marks a config as a base only: it is skipped by `--providers` and refuses to
   launch directly (`agedum base/claude-deepseek.json` errors). Abstractness is **not** inherited
@@ -275,7 +326,8 @@ agedum claude-deepseek-auto --run "review this" --dry-run
 ## `--dry-run` { #dry-run }
 
 Prints the full resolved launch without running it, so you can see exactly what context the
-harness is given. It is grouped by **scope** (project / global); under each, every source
+harness is given. It names the config's **source format** (`source     yaml` / `json`) and is
+grouped by **scope** (project / global); under each, every source
 (`AGENTS.md`, `.agents/skills/`) is listed with its **disposition**: `→ <dest>` when
 injected, `read in place` when the harness reads it natively, or an explicit note when a
 scope contributes nothing. Project-scope
@@ -286,6 +338,7 @@ command are shown too. For a kimi provider run from a project root:
 ```text
 provider   Kimi
 harness    kimi
+source     yaml
 env file   ~/.config/agents/.env
 
 project scope · ~/src/foo

@@ -249,8 +249,16 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 Two modes, dispatched in `cli/main.py` on the first argument:
 
 - **provider** (primary) — `agedum <config-ref> [--env <file>] [--dry-run] [harness args...]`.
-  Read a condash-style provider config JSON. The reference resolves **relative to the providers
-  root** (`<providers_dir>/<ref>`, `.json` appended if absent), or absolute when it starts with
+  Read a condash-style provider config — **JSON** (the legacy format, no version key) or
+  **YAML** (a document declaring `schema: agedum-provider/v1`; missing or different is a
+  `ProviderSchemaError` naming the expected value, and a correct key is stripped so YAML yields
+  the same dict the equivalent JSON would — parse, not translate). An unquoted YAML
+  `on`/`off`/`yes`/`no` in a string-valued slot (env values, `secretEnv`/`requiredEnv` entries,
+  `harness`, `extends` refs, the known string keys of `config`) is a `YamlBooleanTrapError` —
+  quote the value. The reference resolves **relative to the providers
+  root** (`<providers_dir>/<ref>`; no recognised extension → `.json`/`.yaml`/`.yml`; an explicit
+  `.json` that does not exist falls back to its `.yaml` sibling, so a converted YAML base keeps
+  its old JSON referrers working; explicit `.yaml`/`.yml` as-is), or absolute when it starts with
   `/`; nested paths are allowed (`agedum claude/deepseek.json`) and not-found is an error (no CWD
   fallback). A config may **`extends`** one or more bases (a string or list, same resolution):
   bases are deep-merged left→right and the child applied last (recursive; cycles error), except
@@ -261,7 +269,8 @@ Two modes, dispatched in `cli/main.py` on the first argument:
   gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
   validate `requiredEnv`, set the provider/model/auth env in `os.environ`, and run the same
   virtual-FS launch as wrapper mode. The harness is read **from the config**; no `--harness` flag.
-  `--dry-run` prints the resolved env (secrets masked), the injected virtual files, and the argv.
+  `--dry-run` prints the resolved env (secrets masked), the config's **source format**
+  (`source     yaml` / `json`), the injected virtual files, and the argv.
   An optional top-level `sandbox` field (`{readWrite: [...]}`) requests the same write-confinement
   as wrapper `--sandbox`. `config.mcpServers` is a **canonical cross-harness** key: one stdio
   (`command`/`args`/`env`/`cwd`) or remote (`url`/`headers`/`transport`) vocabulary, translated
@@ -289,7 +298,9 @@ Two modes, dispatched in `cli/main.py` on the first argument:
 
 Auxiliary first-argument flags (handled in `app()` before the two-mode dispatch, like
 `--version`): **`--providers`** prints every launchable config under `providers_dir()`
-(walked **recursively**; `abstract` bases skipped) as `path  harness  model` — the path
+(walked **recursively** over `*.json` / `*.yaml` / `*.yml`; `abstract` bases skipped; ids are
+extension-stripped and when both extensions exist for one stem the `.json` file is the one
+listed) as `path  harness  model` — the path
 relative to the root, e.g. `claude/deepseek` (via `provider.list_providers` →
 `_run_list_providers`), honouring `$AGENTS_PROVIDERS_DIR`; a config that won't parse or
 resolve is listed with its error, never fatal.
@@ -298,8 +309,10 @@ Module layout: `sources.py` (locate the source), `harness.py` (`compile_claude` 
 `compile_kimi` / `compile_opencode` / `compile_cline` / `compile_reasonix` / `compile_aider` / `compile_pi` / `compile_codex` → a `Plan` of absolute binds **+ `extra_args`** for
 the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` —
 appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a read-only host
-+ writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored /
-`load_config` raw + `load_merged_config` resolving the `extends` chain into one effective config /
++ writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored
+with the `.json`→`.yaml` fallback / `load_config` raw — JSON, or YAML declaring
+`schema: agedum-provider/v1`, via `load_config_with_format` which carries the source format —
++ `load_merged_config` resolving the `extends` chain into one effective config /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
 per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (three localhost reverse
