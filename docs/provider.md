@@ -224,6 +224,82 @@ Rules:
   included fragment names that fragment's path.
 - `--dry-run` output is unchanged: composition detail is not reported, the effective result is.
 
+## Model catalogue — `models.yaml` + `modelRef` { #model-catalogue }
+
+A hand-written opencode launcher that defines a custom provider must inline a catalog block
+per model (the model's `name`, `limit`, `modalities`, `attachment` — the block opencode itself
+consumes) under `config.opencodeConfig.provider.<id>.models`. When several launchers serve the
+same models, that block is duplicated in each. The **model catalogue** is a shared,
+run-time source for those fragments: a `models.yaml` at the providers root, and a `modelRef`
+on a `config.providerDef` entry that pulls one entry in at launch.
+
+```yaml
+# providers/models.yaml   (fixed filename at the providers root)
+schema: agedum-models/v1
+models:
+  deepseek-v4-pro:
+    name: DeepSeek V4 Pro
+    limit:
+      context: 1000000
+      output: 65536
+  deepseek-flash:
+    name: DeepSeek V4.1 Flash
+    attachment: true
+    limit:
+      context: 1000000
+      output: 65536
+    modalities:
+      input: [text, image]
+      output: [text]
+```
+
+```yaml
+# providers/oc/hand-ds.yaml — the catalog block comes from the catalogue
+schema: agedum-provider/v1
+harness: opencode
+secretEnv: DEEPSEEK_API_KEY
+config:
+  model: deepseek/deepseek-v4-pro
+  providerDef:
+    id: deepseek
+    npm: "@ai-sdk/openai-compatible"
+    baseUrl: https://api.deepseek.com
+    apiKeyEnv: DEEPSEEK_API_KEY
+    modelRef: deepseek-v4-pro      # a catalogue id, or a list of them
+```
+
+At launch — after `include`/`extends` merging, before the launch builds — each `modelRef`
+expands to the catalogue entry filed under
+`config.opencodeConfig.provider.<providerDef id>.models.<id>`, exactly where the generated
+`oc/*.json` configs carry their catalog inline; an equivalent config with the block written by
+hand merges to the same result, and `--dry-run` shows the expanded form. The entry vocabulary
+is **opencode's own** — whatever opencode consumes per model (`variants`, `options`, …) can
+live in the catalogue and rides through verbatim.
+
+Rules:
+
+- **Opt-in, zero-change otherwise** — a config with no `modelRef` anywhere and no
+  `modelsCatalog` never touches the catalogue (which need not exist), and the generated
+  `oc/*.json` configs are unaffected.
+- **The catalogue is data, not a config**: `--providers` skips the fixed root-level
+  `models.yaml` (only that exact filename — a `models.yaml` in a subdirectory stays an
+  ordinary config candidate).
+- **Errors are named**: a catalogue missing, carrying a wrong `schema:` value, or holding a
+  malformed entry (checked minimally: `name` string, `attachment` boolean, `limit` integers
+  or null, `modalities` string lists — errors name the model id and key) raises a
+  `ProviderError` naming the catalogue path; a `modelRef` missing from the catalogue names
+  the ref, the providerDef, and the path. A config carrying `modelRef` on any harness other
+  than opencode is refused with a message naming the harness (not the ref or path).
+- **Override the location** with a top-level `modelsCatalog: <ref>` (resolved like
+  `include`; YAML-only — a non-`.yaml` ref is an error). It is a meta key like
+  `extends`/`include`, consumed and stripped, and a declared pointer loads and validates
+  even when nothing references it.
+- **No YAML boolean-trap walk on the catalogue in v1** (a documented limit): the catalogue's
+  per-model entries are passed through verbatim, so quote any value that reads as
+  `on`/`off`/`yes`/`no` yourself.
+- **opencode first** — claude and codex need no expansion today; a `modelRef` on their
+  configs fails loudly rather than being ignored.
+
 ## MCP servers — `config.mcpServers` { #mcp }
 
 `config.mcpServers` declares MCP servers in **one canonical vocabulary** that agedum

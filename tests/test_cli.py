@@ -655,6 +655,76 @@ def test_provider_dry_run_pretty_prints_opencode_config(monkeypatch, tmp_path, c
     assert '"reasoningEffort": "high"' in out
 
 
+def test_provider_dry_run_shows_the_expanded_model_catalogue(monkeypatch, tmp_path, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    providers = tmp_path / "providers"
+    providers.mkdir(exist_ok=True)
+    (providers / "models.yaml").write_text(
+        "schema: agedum-models/v1\n"
+        "models:\n"
+        "  deepseek-v4-pro:\n"
+        "    name: DeepSeek V4 Pro\n"
+        "    limit:\n"
+        "      context: 1000000\n"
+        "      output: 65536\n"
+    )
+    _write_provider(
+        tmp_path,
+        "hand-oc",
+        {
+            "harness": "opencode",
+            "secretEnv": "DEEPSEEK_API_KEY",
+            "config": {
+                "providerDef": {
+                    "id": "deepseek",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "baseUrl": "https://api.deepseek.com",
+                    "apiKeyEnv": "DEEPSEEK_API_KEY",
+                    "modelRef": "deepseek-v4-pro",
+                }
+            },
+        },
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "hand-oc", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    # The catalogue fragment lands in the effective config; the modelRef key itself
+    # is consumed and never reaches the launch report.
+    assert '"name": "DeepSeek V4 Pro"' in out
+    assert "modelRef" not in out
+    assert "modelsCatalog" not in out
+
+
+def test_provider_model_ref_unknown_id_returns_1(monkeypatch, tmp_path, capsys):
+    _hermetic_sources(monkeypatch)
+    _no_launch(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    providers = tmp_path / "providers"
+    providers.mkdir(exist_ok=True)
+    (providers / "models.yaml").write_text(
+        "schema: agedum-models/v1\nmodels:\n  other:\n    name: Other\n"
+    )
+    _write_provider(
+        tmp_path,
+        "hand-oc",
+        {
+            "harness": "opencode",
+            "config": {"providerDef": {"id": "deepseek", "modelRef": "no-such-model"}},
+        },
+        monkeypatch,
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "hand-oc", "--dry-run"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+    assert "no-such-model" in capsys.readouterr().err
+
+
 def test_provider_missing_required_env_returns_1(monkeypatch, tmp_path):
     _write_provider(
         tmp_path,

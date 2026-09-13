@@ -55,6 +55,12 @@ HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "
 PROVIDER_SCHEMA_KEY = "schema"
 PROVIDER_SCHEMA_VERSION = "agedum-provider/v1"
 
+# The run-time model catalogue: a fixed-name YAML document at the providers root
+# (or the file a config's `modelsCatalog` ref points at) holding verbatim
+# per-model fragments opencode configs reach through `modelRef`. YAML-only in v1.
+MODEL_CATALOGUE_NAME = "models.yaml"
+MODEL_CATALOGUE_SCHEMA_VERSION = "agedum-models/v1"
+
 # The suffixes a config file may carry. ``.yaml`` / ``.yml`` both select the YAML
 # reader; every other suffix (``.json`` included, and none at all) selects JSON.
 YAML_SUFFIXES = (".yaml", ".yml")
@@ -97,6 +103,10 @@ class ProviderError(RuntimeError):
 
 class ProviderSchemaError(ProviderError):
     """A YAML provider config is missing or carries an unsupported ``schema`` version."""
+
+
+class ModelCatalogSchemaError(ProviderError):
+    """A model catalogue is missing or carries an unsupported ``schema`` version."""
 
 
 class YamlBooleanTrapError(ProviderError):
@@ -670,6 +680,7 @@ def _reject_yaml_boolean_traps(config: dict, path: Path) -> None:
         check_string(config.get(key), key)
     check_ref(config.get("extends"), "extends")
     check_ref(config.get("include"), "include")
+    check_ref(config.get("modelsCatalog"), "modelsCatalog")
     check_string_list(config.get("requiredEnv"), "requiredEnv")
     sandbox = config.get("sandbox")
     if isinstance(sandbox, dict):
@@ -792,6 +803,229 @@ def _merge_extends(base: dict, overlay: dict) -> dict:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# the run-time model catalogue (`models.yaml`) + `modelRef` expansion
+# ---------------------------------------------------------------------------
+
+
+def load_model_catalog(path: Path) -> dict[str, dict]:
+    """Read and validate a model catalogue: a YAML document declaring
+    ``schema: agedum-models/v1`` whose ``models`` map holds one entry per model id.
+
+    Each entry is a **verbatim per-model fragment** in opencode's own catalog
+    vocabulary (``name``, ``limit: {context, output, …}``, ``attachment``,
+    ``modalities: {input, output}``, plus any other key opencode consumes —
+    ``variants``, ``options``, …), so what lands in a launch config is byte-for-byte
+    what the generated oc configs carry inline. Entries are type-checked minimally —
+    a mapping per model, ``name`` a string, ``attachment`` a boolean, ``limit``
+    values integers or null, ``modalities`` values lists of strings — with errors
+    naming the model id and key; every other key passes through untouched. The
+    catalogue deliberately gets **no** YAML boolean-trap walk in v1 (a documented
+    limit: quote a value that reads as on/off/yes/no). Raises :class:`ProviderError`
+    (absent/unreadable/invalid file) or :class:`ModelCatalogSchemaError`
+    (schema/shape/type violations); returns the ``models`` map.
+    """
+    try:
+        raw = path.read_text()
+    except FileNotFoundError as exc:
+        raise ProviderError(
+            f"no model catalogue at {path} — a config references `modelRef`; create it"
+            " (or point the config's `modelsCatalog` at one)"
+        ) from exc
+    except OSError as exc:
+        raise ProviderError(f"cannot read model catalogue {path}: {exc}") from exc
+    try:
+        document = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ProviderError(f"invalid YAML in model catalogue {path}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ModelCatalogSchemaError(
+            f"model catalogue {path} must be a YAML mapping, not {type(document).__name__}"
+        )
+    schema = document.get(PROVIDER_SCHEMA_KEY)
+    if schema != MODEL_CATALOGUE_SCHEMA_VERSION:
+        raise ModelCatalogSchemaError(
+            f"{path}: model catalogue must declare `schema: "
+            f"{MODEL_CATALOGUE_SCHEMA_VERSION}` (found {schema!r})"
+        )
+    models = document.get("models")
+    if not isinstance(models, dict):
+        raise ModelCatalogSchemaError(
+            f"{path}: model catalogue `models` must be a mapping of model id → entry"
+        )
+    for model_id, entry in models.items():
+        if not isinstance(entry, dict):
+            raise ModelCatalogSchemaError(
+                f"{path}: catalogue entry for model {model_id!r} must be a mapping, "
+                f"not {type(entry).__name__}"
+            )
+        _validate_catalog_entry(model_id, entry, path)
+    return models
+
+
+def _validate_catalog_entry(model_id: str, entry: dict, path: Path) -> None:
+    """Minimal type validation of one catalogue entry; errors name the model + key.
+
+    Only the oc catalog vocabulary's own slots are checked — ``name`` (string),
+    ``attachment`` (boolean), ``limit`` (integer-or-null values), ``modalities``
+    (string-list values). Anything else passes verbatim: the catalogue is a fragment
+    *source*, and opencode's entry vocabulary is opencode's to evolve.
+    """
+
+    def bad(key: str, expectation: str, value: object) -> ModelCatalogSchemaError:
+        return ModelCatalogSchemaError(
+            f"{path}: catalogue entry {model_id!r} key `{key}` must be {expectation}, got {value!r}"
+        )
+
+    name = entry.get("name")
+    if name is not None and not isinstance(name, str):
+        raise bad("name", "a string", name)
+    attachment = entry.get("attachment")
+    if attachment is not None and not isinstance(attachment, bool):
+        raise bad("attachment", "a boolean", attachment)
+    limit = entry.get("limit")
+    if limit is not None:
+        if not isinstance(limit, dict):
+            raise bad("limit", "a mapping of integer-or-null values", limit)
+        for key, value in limit.items():
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise bad(f"limit.{key}", "an integer or null", value)
+    modalities = entry.get("modalities")
+    if modalities is not None:
+        if not isinstance(modalities, dict):
+            raise bad("modalities", "a mapping of string-list values", modalities)
+        for key, value in modalities.items():
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise bad(f"modalities.{key}", "a list of strings", value)
+
+
+def _model_ref_ids(provider_def: dict) -> list[str]:
+    """A providerDef's ``modelRef`` as a list of catalogue ids (string or list form)."""
+    raw = provider_def.get("modelRef")
+    if raw is None:
+        return []
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    if (
+        isinstance(raw, list)
+        and raw
+        and all(isinstance(item, str) and item.strip() for item in raw)
+    ):
+        return [item.strip() for item in raw]
+    raise ProviderError("`modelRef` must be a model-id string or a non-empty list of them")
+
+
+def expand_model_refs(config: dict, base_dir: Path | None = None) -> dict:
+    """Expand ``modelRef`` keys in a *merged* config's opencode providerDefs against
+    the model catalogue, returning the effective config.
+
+    Opt-in expansion, applied after include/extends merging and before launch
+    building (so ``--dry-run`` shows the effective result): a providerDef's
+    ``modelRef`` (a catalogue id, or a list of them) files that catalogue entry —
+    verbatim — under ``config.opencodeConfig.provider.<providerDef id>.models.<id>``,
+    exactly where the generated oc configs carry their catalog inline; an authored
+    inline entry for the same model is kept and wins on conflict. The ``modelRef``
+    key itself is consumed and never reaches the launch.
+
+    The catalogue lives at ``<providers root>/models.yaml`` unless the config's
+    top-level ``modelsCatalog`` ref (resolved like ``include``, YAML-only — a
+    non-``.yaml`` ref is a named error) points elsewhere; that key is a meta key,
+    consumed here like ``extends``/``include``. Declaring ``modelsCatalog`` loads
+    and validates the pointed-at catalogue even when nothing references it — a
+    declared-but-broken pointer must not be silent.
+
+    Zero-behaviour-change guarantee: a config with no ``modelRef`` anywhere and no
+    ``modelsCatalog`` is returned untouched (the catalogue is never even read), so
+    existing configs — and the generated oc JSON — are unaffected. Expansion is
+    **opencode-first**: ``modelRef`` on any other harness fails loudly rather than
+    being silently ignored (claude/codex need no expansion today).
+    """
+    catalog_ref = config.get("modelsCatalog")
+    result = {key: value for key, value in config.items() if key != "modelsCatalog"}
+    block = config.get("config")
+    defs_raw = block.get("providerDef") if isinstance(block, dict) else None
+    if isinstance(defs_raw, list):
+        candidates = defs_raw
+    elif isinstance(defs_raw, dict):
+        candidates = [defs_raw]
+    else:
+        candidates = []
+    has_refs = any(isinstance(entry, dict) and "modelRef" in entry for entry in candidates)
+    if not has_refs and catalog_ref is None:
+        return result
+
+    providers = base_dir or providers_dir()
+    if catalog_ref is not None:
+        if not isinstance(catalog_ref, str) or not catalog_ref.strip():
+            raise ProviderError("`modelsCatalog` must be a catalogue ref string")
+        catalog_path = resolve_config_path(catalog_ref, providers)
+        if catalog_path.suffix not in YAML_SUFFIXES:
+            raise ProviderError(
+                f"`modelsCatalog` {catalog_ref!r} must resolve to a .yaml catalogue "
+                f"(got {catalog_path.name}); the catalogue is YAML-only in v1"
+            )
+    else:
+        catalog_path = providers / MODEL_CATALOGUE_NAME
+    catalog = load_model_catalog(catalog_path)
+    if not has_refs:
+        return result
+
+    if config.get("harness") != "opencode":
+        raise ProviderError(
+            "`modelRef` is only implemented for the opencode harness — expansion "
+            "writes an opencode catalog block (claude/codex need none today)"
+        )
+    # Functional update along the one mutated path (opencodeConfig.provider.<id>
+    # .models.<ref>): build_launch must not see (or share) mutated sub-dicts.
+    new_block = dict(block)
+    passthrough = new_block.get("opencodeConfig")
+    if passthrough is not None and not isinstance(passthrough, dict):
+        raise ProviderError("opencodeConfig must be a JSON object")
+    oc = dict(passthrough or {})
+    oc_providers = dict(oc.get("provider") or {})
+    for provider_def in _provider_defs(defs_raw):
+        refs = _model_ref_ids(provider_def)
+        if not refs:
+            continue
+        provider_id = str(provider_def.get("id") or "").strip()
+        if not provider_id:
+            raise ProviderError(
+                "a providerDef carrying `modelRef` needs an `id` — the catalogue "
+                "fragments are filed under opencodeConfig.provider.<id>.models"
+            )
+        for ref in refs:
+            if ref not in catalog:
+                raise ProviderError(
+                    f"modelRef {ref!r} (providerDef {provider_id!r}) is not in the "
+                    f"model catalogue {catalog_path}"
+                )
+        entry = dict(oc_providers.get(provider_id) or {})
+        models = dict(entry.get("models") or {})
+        for ref in refs:
+            inline = models.get(ref)
+            models[ref] = _deep_merge(
+                catalog[ref], dict(inline) if isinstance(inline, dict) else {}
+            )
+        entry["models"] = models
+        oc_providers[provider_id] = entry
+    oc["provider"] = oc_providers
+    new_block["opencodeConfig"] = oc
+
+    def stripped(provider_def: dict) -> dict:
+        return {key: value for key, value in provider_def.items() if key != "modelRef"}
+
+    if isinstance(defs_raw, dict):
+        new_block["providerDef"] = stripped(defs_raw)
+    else:
+        new_block["providerDef"] = [
+            stripped(provider_def) for provider_def in _provider_defs(defs_raw)
+        ]
+    result["config"] = new_block
+    return result
+
+
 @dataclass(frozen=True)
 class ProviderSummary:
     """One row of ``agedum --providers``: a provider config reduced to its listing fields.
@@ -844,9 +1078,19 @@ def list_providers(directory: Path | None = None) -> list[ProviderSummary]:
         return summaries
     # sorted() over the merged set keeps today's name ordering and puts the .json file
     # ahead of its .yaml sibling for the same stem ("x.json" < "x.yaml"), so the dedup
-    # below makes .json win.
+    # below makes .json win. The fixed model catalogue at the root is data, not a
+    # config — without the skip it would surface as a broken roster row (it carries no
+    # provider schema). Only that exact root-level filename is skipped: a `models.yaml`
+    # in a subdirectory stays an ordinary config candidate (and errors loudly when
+    # malformed).
+    catalogue = target / MODEL_CATALOGUE_NAME
     all_paths = sorted(
-        {path for pattern in ("*.json", "*.yaml", "*.yml") for path in target.rglob(pattern)}
+        {
+            path
+            for pattern in ("*.json", "*.yaml", "*.yml")
+            for path in target.rglob(pattern)
+            if path != catalogue
+        }
     )
     seen_names: set[str] = set()
     for path in all_paths:

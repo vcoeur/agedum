@@ -270,8 +270,21 @@ Two modes, dispatched in `cli/main.py` on the first argument:
    keys beat an included fragment's on conflict), then the file's own keys; `requiredEnv` unions
    across all three layers; cycles are detected across the combined include+extends graph (a
    file reached twice through different paths is fine); `include` is a meta key like `extends`,
-   stripped from the merged result. An
-   **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
+   stripped from the merged result. An optional **model catalogue** kills the inline-catalog
+   boilerplate: `<providers_root>/models.yaml` (fixed filename; YAML-only, declaring
+   `schema: agedum-models/v1` — a sibling `ModelCatalogSchemaError` otherwise) holds verbatim
+   per-model fragments in opencode's own catalog vocabulary, and inside `config.providerDef` a
+   `modelRef: <model-id>` (or list) on an entry expands after include/extends merging, before
+   launch building, to that entry filed under
+   `config.opencodeConfig.provider.<id>.models.<model-id>` (an authored inline entry wins on
+   conflict; the `modelRef` key is consumed). Opencode-only (claude/codex need none today — a
+   `modelRef` elsewhere fails loudly); a config with no `modelRef` and no `modelsCatalog`
+   never reads the catalogue (zero behaviour change). `modelsCatalog: <ref>` (top-level meta
+   key, resolved like include, `.yaml` only) points at an alternative catalogue; the roster
+   (`--providers`) skips the exact root-level `models.yaml` (a subdirectory one stays an
+   ordinary candidate). Catalogue entries are type-checked minimally (name string, attachment
+   boolean, limit integers-or-null, modalities string-lists) naming the model id and key; no
+   boolean-trap walk on the catalogue in v1. An **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
    abstractness is not inherited (through extends or include); shared fragments carry it to stay
    out of `--providers`. A config's **identity/label is its path** (the `name` field is
    gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
