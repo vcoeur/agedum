@@ -6,16 +6,19 @@ import pytest
 
 from agedum.provider import (
     Launch,
+    ModelCatalogSchemaError,
     ProviderError,
     ProviderSchemaError,
     YamlBooleanTrapError,
     build_launch,
     default_env_file,
+    expand_model_refs,
     list_providers,
     load_config,
     load_config_with_format,
     load_merged_config,
     load_merged_config_with_format,
+    load_model_catalog,
     parse_env_file,
     providers_dir,
     required_env,
@@ -3942,3 +3945,353 @@ def test_list_providers_reports_a_broken_yaml_as_an_error_row(tmp_path):
     (summary,) = list_providers(tmp_path)
     assert summary.name == "bad"
     assert summary.error is not None and "invalid YAML" in summary.error
+
+
+# --- model catalogue (models.yaml) + modelRef expansion ---
+
+
+_CATALOGUE_YAML = """\
+schema: agedum-models/v1
+models:
+  deepseek-v4-pro:
+    name: DeepSeek V4 Pro
+    limit:
+      context: 1000000
+      output: 65536
+  deepseek-flash:
+    name: DeepSeek V4.1 Flash
+    attachment: true
+    limit:
+      context: 1000000
+      output: 65536
+    modalities:
+      input: [text, image]
+      output: [text]
+"""
+
+
+def _write_catalogue(root, text=_CATALOGUE_YAML, rel="models.yaml"):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _oc_config(provider_def):
+    """A minimal opencode config dict around one providerDef entry (or list)."""
+    return {"harness": "opencode", "secretEnv": "K", "config": {"providerDef": provider_def}}
+
+
+def test_load_model_catalog_happy_path(tmp_path):
+    path = _write_catalogue(tmp_path)
+    models = load_model_catalog(path)
+    assert set(models) == {"deepseek-v4-pro", "deepseek-flash"}
+    assert models["deepseek-v4-pro"] == {
+        "name": "DeepSeek V4 Pro",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+    assert models["deepseek-flash"]["attachment"] is True
+    assert models["deepseek-flash"]["modalities"] == {
+        "input": ["text", "image"],
+        "output": ["text"],
+    }
+
+
+def test_load_model_catalog_passes_unknown_keys_through_verbatim(tmp_path):
+    # The catalogue is a verbatim fragment source: any key opencode consumes beyond
+    # the validated vocabulary (variants, options, …) rides along untouched.
+    _write_catalogue(
+        tmp_path,
+        "schema: agedum-models/v1\n"
+        "models:\n"
+        "  gpt-5.6-sol:\n"
+        "    name: GPT-5.6 Sol\n"
+        "    attachment: true\n"
+        "    variants:\n"
+        "      max:\n"
+        "        disabled: true\n"
+        "    options:\n"
+        "      reasoningEffort: high\n",
+    )
+    (entry,) = load_model_catalog(tmp_path / "models.yaml").values()
+    assert entry["variants"] == {"max": {"disabled": True}}
+    assert entry["options"] == {"reasoningEffort": "high"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["schema: other/v1\nmodels: {}\n", "models: {}\n"],
+)
+def test_load_model_catalog_rejects_a_wrong_or_missing_schema(tmp_path, text):
+    _write_catalogue(tmp_path, text)
+    with pytest.raises(ModelCatalogSchemaError, match="agedum-models/v1"):
+        load_model_catalog(tmp_path / "models.yaml")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["schema: agedum-models/v1\n", "schema: agedum-models/v1\nmodels: [a]\n"],
+)
+def test_load_model_catalog_requires_a_models_mapping(tmp_path, text):
+    _write_catalogue(tmp_path, text)
+    with pytest.raises(ModelCatalogSchemaError, match="`models` must be a mapping"):
+        load_model_catalog(tmp_path / "models.yaml")
+
+
+def test_load_model_catalog_entry_must_be_a_mapping(tmp_path):
+    _write_catalogue(tmp_path, "schema: agedum-models/v1\nmodels:\n  m1: nope\n")
+    with pytest.raises(ModelCatalogSchemaError, match="entry for model 'm1' must be a mapping"):
+        load_model_catalog(tmp_path / "models.yaml")
+
+
+@pytest.mark.parametrize(
+    ("entry", "key"),
+    [
+        ("  m1:\n    name: 5\n", "name"),
+        ("  m1:\n    attachment: yes-please\n", "attachment"),
+        ("  m1:\n    limit: big\n", "limit"),
+        ("  m1:\n    limit:\n      context: big\n", "limit.context"),
+        ("  m1:\n    limit:\n      context: true\n", "limit.context"),
+        ("  m1:\n    modalities: text\n", "modalities"),
+        ("  m1:\n    modalities:\n      input: text\n", "modalities.input"),
+        ("  m1:\n    modalities:\n      input: [text, 3]\n", "modalities.input"),
+    ],
+)
+def test_load_model_catalog_entry_type_errors_name_the_model_and_key(tmp_path, entry, key):
+    _write_catalogue(tmp_path, f"schema: agedum-models/v1\nmodels:\n{entry}")
+    with pytest.raises(ModelCatalogSchemaError, match=f"'m1' key `{key}`"):
+        load_model_catalog(tmp_path / "models.yaml")
+
+
+def test_load_model_catalog_accepts_null_limits(tmp_path):
+    # A null limit is legitimate in the oc vocabulary (unset = opencode's default).
+    _write_catalogue(
+        tmp_path,
+        "schema: agedum-models/v1\nmodels:\n  m1:\n    name: M1\n    limit:\n      context: null\n",
+    )
+    assert load_model_catalog(tmp_path / "models.yaml")["m1"]["limit"] == {"context": None}
+
+
+def test_expand_model_refs_files_the_catalogue_entry_under_the_provider(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _oc_config(
+        {"id": "deepseek", "npm": "@ai-sdk/openai-compatible", "modelRef": "deepseek-v4-pro"}
+    )
+    expanded = expand_model_refs(config, tmp_path)
+    entry = expanded["config"]["opencodeConfig"]["provider"]["deepseek"]["models"][
+        "deepseek-v4-pro"
+    ]
+    assert entry == {"name": "DeepSeek V4 Pro", "limit": {"context": 1000000, "output": 65536}}
+    assert "modelRef" not in expanded["config"]["providerDef"]
+    assert "modelsCatalog" not in expanded
+
+
+def test_expand_model_refs_build_launch_carries_the_fragment(tmp_path):
+    # End to end through the launch: the expanded fragment reaches
+    # OPENCODE_CONFIG_CONTENT exactly where the generated oc configs carry it.
+    _write_catalogue(tmp_path)
+    config = _oc_config(
+        {
+            "id": "deepseek",
+            "npm": "@ai-sdk/openai-compatible",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKeyEnv": "K",
+            "modelRef": "deepseek-flash",
+        }
+    )
+    expanded = expand_model_refs(config, tmp_path)
+    launch = build_launch(expanded, {"K": "tok"})
+    document = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    models = document["provider"]["deepseek"]["models"]
+    assert models["deepseek-flash"]["name"] == "DeepSeek V4.1 Flash"
+    assert models["deepseek-flash"]["attachment"] is True
+
+
+def test_expand_model_refs_accepts_a_list_of_refs(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _oc_config({"id": "deepseek", "modelRef": ["deepseek-v4-pro", "deepseek-flash"]})
+    expanded = expand_model_refs(config, tmp_path)
+    models = expanded["config"]["opencodeConfig"]["provider"]["deepseek"]["models"]
+    assert set(models) == {"deepseek-v4-pro", "deepseek-flash"}
+
+
+def test_expand_model_refs_unknown_ref_names_ref_and_catalogue(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _oc_config({"id": "deepseek", "modelRef": "no-such-model"})
+    with pytest.raises(ProviderError, match="modelRef 'no-such-model'.*models.yaml"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_absent_catalogue_names_the_path(tmp_path):
+    config = _oc_config({"id": "deepseek", "modelRef": "deepseek-v4-pro"})
+    with pytest.raises(ProviderError, match="no model catalogue at.*models.yaml"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_is_opencode_only(tmp_path):
+    _write_catalogue(tmp_path)
+    config = {"harness": "claude", "config": {"providerDef": {"id": "x", "modelRef": "m"}}}
+    with pytest.raises(ProviderError, match="only implemented for the opencode harness"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_provider_def_without_id_errors(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _oc_config({"npm": "@ai-sdk/openai-compatible", "modelRef": "deepseek-v4-pro"})
+    with pytest.raises(ProviderError, match="needs an `id`"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_without_refs_or_override_is_identity(tmp_path):
+    # Zero behaviour change: no modelRef anywhere and no modelsCatalog — the config is
+    # returned untouched and the catalogue is never even read (it does not exist here).
+    config = _oc_config({"id": "deepseek", "npm": "@ai-sdk/openai-compatible"})
+    assert expand_model_refs(config, tmp_path) == config
+
+
+def test_expand_model_refs_models_catalog_override(tmp_path):
+    # The default models.yaml does not exist; the override carries the entry. An
+    # extensionless ref resolves through the ordinary ref rule (.yaml sibling).
+    _write_catalogue(tmp_path, rel="catalogues/alt.yaml")
+    config = {
+        **_oc_config({"id": "deepseek", "modelRef": "deepseek-v4-pro"}),
+        "modelsCatalog": "catalogues/alt",
+    }
+    expanded = expand_model_refs(config, tmp_path)
+    models = expanded["config"]["opencodeConfig"]["provider"]["deepseek"]["models"]
+    assert models["deepseek-v4-pro"]["name"] == "DeepSeek V4 Pro"
+    assert "modelsCatalog" not in expanded
+
+
+def test_expand_model_refs_models_catalog_rejects_a_non_yaml_ref(tmp_path):
+    _write_config(tmp_path, "catalogues/alt.json", {"schema": "agedum-models/v1"})
+    config = {
+        **_oc_config({"id": "deepseek", "modelRef": "deepseek-v4-pro"}),
+        "modelsCatalog": "catalogues/alt.json",
+    }
+    with pytest.raises(ProviderError, match=r"must resolve to a \.yaml catalogue"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_declared_models_catalog_must_load_even_without_refs(tmp_path):
+    # A declared-but-broken pointer must not be silent — the catalogue loads and
+    # validates even when no modelRef references it.
+    config = {**_oc_config({"id": "deepseek"}), "modelsCatalog": "absent.yaml"}
+    with pytest.raises(ProviderError, match="no model catalogue at"):
+        expand_model_refs(config, tmp_path)
+
+
+def test_expand_model_refs_inline_entry_is_kept_and_wins_on_conflict(tmp_path):
+    # An authored inline fragment for the same model is the more specific layer:
+    # kept as-is, winning on conflict over the catalogue's values.
+    _write_catalogue(tmp_path)
+    config = {
+        "harness": "opencode",
+        "secretEnv": "K",
+        "config": {
+            "providerDef": {"id": "deepseek", "modelRef": "deepseek-v4-pro"},
+            "opencodeConfig": {
+                "provider": {
+                    "deepseek": {
+                        "models": {
+                            "deepseek-v4-pro": {
+                                "name": "Locally Renamed",
+                                "options": {"reasoningEffort": "high"},
+                            }
+                        }
+                    }
+                }
+            },
+        },
+    }
+    expanded = expand_model_refs(config, tmp_path)
+    entry = expanded["config"]["opencodeConfig"]["provider"]["deepseek"]["models"][
+        "deepseek-v4-pro"
+    ]
+    assert entry == {
+        "name": "Locally Renamed",
+        "limit": {"context": 1000000, "output": 65536},
+        "options": {"reasoningEffort": "high"},
+    }
+
+
+@pytest.mark.parametrize("dict_form", [True, False])
+def test_expand_model_refs_parity_with_the_inline_catalog(tmp_path, dict_form):
+    # The whole point: a modelRef config expands to exactly the dict the equivalent
+    # hand-written config (catalog block inline in opencodeConfig, no modelRef)
+    # merges to — for both the single-dict and the list providerDef form.
+    _write_catalogue(tmp_path)
+    catalog_entry = {
+        "name": "DeepSeek V4 Pro",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+    provider_def = (
+        {"id": "deepseek", "npm": "@ai-sdk/openai-compatible", "modelRef": "deepseek-v4-pro"}
+        if dict_form
+        else [{"id": "deepseek", "npm": "@ai-sdk/openai-compatible", "modelRef": "deepseek-v4-pro"}]
+    )
+    ref_config = _oc_config(provider_def)
+    inline_provider_def = (
+        {"id": "deepseek", "npm": "@ai-sdk/openai-compatible"}
+        if dict_form
+        else [{"id": "deepseek", "npm": "@ai-sdk/openai-compatible"}]
+    )
+    inline_config = {
+        "harness": "opencode",
+        "secretEnv": "K",
+        "config": {
+            "providerDef": inline_provider_def,
+            "opencodeConfig": {
+                "provider": {"deepseek": {"models": {"deepseek-v4-pro": catalog_entry}}}
+            },
+        },
+    }
+    assert expand_model_refs(ref_config, tmp_path) == inline_config
+
+
+def test_expand_model_refs_through_the_yaml_pipeline(tmp_path):
+    # End to end over the real load path: a YAML config (schema envelope) merged,
+    # then expanded.
+    _write_catalogue(tmp_path)
+    _write_yaml(
+        tmp_path,
+        "oc/hand.yaml",
+        "schema: agedum-provider/v1\n"
+        "harness: opencode\n"
+        "secretEnv: K\n"
+        "config:\n"
+        "  providerDef:\n"
+        "    id: deepseek\n"
+        "    modelRef: deepseek-v4-pro\n",
+    )
+    merged = load_merged_config_with_format(tmp_path / "oc/hand.yaml", tmp_path)
+    expanded = expand_model_refs(merged.config, tmp_path)
+    models = expanded["config"]["opencodeConfig"]["provider"]["deepseek"]["models"]
+    assert models["deepseek-v4-pro"]["name"] == "DeepSeek V4 Pro"
+
+
+def test_yaml_models_catalog_boolean_trap(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "oc/hand.yaml",
+        "schema: agedum-provider/v1\nharness: opencode\nmodelsCatalog: on\n",
+    )
+    with pytest.raises(YamlBooleanTrapError, match="modelsCatalog"):
+        load_config(tmp_path / "oc/hand.yaml")
+
+
+def test_list_providers_skips_the_root_models_yaml(tmp_path):
+    # The fixed catalogue is data, not a config — listing it would show a broken row
+    # (it carries no provider schema).
+    _write_catalogue(tmp_path)
+    _write_config(tmp_path, "x.json", {"harness": "kimi", "config": {"model": "m"}})
+    assert [s.name for s in list_providers(tmp_path)] == ["x"]
+
+
+def test_list_providers_lists_a_subdirectory_models_yaml(tmp_path):
+    # Only the exact root-level filename is excluded; a subdir models.yaml stays an
+    # ordinary candidate (and shows as an error row — it has no provider schema).
+    _write_catalogue(tmp_path, rel="sub/models.yaml")
+    (summary,) = list_providers(tmp_path)
+    assert summary.name == "sub/models"
+    assert summary.error is not None
