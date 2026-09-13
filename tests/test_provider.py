@@ -1,8 +1,10 @@
+import functools
 import json
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml_fleet_fixtures as fleet
 
 from agedum.provider import (
     Launch,
@@ -19,6 +21,7 @@ from agedum.provider import (
     load_merged_config,
     load_merged_config_with_format,
     load_model_catalog,
+    merge_json_onto_file,
     parse_env_file,
     providers_dir,
     required_env,
@@ -4295,3 +4298,446 @@ def test_list_providers_lists_a_subdirectory_models_yaml(tmp_path):
     (summary,) = list_providers(tmp_path)
     assert summary.name == "sub/models"
     assert summary.error is not None
+
+
+# --- YAML parity: kimi / pi / cline launchers through their real chains (child 4) ---
+#
+# Children 1–2 proved the YAML pipeline on envelope mechanics and the claude/codex
+# families; this section pins the remaining live harnesses. Each real launcher is
+# staged verbatim (see tests/yaml_fleet_fixtures.py) through its REAL extends chain in
+# both spellings — the live JSON tree over the YAML sandbox root via the sibling
+# fallback, and the all-YAML conversion shape — and both sides must merge to the same
+# config and build the same Launch (argv, env, virtual files, warnings, sandbox).
+# Harness-specific hotspots get their own assertions on the YAML-path artefacts,
+# mirroring the JSON-path tests above.
+
+
+def _assert_chain_parity(tmp_path, specs, label, env):
+    """The YAML spelling of ``specs`` must merge and launch exactly like the JSON one."""
+    json_child = fleet.write_chain(tmp_path / "json", specs(to_yaml=False))
+    yaml_child = fleet.write_chain(tmp_path / "yaml", specs(to_yaml=True))
+    json_merged = load_merged_config(json_child, tmp_path / "json")
+    yaml_merged = load_merged_config(yaml_child, tmp_path / "yaml")
+    assert json_merged == yaml_merged
+    json_launch = build_launch(json_merged, env, label=label)
+    yaml_launch = build_launch(yaml_merged, env, label=label)
+    assert json_launch == yaml_launch
+    return yaml_launch
+
+
+def test_kimi_yaml_parity_through_the_real_chain(tmp_path):
+    launch = _assert_chain_parity(
+        tmp_path, fleet.kimi_specs, "kimi/kimi", fleet.LAUNCHER_ENV["kimi/kimi"]
+    )
+    # The seeded config.toml + mcp.json pair is the launcher's whole artefact surface.
+    assert [entry[0].rsplit("/", 1)[1] for entry in launch.config_files] == [
+        "config.toml",
+        "mcp.json",
+    ]
+
+
+def test_pi_deepseek_yaml_parity_through_the_real_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.pi_specs, "deepseek"),
+        "pi/deepseek",
+        fleet.LAUNCHER_ENV["pi/deepseek"],
+    )
+    assert launch.warnings == ()  # no subagent routing, nothing to warn about
+
+
+def test_pi_deepseek_flash_yaml_parity_through_the_real_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.pi_specs, "deepseek-flash"),
+        "pi/deepseek-flash",
+        fleet.LAUNCHER_ENV["pi/deepseek-flash"],
+    )
+    # subagentModel (plus the piSettings.subagents block) implicitly requires pi-subagents.
+    assert any("pi-subagents" in warning for warning in launch.warnings)
+
+
+def test_pi_flash_yaml_parity_through_the_real_chain(tmp_path, monkeypatch):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.pi_specs, "flash"),
+        "pi/flash",
+        fleet.LAUNCHER_ENV["pi/flash"],
+    )
+    assert launch.warnings == ()
+
+
+def test_cline_deepseek_yaml_parity_through_the_real_chain(tmp_path):
+    launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.cline_specs, "deepseek"),
+        "cline/deepseek",
+        fleet.LAUNCHER_ENV["cline/deepseek"],
+    )
+    assert launch.config_files == ()  # named-provider path: flags only, nothing on disk
+
+
+def test_cline_flash_yaml_parity_through_the_real_chain(tmp_path):
+    _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.cline_specs, "flash"),
+        "cline/flash",
+        fleet.LAUNCHER_ENV["cline/flash"],
+    )
+
+
+def test_cline_kimi_code_auto_yaml_parity_through_the_real_chain(tmp_path):
+    launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.cline_specs, "kimi-code-auto"),
+        "cline/kimi-code-auto",
+        fleet.LAUNCHER_ENV["cline/kimi-code-auto"],
+    )
+    assert launch.config_files[0][0].endswith("/settings/providers.json")
+
+
+def test_yaml_children_extending_json_bases(tmp_path, monkeypatch):
+    # The reverse mixed chain: a converted YAML child may keep extending JSON bases —
+    # explicit .json refs resolve as-is when the file exists. Each family's YAML child
+    # over the real JSON bases must launch exactly like the live chain.
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    root = tmp_path / "mixed"
+    _write_config(root, "base/conception-sandbox.json", fleet.CONCEPTION_SANDBOX_JSON)
+    _write_config(root, "base/pi-deepseek.json", fleet.PI_DEEPSEEK_BASE_JSON)
+    _write_config(root, "base/cline-auto.json", fleet.CLINE_AUTO_BASE_JSON)
+    _write_yaml(
+        root,
+        "kimi/kimi.yaml",
+        fleet.KIMI_YAML.replace("base/conception-sandbox.yaml", "base/conception-sandbox.json"),
+    )
+    _write_yaml(
+        root,
+        "pi/flash.yaml",
+        fleet.PI_CHILDREN_YAML["flash"].replace("base/pi-deepseek.yaml", "base/pi-deepseek.json"),
+    )
+    _write_yaml(
+        root,
+        "cline/kimi-code-auto.yaml",
+        fleet.CLINE_CHILDREN_YAML["kimi-code-auto"].replace(
+            "base/cline-auto.yaml", "base/cline-auto.json"
+        ),
+    )
+    for child_rel, specs, label in (
+        ("kimi/kimi.yaml", fleet.kimi_specs, "kimi/kimi"),
+        ("pi/flash.yaml", functools.partial(fleet.pi_specs, "flash"), "pi/flash"),
+        (
+            "cline/kimi-code-auto.yaml",
+            functools.partial(fleet.cline_specs, "kimi-code-auto"),
+            "cline/kimi-code-auto",
+        ),
+    ):
+        other = tmp_path / label.replace("/", "-")
+        json_child = fleet.write_chain(other, specs(to_yaml=False))
+        env = fleet.LAUNCHER_ENV[label]
+        assert build_launch(
+            load_merged_config(root / child_rel, root), env, label=label
+        ) == build_launch(load_merged_config(json_child, other), env, label=label)
+
+
+# --- kimi hotspots through YAML ---
+
+
+def test_kimi_yaml_seeded_config_toml_and_models_map(tmp_path):
+    # The seeded config.toml must carry the whole `models` map, the `[secondary_model]`
+    # tier, the kimi providerType and the thinking effort — the identical artefact the
+    # JSON path builds (mirrors test_kimi_code_subscription_uses_kimi_and_subscription_endpoint).
+    child = fleet.write_chain(tmp_path, fleet.kimi_specs(to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path), fleet.LAUNCHER_ENV["kimi/kimi"], label="kimi/kimi"
+    )
+    assert launch.command == ["kimi", "--model", "k3", "--yolo"]  # binary + yolo hotspots
+    target, content, merge_json, writable = launch.config_files[0]
+    assert target == str(Path(launch.env["KIMI_CODE_HOME"]) / "config.toml")
+    assert merge_json is False
+    assert writable is True
+    doc = tomllib.loads(content)
+    assert doc["default_model"] == "k3"
+    k3 = doc["models"]["k3"]
+    assert k3["provider"] == "agedum"
+    assert k3["model"] == "k3"
+    assert k3["max_context_size"] == 1048576
+    assert k3["capabilities"] == [
+        "thinking",
+        "always_thinking",
+        "image_in",
+        "video_in",
+        "tool_use",
+    ]
+    # support_efforts is what keeps Kimi Code from collapsing the effort to plain `on`.
+    assert k3["support_efforts"] == ["low", "high", "max"]
+    assert k3["default_effort"] == "high"
+    secondary = doc["models"]["kimi-for-coding"]
+    assert secondary["max_context_size"] == 262144
+    assert "support_efforts" not in secondary
+    assert doc["secondary_model"] == {"model": "kimi-for-coding"}  # subagentModel hotspot
+    assert doc["experimental"] == {"secondary-model": True}
+    provider = doc["providers"]["agedum"]
+    assert provider["type"] == "kimi"  # providerType hotspot
+    assert provider["base_url"] == "https://api.kimi.com/coding/v1"
+    assert provider["api_key"] == "sk-kimi-test"
+    assert doc["thinking"] == {"enabled": True, "effort": "high"}  # thinking + effortLevel
+
+
+def test_kimi_yaml_mcp_json_passthrough(tmp_path):
+    # mcpServers is a separate generated mcp.json, passed through verbatim (no ${VAR}
+    # rewriting — kimi rejects placeholders outright), seeded next to config.toml.
+    child = fleet.write_chain(tmp_path, fleet.kimi_specs(to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path), fleet.LAUNCHER_ENV["kimi/kimi"], label="kimi/kimi"
+    )
+    target, content, merge_json, writable = launch.config_files[1]
+    assert target == str(Path(launch.env["KIMI_CODE_HOME"]) / "mcp.json")
+    assert merge_json is False
+    assert writable is True
+    assert json.loads(content) == {
+        "mcpServers": {
+            "context7": {"command": "npx", "args": ["-y", "@upstash/context7-mcp@latest"]},
+            "playwright": {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]},
+        }
+    }
+
+
+def test_kimi_yaml_kimi_code_home_slug(tmp_path):
+    # KIMI_CODE_HOME is derived from endpoint + model so repeat launches reuse the dir.
+    child = fleet.write_chain(tmp_path, fleet.kimi_specs(to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path), fleet.LAUNCHER_ENV["kimi/kimi"], label="kimi/kimi"
+    )
+    assert launch.env["KIMI_CODE_HOME"] == str(
+        Path.home() / ".cache" / "agedum" / "kimi" / "https-api-kimi-com-coding-v1-k3"
+    )
+
+
+# --- pi hotspots through YAML ---
+
+
+def test_pi_deepseek_yaml_models_json_inputs_and_window(tmp_path, monkeypatch):
+    # The generated models.json references the key by $ENV name and carries the child's
+    # modelInputs + contextWindow on the model entry (mirrors
+    # test_pi_custom_endpoint_generates_models_json).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    child = fleet.write_chain(tmp_path, fleet.pi_specs("deepseek", to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["pi/deepseek"],
+        label="pi/deepseek",
+    )
+    assert launch.command == ["pi", "--model", "agedum/deepseek-v4-pro", "--thinking", "high"]
+    target, content, merge_json = launch.config_files[0]
+    assert target == str(tmp_path / "pi-agent" / "models.json")
+    assert merge_json is True  # augments the user's own models.json, never masks it
+    provider = json.loads(content)["providers"]["agedum"]
+    assert provider["baseUrl"] == "https://api.deepseek.com"  # inherited through the chain
+    assert provider["api"] == "openai-completions"
+    assert provider["apiKey"] == "$DEEPSEEK_API_KEY"  # by env-var name, never the value
+    assert provider["models"] == [
+        {"id": "deepseek-v4-pro", "input": ["text", "image"], "contextWindow": 1048576}
+    ]
+
+
+def test_pi_deepseek_flash_yaml_settings_deep_merge(tmp_path, monkeypatch):
+    # subagentModel composes with piSettings into ONE settings.json fragment: the
+    # baseline routes every builtin at agedum/<sub>, piSettings wins per agent — and the
+    # deep-merge onto an existing user settings.json is identical from both paths
+    # (mirrors test_pi_settings_composes_with_subagent_model).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    child = fleet.write_chain(tmp_path, fleet.pi_specs("deepseek-flash", to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["pi/deepseek-flash"],
+        label="pi/deepseek-flash",
+    )
+    assert launch.command == ["pi", "--model", "agedum/deepseek-v4-pro", "--thinking", "high"]
+    target, content, merge_json = launch.config_files[1]
+    assert target == str(tmp_path / "pi-agent" / "settings.json")
+    assert merge_json is True
+    overrides = json.loads(content)["subagents"]["agentOverrides"]
+    expected = {
+        name: {"model": "agedum/deepseek-v4-flash"}
+        for name in (
+            "scout",
+            "researcher",
+            "planner",
+            "worker",
+            "reviewer",
+            "context-builder",
+            "oracle",
+            "delegate",
+        )
+    }
+    expected.update(
+        {
+            "oracle": {"model": "agedum/deepseek-v4-flash", "thinking": "xhigh"},
+            "planner": {"model": "agedum/deepseek-v4-flash", "thinking": "high"},
+            "reviewer": {"model": "agedum/deepseek-v4-flash", "thinking": "high"},
+            "scout": {"model": "agedum/deepseek-v4-flash", "thinking": "low"},
+            "context-builder": {"model": "agedum/deepseek-v4-flash", "thinking": "low"},
+        }
+    )
+    assert overrides == expected
+    # The on-disk merge over a pre-existing user settings.json is the same document
+    # whether the fragment came from YAML or JSON.
+    user_file = tmp_path / "user-settings.json"
+    user_file.write_text(json.dumps({"theme": "dark", "subagents": {"maxConcurrent": 3}}))
+    json_launch = _assert_chain_parity(
+        tmp_path,
+        functools.partial(fleet.pi_specs, "deepseek-flash"),
+        "pi/deepseek-flash",
+        fleet.LAUNCHER_ENV["pi/deepseek-flash"],
+    )
+    yaml_merged_doc = merge_json_onto_file(user_file, content)
+    user_file.write_text(json.dumps({"theme": "dark", "subagents": {"maxConcurrent": 3}}))
+    json_merged_doc = merge_json_onto_file(user_file, json_launch.config_files[1][1])
+    assert json.loads(yaml_merged_doc) == json.loads(json_merged_doc)
+    assert json.loads(yaml_merged_doc)["theme"] == "dark"
+
+
+def test_pi_yaml_require_extensions_warn_gate(tmp_path, monkeypatch):
+    # requireExtensions (and `strict`) behave identically through the YAML load —
+    # warnings never block, strict fails loudly (mirrors
+    # test_pi_require_extensions_warns_when_missing / test_pi_strict_extensions_fails_loudly).
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))  # nothing installed
+    _write_yaml(
+        tmp_path,
+        "pi/gated.yaml",
+        "schema: agedum-provider/v1\n"
+        "harness: pi\n"
+        "config:\n"
+        "  model: m\n"
+        "  requireExtensions: [pi-intercom]\n",
+    )
+    yaml_launch = build_launch(load_config(tmp_path / "pi" / "gated.yaml"), {}, label="pi/gated")
+    _write_config(
+        tmp_path,
+        "pi/gated.json",
+        {"harness": "pi", "config": {"model": "m", "requireExtensions": ["pi-intercom"]}},
+    )
+    json_launch = build_launch(load_config(tmp_path / "pi" / "gated.json"), {}, label="pi/gated")
+    assert yaml_launch == json_launch
+    assert any(
+        "pi-intercom" in warning and "not installed" in warning for warning in yaml_launch.warnings
+    )
+    _write_yaml(
+        tmp_path,
+        "pi/strict.yaml",
+        "schema: agedum-provider/v1\n"
+        "harness: pi\n"
+        "config:\n"
+        "  model: m\n"
+        "  subagentModel: m-flash\n"
+        "  strict: true\n",
+    )
+    with pytest.raises(ProviderError, match="pi-subagents.*not installed"):
+        build_launch(load_config(tmp_path / "pi" / "strict.yaml"), {}, label="pi/strict")
+
+
+# --- cline hotspots through YAML ---
+
+
+def test_cline_yaml_key_env_derivation_and_key_flag(tmp_path):
+    # Key-env naming: the base's secretEnv is derived into requiredEnv, exported to the
+    # child, and rides `--key` in argv (masked in dry-run) — identical through YAML
+    # (mirrors test_cline_appends_flags_and_passes_key).
+    child = fleet.write_chain(tmp_path, fleet.cline_specs("deepseek", to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["cline/deepseek"],
+        label="cline/deepseek",
+    )
+    assert launch.env["DEEPSEEK_API_KEY"] == "sk-deepseek-test"
+    assert "DEEPSEEK_API_KEY" in launch.secrets
+    assert launch.command == [
+        "cline",
+        "--model",
+        "deepseek-v4-pro",
+        "--provider",
+        "deepseek",
+        "--thinking",
+        "xhigh",
+        "--key",
+        "sk-deepseek-test",
+    ]
+
+
+def test_cline_yaml_auto_approve_and_compaction_off_enum(tmp_path):
+    # autoApprove/compaction inherited from base/cline-auto keep their flags through the
+    # YAML chain; and the `off` enum — the exact YAML 1.1 trap — quoted, still reaches
+    # cline as `--compaction off` identically to the JSON spelling.
+    child = fleet.write_chain(tmp_path, fleet.cline_specs("kimi-code-auto", to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["cline/kimi-code-auto"],
+        label="cline/kimi-code-auto",
+    )
+    assert launch.command[:5] == ["cline", "--compaction", "agentic", "--auto-approve", "true"]
+    _write_yaml(tmp_path, "base/cline-auto.yaml", fleet.CLINE_AUTO_BASE_YAML)
+    off_yaml = _write_yaml(
+        tmp_path,
+        "cline/off.yaml",
+        "schema: agedum-provider/v1\n"
+        "extends: base/cline-auto.yaml\n"
+        "secretEnv: KIMI_API_KEY\n"
+        "config:\n"
+        '  compaction: "off"\n',
+    )
+    _write_config(
+        tmp_path,
+        "cline/off.json",
+        {
+            "extends": "base/cline-auto.yaml",
+            "secretEnv": "KIMI_API_KEY",
+            "config": {"compaction": "off"},
+        },
+    )
+    env = {"KIMI_API_KEY": "sk-kimi-test"}
+    off_launch = build_launch(load_merged_config(off_yaml, tmp_path), env, label="cline/off")
+    json_launch = build_launch(
+        load_merged_config(tmp_path / "cline" / "off.json", tmp_path), env, label="cline/off"
+    )
+    assert off_launch == json_launch
+    # The base's autoApprove still rides along; the quoted `off` reaches cline verbatim.
+    assert off_launch.command == [
+        "cline",
+        "--compaction",
+        "off",
+        "--auto-approve",
+        "true",
+        "--key",
+        "sk-kimi-test",
+    ]
+
+
+def test_cline_yaml_context_window_and_max_tokens_models_array(tmp_path):
+    # contextWindow/maxTokens teach cline's catalogue-less provider the window and output
+    # cap via a one-entry models[]; the key is never written to disk (mirrors
+    # test_cline_base_url_context_window_becomes_models_array).
+    child = fleet.write_chain(tmp_path, fleet.cline_specs("kimi-code-auto", to_yaml=True))
+    launch = build_launch(
+        load_merged_config(child, tmp_path),
+        fleet.LAUNCHER_ENV["cline/kimi-code-auto"],
+        label="cline/kimi-code-auto",
+    )
+    assert launch.env["CLINE_DATA_DIR"] == str(
+        Path.home() / ".cache" / "agedum" / "cline" / "https-api-kimi-com-coding-v1-kimi-for-coding"
+    )
+    target, content, merge_json, writable = launch.config_files[0]
+    assert target == f"{launch.env['CLINE_DATA_DIR']}/settings/providers.json"
+    assert merge_json is False
+    assert writable is True
+    doc = json.loads(content)
+    assert doc["lastUsedProvider"] == "openai-compatible"
+    settings = doc["providers"]["openai-compatible"]["settings"]
+    assert settings["baseUrl"] == "https://api.kimi.com/coding/v1"
+    assert settings["model"] == "kimi-for-coding"
+    assert settings["apiKey"] == ""  # rides --key; nothing secret on disk
+    assert settings["models"] == [
+        {"id": "kimi-for-coding", "contextWindow": 262144, "maxTokens": 32768}
+    ]
