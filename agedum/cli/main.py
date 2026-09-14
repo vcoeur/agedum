@@ -54,6 +54,7 @@ from agedum.provider import (
     ProviderError,
     build_launch,
     default_env_file,
+    expand_carrier_refs,
     expand_model_refs,
     failover_spec,
     list_providers,
@@ -266,6 +267,15 @@ def _run_config(argv: list[str]) -> int:
         # modelRef expansion (opt-in; a no-op without the keys) — after include/extends
         # merging, before the launch builds, so --dry-run shows the effective result.
         config = expand_model_refs(merged.config)
+        # `agedum-provider/v2` intent expansion — gated by the ROOT document's declared
+        # schema (JSON is v1 semantics forever), after modelRef filing so derived
+        # entries merge under what modelRef filed. The `modelsCatalog` pointer is read
+        # from the pre-strip merged dict because expand_model_refs consumes it.
+        config = expand_carrier_refs(
+            config,
+            root_schema=merged.schema,
+            catalog_ref=merged.config.get("modelsCatalog"),
+        )
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
         base_env = {**os.environ, **dotenv}
         # The failover proxy must be live before the opencode config document is built

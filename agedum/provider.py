@@ -50,10 +50,13 @@ from agedum.proxy import OPENAI_CODEX_UPSTREAM, failover_route_base
 
 HARNESSES = ("claude", "kimi", "opencode", "cline", "reasonix", "aider", "pi", "codex")
 
-# The envelope-version key a YAML provider config must declare. JSON configs are the
-# legacy format and need no key — they load exactly as they always have.
+# The envelope-version keys a YAML provider config may declare. JSON configs are the
+# legacy format and need no key — they load exactly as they always have and carry
+# v1 semantics forever (v2 is YAML-only).
 PROVIDER_SCHEMA_KEY = "schema"
 PROVIDER_SCHEMA_VERSION = "agedum-provider/v1"
+PROVIDER_SCHEMA_VERSION_2 = "agedum-provider/v2"
+PROVIDER_SCHEMA_VERSIONS = (PROVIDER_SCHEMA_VERSION, PROVIDER_SCHEMA_VERSION_2)
 
 # The run-time model catalogue: a fixed-name YAML document at the providers root
 # (or the file a config's `modelsCatalog` ref points at) holding verbatim
@@ -460,13 +463,18 @@ def config_format(path: Path) -> str:
 
 
 class LoadedConfig(NamedTuple):
-    """A parsed provider config plus its source format (``"yaml"`` or ``"json"``).
+    """A parsed provider config plus its source format and declared schema.
 
     ``format`` lets ``--dry-run`` report the source without re-reading the file.
+    ``schema`` is the **entry document's** declared envelope version
+    (``agedum-provider/v1`` or ``/v2``) — the value that gates intent expansion.
+    JSON documents carry no schema key and are v1 semantics forever, so they
+    report ``agedum-provider/v1``.
     """
 
     config: dict
     format: str
+    schema: str = PROVIDER_SCHEMA_VERSION
 
 
 def load_config(path: Path) -> dict:
@@ -480,13 +488,16 @@ def load_config(path: Path) -> dict:
 
 
 def load_config_with_format(path: Path) -> LoadedConfig:
-    """Like :func:`load_config`, returning the source format alongside the parsed dict.
+    """Like :func:`load_config`, returning the source format and declared schema.
 
     A ``.yaml`` / ``.yml`` file is parsed with ``yaml.safe_load``, must declare
-    ``schema: agedum-provider/v1`` (:class:`ProviderSchemaError` otherwise), and then
-    yields the same dict the equivalent JSON document would: the ``schema`` key is
-    stripped and every YAML 1.1 boolean trap in a string-valued slot is rejected
-    (:class:`YamlBooleanTrapError`). Any other suffix parses as JSON.
+    ``schema: agedum-provider/v1`` or ``agedum-provider/v2``
+    (:class:`ProviderSchemaError` otherwise), and then yields the same dict the
+    equivalent JSON document would: the ``schema`` key is stripped and every
+    YAML 1.1 boolean trap in a string-valued slot is rejected
+    (:class:`YamlBooleanTrapError`). Any other suffix parses as JSON and carries
+    v1 semantics forever (v2 is YAML-only). The declared schema rides
+    :class:`LoadedConfig` and gates intent expansion at the launch seam.
     """
     fmt = config_format(path)
     try:
@@ -494,7 +505,7 @@ def load_config_with_format(path: Path) -> LoadedConfig:
     except OSError as exc:
         raise ProviderError(f"cannot read provider config {path}: {exc}") from exc
     if fmt == "yaml":
-        config = _load_yaml_document(raw, path)
+        config, schema = _load_yaml_document(raw, path)
     else:
         try:
             config = json.loads(raw)
@@ -504,11 +515,19 @@ def load_config_with_format(path: Path) -> LoadedConfig:
             raise ProviderError(
                 f"provider config {path} must be a JSON object, not {type(config).__name__}"
             )
-    return LoadedConfig(config, fmt)
+        schema = PROVIDER_SCHEMA_VERSION
+    return LoadedConfig(config, fmt, schema)
 
 
-def _load_yaml_document(raw: str, path: Path) -> dict:
-    """Parse one YAML provider config into the envelope dict (see :func:`load_config`)."""
+def _load_yaml_document(raw: str, path: Path) -> tuple[dict, str]:
+    """Parse one YAML provider config into ``(envelope dict, declared schema)``.
+
+    Both declared versions load here — per-file, so any document in an
+    ``include`` / ``extends`` chain may declare either; which document's schema
+    *gates expansion* is decided at the root (see :func:`expand_carrier_refs`).
+    An unsupported version is the same :class:`ProviderSchemaError` the v1-only
+    engines raise, naming the expected value.
+    """
     try:
         config = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
@@ -518,7 +537,7 @@ def _load_yaml_document(raw: str, path: Path) -> dict:
             f"provider config {path} must be a YAML mapping, not {type(config).__name__}"
         )
     schema = config.get(PROVIDER_SCHEMA_KEY)
-    if schema != PROVIDER_SCHEMA_VERSION:
+    if schema not in PROVIDER_SCHEMA_VERSIONS:
         raise ProviderSchemaError(
             f"{path}: YAML provider config must declare `{PROVIDER_SCHEMA_KEY}: "
             f"{PROVIDER_SCHEMA_VERSION}` (found {schema!r})"
@@ -527,7 +546,7 @@ def _load_yaml_document(raw: str, path: Path) -> dict:
     # Normalize to the envelope: the JSON form of the same document carries no version
     # key, so YAML must not land one in the merged config either (parse, not translate).
     config.pop(PROVIDER_SCHEMA_KEY, None)
-    return config
+    return config, schema
 
 
 # The ``config``-block keys every harness consumes as a plain string — model names,
@@ -761,23 +780,25 @@ def load_merged_config_with_format(
     if resolved in seen:
         raise ProviderError(f"circular extends/include involving {path}")
     seen = seen | {resolved}
-    raw, fmt = load_config_with_format(path)
+    raw = load_config_with_format(path)
     merged: dict = {}
     # (a) Includes — composition, the most-default layer: each target's *effective* config
     # (resolved recursively, its own includes and extends already applied) pasted in list
     # order, earlier include the more default.
-    for ref in _include_refs(raw):
+    for ref in _include_refs(raw.config):
         fragment = load_merged_config_with_format(
             resolve_config_path(ref, providers), providers, seen
         )
         merged = _merge_extends(merged, fragment.config)
     # (b) The extends chain — inheritance overrides composition, so a base's keys beat an
     # included fragment's on conflict.
-    for ref in _extends_refs(raw):
+    for ref in _extends_refs(raw.config):
         base = load_merged_config_with_format(resolve_config_path(ref, providers), providers, seen)
         merged = _merge_extends(merged, base.config)
-    # (c) The file's own keys last — the most specific layer.
-    return LoadedConfig(_merge_extends(merged, _without_meta(raw)), fmt)
+    # (c) The file's own keys last — the most specific layer. The **entry file's**
+    # declared schema rides out: it is the root that gates intent expansion, whatever
+    # the chain's bases and fragments declare.
+    return LoadedConfig(_merge_extends(merged, _without_meta(raw.config)), raw.format, raw.schema)
 
 
 def _merge_extends(base: dict, overlay: dict) -> dict:
@@ -1024,6 +1045,78 @@ def expand_model_refs(config: dict, base_dir: Path | None = None) -> dict:
         ]
     result["config"] = new_block
     return result
+
+
+# ---------------------------------------------------------------------------
+# `agedum-provider/v2` — the effort-carrier grammar at run time
+# ---------------------------------------------------------------------------
+
+
+def _intent_markers(config: dict) -> list[str]:
+    """Describe the expansion-intent markers a config carries, in scan order.
+
+    Intent is `@`-refs on an opencode config's model slots (`config.model` and
+    the `opencodeConfig.agent` entries' `model` fields) plus the top-level
+    `expansionModels` universe key. Scoped deliberately: an `@` inside a prompt,
+    a description, or a non-opencode `model` value is not intent.
+    """
+    markers: list[str] = []
+    if "expansionModels" in config:
+        markers.append("top-level `expansionModels`")
+    block = config.get("config")
+    if config.get("harness") == "opencode" and isinstance(block, dict):
+        model = block.get("model")
+        if isinstance(model, str) and "@" in model:
+            markers.append("`config.model` `@`-ref")
+        oc = block.get("opencodeConfig")
+        agents = oc.get("agent") if isinstance(oc, dict) else None
+        if isinstance(agents, dict):
+            for name, entry in agents.items():
+                agent_model = entry.get("model") if isinstance(entry, dict) else None
+                if isinstance(agent_model, str) and "@" in agent_model:
+                    markers.append(f"agent {name!r} `model` `@`-ref")
+    return markers
+
+
+def expand_carrier_refs(
+    config: dict,
+    root_schema: str,
+    base_dir: Path | None = None,
+    catalog_ref: str | None = None,
+) -> dict:
+    """Apply `agedum-provider/v2` intent expansion to a *merged* config.
+
+    Runs at the launch seam, after :func:`expand_model_refs` (modelRef filing
+    first, intent expansion second, so derived entries merge under what is
+    already filed). The **root document's** declared schema gates it — a v2 base
+    under a v1 root does not expand, and a v1 base under a v2 root does.
+
+    A v1 root (including every JSON document — v1 semantics forever) carrying
+    intent markers gets a named :class:`ProviderSchemaError` telling the author
+    to declare v2: today such a file would launch with a garbage model ref that
+    fails far from the cause.
+
+    A v2 root expands (see Decision 4 of the phase design); with **no intent
+    markers at all** expansion is a no-op that only strips the (absent or empty)
+    `expansionModels` key — declaring v2 alone is not intent. ``catalog_ref`` is
+    the merged config's `modelsCatalog` pointer read before
+    :func:`expand_model_refs` consumed it; ``base_dir`` anchors refs like
+    everywhere else.
+    """
+    if root_schema != PROVIDER_SCHEMA_VERSION_2:
+        markers = _intent_markers(config)
+        if markers:
+            raise ProviderSchemaError(
+                "this config looks like expansion intent ("
+                + "; ".join(markers)
+                + f") but declares `{PROVIDER_SCHEMA_VERSION}` — declare "
+                f"`{PROVIDER_SCHEMA_KEY}: {PROVIDER_SCHEMA_VERSION_2}` to license expansion"
+            )
+        return config
+    # v2: expansion per Decision 4. Until the expander lands, a v2 document is a
+    # validated no-op: `expansionModels` is consumed like `modelsCatalog`, nothing
+    # else is touched.
+    return {key: value for key, value in config.items() if key != "expansionModels"}
 
 
 @dataclass(frozen=True)
