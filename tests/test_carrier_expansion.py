@@ -11,8 +11,10 @@ import pytest
 from agedum.provider import (
     PROVIDER_SCHEMA_VERSION,
     PROVIDER_SCHEMA_VERSION_2,
+    ExpansionError,
     ModelCatalogSchemaError,
     ProviderSchemaError,
+    build_launch,
     expand_carrier_refs,
     expand_model_refs,
     load_config_with_format,
@@ -359,3 +361,347 @@ def test_carrier_meta_section_itself_must_be_a_mapping(tmp_path):
     )
     with pytest.raises(ModelCatalogSchemaError, match="`carrierMeta` must be a mapping"):
         load_model_catalog(tmp_path / "models.yaml")
+
+
+# --- per-carrier expansion (Decision 4) ---
+
+
+def _v2_config(
+    agents,
+    model=None,
+    expansion_models=None,
+    provider_defs=None,
+    harness="opencode",
+    config_extra=None,
+):
+    """A minimal merged v2 config around an opencodeConfig agent map."""
+    block = dict(config_extra or {})
+    if model is not None:
+        block["model"] = model
+    if provider_defs is not None:
+        block["providerDef"] = provider_defs
+    block["opencodeConfig"] = {"agent": agents}
+    config = {"harness": harness, "secretEnv": "K", "config": block}
+    if expansion_models is not None:
+        config["expansionModels"] = expansion_models
+    return config
+
+
+def _expand_v2(config, tmp_path):
+    return expand_carrier_refs(config, root_schema=PROVIDER_SCHEMA_VERSION_2, base_dir=tmp_path)
+
+
+def test_deepseek_agent_expands_to_reasoning_effort(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"mode": "subagent", "model": "ds-flash@high"}})
+    expanded = _expand_v2(config, tmp_path)
+    agent = expanded["config"]["opencodeConfig"]["agent"]["w"]
+    assert agent["model"] == "ds/ds-flash"
+    assert agent["options"] == {"reasoningEffort": "high"}
+    # The catalogue fragment is filed verbatim under carrierMeta.provider.
+    assert expanded["config"]["opencodeConfig"]["provider"]["ds"]["models"]["ds-flash"] == {
+        "name": "DS Flash",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+
+
+def test_glm_agent_expands_through_the_same_carrier(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "glm-x@low"}})
+    agent = _expand_v2(config, tmp_path)["config"]["opencodeConfig"]["agent"]["w"]
+    assert agent["model"] == "glm-p/glm-x"
+    assert agent["options"] == {"reasoningEffort": "low"}
+
+
+def test_reasoning_effort_merges_into_authored_options(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {
+            "w": {
+                "model": "ds-flash@high",
+                "options": {"textVerbosity": "low"},
+            }
+        }
+    )
+    agent = _expand_v2(config, tmp_path)["config"]["opencodeConfig"]["agent"]["w"]
+    assert agent["options"] == {"textVerbosity": "low", "reasoningEffort": "high"}
+
+
+def test_gpt_agent_expands_to_variant_and_disables_undeclared_variants(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "sol@high"}, "x": {"model": "sol@low"}})
+    expanded = _expand_v2(config, tmp_path)
+    assert expanded["config"]["opencodeConfig"]["agent"]["w"] == {
+        "model": "openai/sol",
+        "variant": "high",
+    }
+    variants = expanded["config"]["opencodeConfig"]["provider"]["openai"]["models"]["sol"][
+        "variants"
+    ]
+    # Both efforts declared: the vocabulary order with low/high left out.
+    assert list(variants) == ["none", "minimal", "medium", "xhigh", "max"]
+    assert all(state == {"disabled": True} for state in variants.values())
+
+
+def test_gpt_config_declaring_only_high_disables_low_too(tmp_path):
+    # The disable-map's scope is this config's declared efforts: `sol@high`
+    # alone means `low` is derived-disabled as well — write the catalog entry
+    # inline to keep a non-declared variant enabled.
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "sol@high"}})
+    variants = _expand_v2(config, tmp_path)["config"]["opencodeConfig"]["provider"]["openai"][
+        "models"
+    ]["sol"]["variants"]
+    assert list(variants) == ["none", "minimal", "low", "medium", "xhigh", "max"]
+
+
+def test_kimi_agents_select_aliases_and_file_alias_entries(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"a": {"model": "k3@low"}, "b": {"model": "k3@high"}})
+    expanded = _expand_v2(config, tmp_path)
+    agent_a = expanded["config"]["opencodeConfig"]["agent"]["a"]
+    agent_b = expanded["config"]["opencodeConfig"]["agent"]["b"]
+    # No carrier fields on kimi agents — the effort rides the alias.
+    assert agent_a["model"] == "kimi-coding/k3-low"
+    assert "variant" not in agent_a and "options" not in agent_a
+    assert agent_b["model"] == "kimi-coding/k3"
+    models = expanded["config"]["opencodeConfig"]["provider"]["kimi-coding"]["models"]
+    # Canonical effort order: high alias filed first, low second.
+    assert list(models) == ["k3", "k3-low"]
+    assert models["k3"] == {
+        "name": "Kimi K3",
+        "limit": {"context": 262144, "output": 32768},
+        "options": {"thinking": {"type": "enabled", "effort": "high"}},
+    }
+    # The low entry is the redirect: alias id + "(low thinking)" display name,
+    # construction order mirroring the builder's _catalog.
+    assert list(models["k3-low"]) == ["id", "name", "limit", "options"]
+    assert models["k3-low"] == {
+        "id": "k3",
+        "name": "Kimi K3 (low thinking)",
+        "limit": {"context": 262144, "output": 32768},
+        "options": {"thinking": {"type": "enabled", "effort": "low"}},
+    }
+
+
+def test_provider_filing_order_is_first_appearance(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {
+            "k": {"model": "k3@high"},
+            "d": {"model": "ds-flash@high"},
+        },
+        expansion_models=["sol@high"],
+    )
+    providers = _expand_v2(config, tmp_path)["config"]["opencodeConfig"]["provider"]
+    assert list(providers) == ["kimi-coding", "ds", "openai"]
+
+
+def test_authored_inline_catalog_entry_wins_over_derived(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "ds-flash@high"}})
+    # Pre-file an authored entry under the same key.
+    config["config"]["opencodeConfig"]["provider"] = {
+        "ds": {"models": {"ds-flash": {"name": "Authored Name", "extra": True}}}
+    }
+    expanded = _expand_v2(config, tmp_path)
+    entry = expanded["config"]["opencodeConfig"]["provider"]["ds"]["models"]["ds-flash"]
+    assert entry == {
+        "name": "Authored Name",
+        "extra": True,
+        "limit": {"context": 1000000, "output": 65536},
+    }
+
+
+def test_config_model_ref_translates_and_joins_the_universe(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {"w": {"model": "sol@low"}},
+        model="ds-flash@high",
+    )
+    expanded = _expand_v2(config, tmp_path)
+    assert expanded["config"]["model"] == "ds/ds-flash"
+    # The config.model ref's effort joins the universe — the sol disable-map
+    # still leaves low enabled (declared by the agent), and ds is filed.
+    providers = expanded["config"]["opencodeConfig"]["provider"]
+    assert "ds-flash" in providers["ds"]["models"]
+    assert "low" not in providers["openai"]["models"]["sol"]["variants"]
+
+
+def test_plain_config_model_passes_through_untouched(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "ds-flash@high"}}, model="ds/ds-flash")
+    assert _expand_v2(config, tmp_path)["config"]["model"] == "ds/ds-flash"
+
+
+def test_bare_catalogue_key_in_config_model_is_a_named_error(tmp_path):
+    # Risk 4: an author dropping the effort from a config.model ref must be
+    # told — a bare key is not a ref in v2; only `key@effort` resolves.
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "ds-flash@high"}}, model="ds-flash")
+    with pytest.raises(ExpansionError, match="bare catalogue key.*`ds-flash@high`"):
+        _expand_v2(config, tmp_path)
+
+
+def test_expansion_models_files_universe_members_without_agents(tmp_path):
+    # The gpt-first shape: a model no agent declares, present only as failover
+    # rungs, filed through the universe key.
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "ds-flash@high"}}, expansion_models=["k3@high", "k3@low"])
+    expanded = _expand_v2(config, tmp_path)
+    assert "expansionModels" not in expanded
+    models = expanded["config"]["opencodeConfig"]["provider"]["kimi-coding"]["models"]
+    assert list(models) == ["k3", "k3-low"]
+    agents = expanded["config"]["opencodeConfig"]["agent"]
+    assert agents["w"]["model"] == "ds/ds-flash"
+
+
+def test_expansion_is_deterministic(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {"a": {"model": "k3@low"}, "b": {"model": "ds-flash@high"}, "c": {"model": "k3@high"}},
+        model="sol@low",
+        expansion_models=["glm-x@high"],
+    )
+    first = _expand_v2(config, tmp_path)
+    second = _expand_v2(config, tmp_path)
+    assert first == second
+    assert list(first["config"]["opencodeConfig"]["provider"]) == list(
+        second["config"]["opencodeConfig"]["provider"]
+    )
+
+
+def test_expanded_config_reaches_the_launch_document(tmp_path):
+    # End to end through build_launch: the derived agent fields and the filed
+    # catalog land in OPENCODE_CONFIG_CONTENT where opencode reads them.
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {"w": {"mode": "subagent", "model": "ds-flash@high"}},
+        provider_defs=[
+            {
+                "id": "ds",
+                "npm": "@ai-sdk/openai-compatible",
+                "baseUrl": "https://api.deepseek.com",
+                "apiKeyEnv": "K",
+            }
+        ],
+    )
+    expanded = _expand_v2(config, tmp_path)
+    launch = build_launch(expanded, {"K": "tok"})
+    document = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert document["agent"]["w"]["model"] == "ds/ds-flash"
+    assert document["agent"]["w"]["options"] == {"reasoningEffort": "high"}
+    assert document["provider"]["ds"]["models"]["ds-flash"]["name"] == "DS Flash"
+
+
+# --- expansion error inventory (Decision 4) ---
+
+
+def _catalogue_with(tmp_path, old, new):
+    text = SYNTH_CATALOGUE
+    assert old in text
+    _write_catalogue(tmp_path, text.replace(old, new))
+
+
+def test_unknown_catalogue_key_names_the_where(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "nope@high"}})
+    with pytest.raises(ExpansionError, match="agent 'w': catalogue key 'nope'"):
+        _expand_v2(config, tmp_path)
+
+
+def test_effort_outside_the_alphabet_is_named(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config({"w": {"model": "ds-flash@max"}})
+    with pytest.raises(ExpansionError, match="effort 'max' is not in the effort alphabet"):
+        _expand_v2(config, tmp_path)
+
+
+def test_effort_outside_the_models_efforts_is_named(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    family: deepseek\n    efforts: [high, low]\n",
+        "    family: deepseek\n    efforts: [high]\n",
+    )
+    config = _v2_config({"w": {"model": "ds-flash@low"}})
+    with pytest.raises(ExpansionError, match="'low' is not one of model 'ds-flash''s declared"):
+        _expand_v2(config, tmp_path)
+
+
+def test_family_without_a_carrier_is_named(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    family: deepseek\n",
+        "    family: mistral\n",
+    )
+    config = _v2_config({"w": {"model": "ds-flash@high"}})
+    with pytest.raises(ExpansionError, match="family 'mistral' has no effort carrier"):
+        _expand_v2(config, tmp_path)
+
+
+def test_referenced_model_without_carrier_meta_is_named(tmp_path):
+    text = SYNTH_CATALOGUE.replace(
+        "  sol:\n    name: GPT-5.6 Sol\n    attachment: true\n",
+        "  sol:\n    name: GPT-5.6 Sol\n    attachment: true\n  novel:\n    name: Novel\n",
+    )
+    _write_catalogue(tmp_path, text)
+    config = _v2_config({"w": {"model": "novel@high"}})
+    with pytest.raises(ExpansionError, match="'novel' has no `carrierMeta` entry"):
+        _expand_v2(config, tmp_path)
+
+
+def test_alias_carrier_without_aliases_is_named(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    aliases: {high: k3, low: k3-low}\n    alias_model_id: k3\n",
+        "",
+    )
+    config = _v2_config({"w": {"model": "k3@high"}})
+    with pytest.raises(
+        ExpansionError, match="model-alias carrier but its carrierMeta has no `aliases`"
+    ):
+        _expand_v2(config, tmp_path)
+
+
+def test_ref_effort_missing_from_aliases_is_named(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    aliases: {high: k3, low: k3-low}\n",
+        "    aliases: {high: k3}\n",
+    )
+    config = _v2_config({"w": {"model": "k3@low"}})
+    with pytest.raises(ExpansionError, match="'low' is not in model 'k3''s `aliases`"):
+        _expand_v2(config, tmp_path)
+
+
+def test_authored_carrier_field_conflicts_with_the_ref(tmp_path):
+    _write_catalogue(tmp_path)
+    with pytest.raises(ExpansionError, match="authors a carrier field"):
+        _expand_v2(
+            _v2_config({"w": {"model": "ds-flash@high", "options": {"reasoningEffort": "low"}}}),
+            tmp_path,
+        )
+    with pytest.raises(ExpansionError, match="authors a carrier field"):
+        _expand_v2(
+            _v2_config({"w": {"model": "sol@high", "variant": "low"}}),
+            tmp_path,
+        )
+
+
+def test_at_refs_on_a_non_opencode_harness_are_refused(tmp_path):
+    _write_catalogue(tmp_path)
+    config = _v2_config(
+        {}, model="ds/ds-flash", harness="claude", expansion_models=["ds-flash@high"]
+    )
+    with pytest.raises(ExpansionError, match="only implemented for the opencode harness"):
+        _expand_v2(config, tmp_path)
+
+
+def test_failover_blocks_pass_through_untouched(tmp_path):
+    _write_catalogue(tmp_path)
+    failover = {"detect": {"status": [429], "messages": ["rate"]}}
+    config = _v2_config({"w": {"model": "ds-flash@high"}})
+    config["failover"] = failover
+    expanded = _expand_v2(config, tmp_path)
+    assert expanded["failover"] == failover
+    assert expanded["config"]["opencodeConfig"]["agent"]["w"]["model"] == "ds/ds-flash"

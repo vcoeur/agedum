@@ -112,6 +112,10 @@ class ModelCatalogSchemaError(ProviderError):
     """A model catalogue is missing or carries an unsupported ``schema`` version."""
 
 
+class ExpansionError(ProviderError):
+    """A v2 config's expansion intent could not be resolved against the catalogue."""
+
+
 class YamlBooleanTrapError(ProviderError):
     """A YAML config has an unquoted on/off/yes/no where the envelope wants a string."""
 
@@ -1163,6 +1167,34 @@ def expand_model_refs(config: dict, base_dir: Path | None = None) -> dict:
 # `carrierMeta.efforts` / `aliases` entry must be inside it.
 EFFORT_ALPHABET = ("high", "low")
 
+# Family → effort carrier (the builder's EFFORT_CARRIERS): where a declared
+# effort lands in the derived output. ``variant`` → a `variant` field on the
+# agent entry (gpt); ``reasoningEffort`` → `options.reasoningEffort` on the
+# agent entry (deepseek/glm); ``model-alias`` → the effort-suffixed alias on
+# the agent's `model`, with the effort carried by the filed alias entries'
+# `options.thinking.effort` (kimi agents carry neither `variant` nor
+# `options`). Grammar, not policy: a new family here is an engine release.
+EFFORT_CARRIERS = {
+    "gpt": "variant",
+    "deepseek": "reasoningEffort",
+    "glm": "reasoningEffort",
+    "kimi": "model-alias",
+}
+
+# OpenCode 1.18.23's complete known GPT variant vocabulary — compatibility
+# data for derived GPT catalogues (every variant the config does not declare
+# is filed disabled, in this order), not a claim about variants a future
+# OpenCode may add.
+OPENCODE_1_18_23_GPT_VARIANTS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
 
 def _intent_markers(config: dict) -> list[str]:
     """Describe the expansion-intent markers a config carries, in scan order.
@@ -1208,10 +1240,11 @@ def expand_carrier_refs(
     to declare v2: today such a file would launch with a garbage model ref that
     fails far from the cause.
 
-    A v2 root expands (see Decision 4 of the phase design); with **no intent
+    A v2 root expands (see the ``_expand_v2`` section below); with **no intent
     markers at all** expansion is a no-op that only strips the (absent or empty)
-    `expansionModels` key — declaring v2 alone is not intent. ``catalog_ref`` is
-    the merged config's `modelsCatalog` pointer read before
+    `expansionModels` key — declaring v2 alone is not intent, which is what keeps
+    a marker-free v2 document legal on a non-opencode harness.
+    ``catalog_ref`` is the merged config's `modelsCatalog` pointer read before
     :func:`expand_model_refs` consumed it; ``base_dir`` anchors refs like
     everywhere else.
     """
@@ -1225,10 +1258,314 @@ def expand_carrier_refs(
                 f"`{PROVIDER_SCHEMA_KEY}: {PROVIDER_SCHEMA_VERSION_2}` to license expansion"
             )
         return config
-    # v2: expansion per Decision 4. Until the expander lands, a v2 document is a
-    # validated no-op: `expansionModels` is consumed like `modelsCatalog`, nothing
-    # else is touched.
-    return {key: value for key, value in config.items() if key != "expansionModels"}
+    return _expand_v2(config, base_dir, catalog_ref)
+
+
+class _ModelRef(NamedTuple):
+    """One resolved `@`-ref: the catalogue key, the effort, and the carrier."""
+
+    key: str
+    effort: str
+    carrier: str
+    meta: dict
+
+
+def _parse_carrier_ref(text: str, where: str) -> tuple[str, str]:
+    """Split one ``<catalogue key>@<effort>`` ref into ``(key, effort)``."""
+    key, sep, effort = text.partition("@")
+    if not sep or not key.strip() or not effort.strip():
+        raise ExpansionError(f"{where}: {text!r} is not a `<catalogue key>@<effort>` ref")
+    return key, effort
+
+
+def _collect_universe(config: dict) -> list[tuple[str, str, str]]:
+    """The config's expansion universe as ``(key, effort, where)`` refs, in
+    first-appearance order: `config.model`, then the `opencodeConfig.agent`
+    entries in mapping order, then `expansionModels`. This walk order is the
+    provider filing order (Decision 4) — no engine constant participates.
+    """
+    universe: list[tuple[str, str, str]] = []
+    block = config.get("config")
+    if isinstance(block, dict):
+        model = block.get("model")
+        if isinstance(model, str) and "@" in model:
+            key, effort = _parse_carrier_ref(model, "`config.model`")
+            universe.append((key, effort, "`config.model`"))
+        oc = block.get("opencodeConfig")
+        agents = oc.get("agent") if isinstance(oc, dict) else None
+        if isinstance(agents, dict):
+            for name, entry in agents.items():
+                if not isinstance(entry, dict):
+                    continue
+                agent_model = entry.get("model")
+                if isinstance(agent_model, str) and "@" in agent_model:
+                    where = f"agent {name!r}"
+                    key, effort = _parse_carrier_ref(agent_model, where)
+                    universe.append((key, effort, where))
+    expansion = config.get("expansionModels")
+    if expansion is not None:
+        if not isinstance(expansion, list) or not all(
+            isinstance(item, str) and item.strip() for item in expansion
+        ):
+            raise ExpansionError(
+                "`expansionModels` must be a list of `<catalogue key>@<effort>` refs"
+            )
+        for item in expansion:
+            key, effort = _parse_carrier_ref(item, "`expansionModels`")
+            universe.append((key, effort, "`expansionModels`"))
+    return universe
+
+
+def _resolve_carrier_ref(
+    key: str, effort: str, where: str, catalog: dict, carrier_meta: dict
+) -> _ModelRef:
+    """Resolve one ref against the catalogue + carrierMeta, failing loudly.
+
+    Error inventory (Decision 4): unknown catalogue key; effort outside the
+    alphabet; effort outside the model's declared efforts; a referenced model
+    with no `carrierMeta` entry; a family with no effort carrier; a model-alias
+    model without `aliases`/`alias_model_id`; a ref effort missing from
+    `aliases`.
+    """
+    if effort not in EFFORT_ALPHABET:
+        raise ExpansionError(
+            f"{where}: effort {effort!r} is not in the effort alphabet {EFFORT_ALPHABET}"
+        )
+    if key not in catalog:
+        raise ExpansionError(f"{where}: catalogue key {key!r} is not in the model catalogue")
+    meta = carrier_meta.get(key)
+    if meta is None:
+        raise ExpansionError(
+            f"{where}: model {key!r} has no `carrierMeta` entry in the catalogue — "
+            "expansion needs its provider/family/efforts facts"
+        )
+    efforts = meta.get("efforts")
+    if not isinstance(efforts, list) or effort not in efforts:
+        raise ExpansionError(
+            f"{where}: effort {effort!r} is not one of model {key!r}'s declared "
+            f"efforts ({', '.join(map(str, efforts or []))})"
+        )
+    family = meta.get("family")
+    carrier = EFFORT_CARRIERS.get(family)
+    if carrier is None:
+        raise ExpansionError(
+            f"{where}: model {key!r} family {family!r} has no effort carrier — "
+            f"expansion covers {', '.join(sorted(EFFORT_CARRIERS))}"
+        )
+    if carrier == "model-alias":
+        aliases = meta.get("aliases")
+        alias_model_id = str(meta.get("alias_model_id") or "").strip()
+        if not isinstance(aliases, dict) or not aliases or not alias_model_id:
+            raise ExpansionError(
+                f"{where}: model {key!r} (family {family!r}) is a model-alias carrier "
+                "but its carrierMeta has no `aliases`/`alias_model_id`"
+            )
+        if effort not in aliases:
+            raise ExpansionError(
+                f"{where}: effort {effort!r} is not in model {key!r}'s `aliases` "
+                f"({', '.join(sorted(aliases))})"
+            )
+    return _ModelRef(key, effort, carrier, meta)
+
+
+def _ref_model_value(ref: _ModelRef) -> str:
+    """The runtime model value for one ref: ``provider/key``, or for a
+    model-alias carrier ``provider/<aliases[effort]>`` (``model_id`` is
+    mechanically ``carrierMeta.provider + '/' + catalogue key``)."""
+    if ref.carrier == "model-alias":
+        return f"{ref.meta['provider']}/{ref.meta['aliases'][ref.effort]}"
+    return f"{ref.meta['provider']}/{ref.key}"
+
+
+def _translated_agent_entry(entry: dict, ref: _ModelRef, where: str) -> dict:
+    """One agent entry with its `@`-ref translated per carrier.
+
+    An entry that *authored* a carrier field (`variant` or
+    `options.reasoningEffort`) while its model carries `@` is a conflict — the
+    engine refuses to guess which effort wins. A `reasoningEffort` carrier
+    merges into an existing authored `options` mapping (one without
+    `reasoningEffort`, which the conflict rule guarantees); a `variant` carrier
+    sets `variant`; a model-alias carrier sets nothing — the effort rides the
+    alias.
+    """
+    authored = "variant" if "variant" in entry else None
+    options = entry.get("options")
+    if isinstance(options, dict) and "reasoningEffort" in options:
+        authored = authored or "options.reasoningEffort"
+    if authored:
+        raise ExpansionError(
+            f"{where}: the entry authors a carrier field (`{authored}`) but its model "
+            f"is an `@`-ref ({entry.get('model')!r}) — write the intent form or the "
+            "derived form, not both"
+        )
+    updated = dict(entry)
+    updated["model"] = _ref_model_value(ref)
+    if ref.carrier == "variant":
+        updated["variant"] = ref.effort
+    elif ref.carrier == "reasoningEffort":
+        merged_options = dict(options) if isinstance(options, dict) else {}
+        merged_options["reasoningEffort"] = ref.effort
+        updated["options"] = merged_options
+    return updated
+
+
+def _derived_catalog_entries(
+    key: str, meta: dict, carrier: str, declared_efforts: list[str], catalog: dict
+) -> dict[str, dict]:
+    """The catalog entries one model's universe files: ``filing key → entry``.
+
+    deepseek/glm file the catalogue fragment verbatim under the catalogue key.
+    gpt adds the variant disable-map — every OpenCode 1.18.23 variant the
+    config does not declare, keyed in vocabulary order (config-scoped: the
+    universe's declared efforts decide, and an author who wants a non-declared
+    variant left enabled writes the catalog entry inline, which wins on
+    merge). kimi files one alias-keyed entry per declared effort, canonical
+    order, each carrying `options.thinking.{type: enabled, effort}`, with the
+    low entry rebuilt as the `{id: alias_model_id, name: "<display> (low
+    thinking)", …}` redirect — construction order mirrors the builder's
+    `_catalog` for reviewability.
+    """
+    fragment = catalog[key]
+    if carrier == "model-alias":
+        entries: dict[str, dict] = {}
+        for effort in declared_efforts:
+            block = dict(fragment)
+            block["options"] = {"thinking": {"type": "enabled", "effort": effort}}
+            if effort == "low":
+                block = {
+                    "id": meta["alias_model_id"],
+                    "name": f"{meta['display']} (low thinking)",
+                    **{k: v for k, v in block.items() if k != "name"},
+                }
+            entries[meta["aliases"][effort]] = block
+        return entries
+    block = dict(fragment)
+    if carrier == "variant":
+        declared = set(declared_efforts)
+        block["variants"] = {
+            variant: {"disabled": True}
+            for variant in OPENCODE_1_18_23_GPT_VARIANTS
+            if variant not in declared
+        }
+    return {key: block}
+
+
+def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | None = None) -> dict:
+    """Expand a merged v2 config's intent into the effective launch config.
+
+    Pure dict transform, deterministic by construction: the universe walk fixes
+    the provider filing order, canonical order fixes alias entry order, and
+    nothing reads state beyond the catalogue file. Derived entries merge
+    **under** what is already filed (modelRef output, authored inline entries),
+    the same authored-wins rule `modelRef` applies. `failover` blocks pass
+    through untouched (phase-3 scope). The bare-key error on `config.model`
+    fires only when the catalogue is loaded — with zero intent markers the
+    whole expansion is a no-op and a bare string is indistinguishable from a
+    plain model id.
+    """
+    universe = _collect_universe(config)
+    result = {key: value for key, value in config.items() if key != "expansionModels"}
+    if not universe:
+        return result
+    if config.get("harness") != "opencode":
+        raise ExpansionError(
+            "expansion intent (`@`-refs / `expansionModels`) is only implemented for "
+            "the opencode harness — expansion writes an opencode catalog block "
+            "(other harnesses have no carrier fields to derive today)"
+        )
+
+    providers_root = base_dir or providers_dir()
+    if catalog_ref is not None:
+        if not isinstance(catalog_ref, str) or not catalog_ref.strip():
+            raise ExpansionError("`modelsCatalog` must be a catalogue ref string")
+        catalog_path = resolve_config_path(catalog_ref, providers_root)
+        if catalog_path.suffix not in YAML_SUFFIXES:
+            raise ExpansionError(
+                f"`modelsCatalog` {catalog_ref!r} must resolve to a .yaml catalogue "
+                f"(got {catalog_path.name}); the catalogue is YAML-only in v1"
+            )
+    else:
+        catalog_path = providers_root / MODEL_CATALOGUE_NAME
+    catalog_document = load_model_catalog_with_carrier_meta(catalog_path)
+    catalog, carrier_meta = catalog_document.models, catalog_document.carrier_meta
+
+    # Resolve the whole universe first-appearance, one plan per catalogue key:
+    # carrier + facts + the set of declared efforts (canonical order at use).
+    key_order: list[str] = []
+    plans: dict[str, tuple[_ModelRef, set[str]]] = {}
+    for key, effort, where in universe:
+        ref = _resolve_carrier_ref(key, effort, where, catalog, carrier_meta)
+        if key not in plans:
+            key_order.append(key)
+            plans[key] = (ref, set())
+        plans[key][1].add(effort)
+
+    # Functional update along the one mutated path (opencodeConfig), so
+    # build_launch never sees (or shares) mutated sub-dicts — the modelRef
+    # expansion's discipline.
+    block = result.get("config")
+    new_block = dict(block) if isinstance(block, dict) else {}
+    passthrough = new_block.get("opencodeConfig")
+    if passthrough is not None and not isinstance(passthrough, dict):
+        raise ExpansionError("opencodeConfig must be a JSON object")
+    oc = dict(passthrough or {})
+    oc_providers = dict(oc.get("provider") or {})
+
+    # (1) File derived catalog entries under carrierMeta.provider — providers in
+    # first-appearance order of their models' refs; authored/filed entries win.
+    for key in key_order:
+        ref, efforts = plans[key]
+        declared_efforts = [effort for effort in EFFORT_ALPHABET if effort in efforts]
+        provider_id = ref.meta["provider"]
+        entry = dict(oc_providers.get(provider_id) or {})
+        models = dict(entry.get("models") or {})
+        derived = _derived_catalog_entries(key, ref.meta, ref.carrier, declared_efforts, catalog)
+        for filing_key, derived_entry in derived.items():
+            inline = models.get(filing_key)
+            models[filing_key] = _deep_merge(
+                derived_entry, dict(inline) if isinstance(inline, dict) else {}
+            )
+        entry["models"] = models
+        oc_providers[provider_id] = entry
+
+    # (2) Translate the agent entries' `@`-refs in place (mapping order kept).
+    agents = oc.get("agent")
+    if isinstance(agents, dict):
+        translated = dict(agents)
+        for name, entry in agents.items():
+            if not isinstance(entry, dict):
+                continue
+            model = entry.get("model")
+            if not isinstance(model, str) or "@" not in model:
+                continue
+            where = f"agent {name!r}"
+            key, effort = _parse_carrier_ref(model, where)
+            ref = _resolve_carrier_ref(key, effort, where, catalog, carrier_meta)
+            translated[name] = _translated_agent_entry(entry, ref, where)
+        oc["agent"] = translated
+
+    # (3) `config.model` is authoring sugar: `@`-refs translate by the same ref
+    # function; plain `provider/model` strings pass through untouched; a bare
+    # catalogue key (no `@`, no `/`) is the one authoring mistake with no plain
+    # reading — named, per the design's Risk 4.
+    model = new_block.get("model")
+    if isinstance(model, str):
+        if "@" in model:
+            key, effort = _parse_carrier_ref(model, "`config.model`")
+            ref = _resolve_carrier_ref(key, effort, "`config.model`", catalog, carrier_meta)
+            new_block["model"] = _ref_model_value(ref)
+        elif "/" not in model and model in catalog:
+            raise ExpansionError(
+                f"`config.model` {model!r} is a bare catalogue key — a bare key is not a "
+                f"model ref in v2, only `key@effort` resolves; declare the effort "
+                f"(`{model}@high` / `{model}@low`). Plain `provider/model` strings pass "
+                "through untouched"
+            )
+
+    oc["provider"] = oc_providers
+    new_block["opencodeConfig"] = oc
+    result["config"] = new_block
+    return result
 
 
 @dataclass(frozen=True)
