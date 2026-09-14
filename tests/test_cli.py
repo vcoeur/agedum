@@ -4,6 +4,7 @@ import stat
 from pathlib import Path
 
 import pytest
+import yaml
 import yaml_fleet_fixtures as fleet
 
 from agedum import __version__
@@ -1688,3 +1689,85 @@ def test_inject_config_files_seeds_the_kimi_yaml_fixture_at_mode_0600(tmp_path, 
         assert seeded.is_file()
         assert seeded.read_text() == content
         assert stat.S_IMODE(seeded.stat().st_mode) == 0o600
+
+
+# --- --print-config: the effective merged+expanded config as YAML, no launch ---
+
+
+_V2_PRINT_CATALOGUE = """\
+schema: agedum-models/v1
+models:
+  ds-flash:
+    name: DS Flash
+    limit: {context: 1000000, output: 65536}
+carrierMeta:
+  ds-flash:
+    provider: ds
+    family: deepseek
+    efforts: [high, low]
+    display: DS Flash
+"""
+
+_V2_PRINT_CONFIG = """\
+schema: agedum-provider/v2
+harness: opencode
+config:
+  opencodeConfig:
+    agent:
+      w:
+        mode: subagent
+        model: ds-flash@high
+"""
+
+
+def _print_config_providers(tmp_path, monkeypatch):
+    providers = tmp_path / "providers"
+    providers.mkdir(exist_ok=True)
+    (providers / "models.yaml").write_text(_V2_PRINT_CATALOGUE)
+    (providers / "ds2.yaml").write_text(_V2_PRINT_CONFIG)
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(env_file))
+    return providers
+
+
+def test_print_config_prints_the_expanded_yaml_without_launching(monkeypatch, tmp_path, capsys):
+    _no_launch(monkeypatch)
+    _print_config_providers(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "ds2", "--print-config"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    printed = yaml.safe_load(capsys.readouterr().out)
+    agent = printed["config"]["opencodeConfig"]["agent"]["w"]
+    assert agent["model"] == "ds/ds-flash"
+    assert agent["options"] == {"reasoningEffort": "high"}
+    assert printed["config"]["opencodeConfig"]["provider"]["ds"]["models"]["ds-flash"] == {
+        "name": "DS Flash",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+
+
+def test_print_config_is_accepted_before_the_provider(monkeypatch, tmp_path, capsys):
+    _no_launch(monkeypatch)
+    _print_config_providers(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "--print-config", "ds2"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 0
+    printed = yaml.safe_load(capsys.readouterr().out)
+    assert printed["config"]["opencodeConfig"]["agent"]["w"]["model"] == "ds/ds-flash"
+
+
+def test_print_config_reports_the_v1_intent_diagnostic(monkeypatch, tmp_path, capsys):
+    _no_launch(monkeypatch)
+    providers = _print_config_providers(tmp_path, monkeypatch)
+    (providers / "bad.yaml").write_text(
+        "schema: agedum-provider/v1\nharness: opencode\nconfig:\n  model: ds-flash@high\n"
+    )
+    monkeypatch.setattr("sys.argv", ["agedum", "bad", "--print-config"])
+    with pytest.raises(SystemExit) as exc:
+        cli.app()
+    assert exc.value.code == 1
+    assert "looks like expansion intent" in capsys.readouterr().err
