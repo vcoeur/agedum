@@ -1201,12 +1201,15 @@ def _intent_markers(config: dict) -> list[str]:
 
     Intent is `@`-refs on an opencode config's model slots (`config.model` and
     the `opencodeConfig.agent` entries' `model` fields) plus the top-level
-    `expansionModels` universe key. Scoped deliberately: an `@` inside a prompt,
-    a description, or a non-opencode `model` value is not intent.
+    `expansionModels` universe key and the top-level `failoverIntent` block.
+    Scoped deliberately: an `@` inside a prompt, a description, or a
+    non-opencode `model` value is not intent.
     """
     markers: list[str] = []
     if "expansionModels" in config:
         markers.append("top-level `expansionModels`")
+    if "failoverIntent" in config:
+        markers.append("top-level `failoverIntent`")
     block = config.get("config")
     if config.get("harness") == "opencode" and isinstance(block, dict):
         model = block.get("model")
@@ -1450,6 +1453,275 @@ def _derived_catalog_entries(
     return {key: block}
 
 
+# ---------------------------------------------------------------------------
+# `failoverIntent` — run-time failover derivation from the config's own agents
+# ---------------------------------------------------------------------------
+# The engine derives only mechanics (the builder's resolve_failover rules,
+# verbatim): chain filtering + omission, per-carrier rung translation,
+# `rungOptions`, and the `vision` map. `detect`/`maxWalk` are authored data
+# copied verbatim — never interpreted or shape-checked here (launch-time
+# `failover_spec` polices the emitted block); roster invariants (the
+# cross-provider no-failover check, local-chain authoring errors,
+# models-equals-roles-∪-targets) stay builder-side. The engine filters and
+# omits; it never enforces that a config's intent names its roster.
+
+
+def _translated_failover_ref(ref: _ModelRef, explicit_effort: bool) -> str:
+    """The runtime failover reference for one resolved ref — the builder's
+    ``_translated_ref`` contract: a variant/reasoningEffort carrier keeps
+    ``provider/key@effort`` when the entry authored an effort and stays
+    base-level (``provider/key``) when it did not; a model-alias carrier
+    selects ``provider/<aliases[effort]>`` — bare, no suffix. Authored intent
+    refs are explicit-only (the ``key@effort`` grammar), so the explicit branch
+    is the only one intent expansion can reach; the bare branch stays for
+    contract completeness, exactly as the builder's seam note specified.
+    """
+    if ref.carrier == "model-alias":
+        return f"{ref.meta['provider']}/{ref.meta['aliases'][ref.effort]}"
+    if explicit_effort:
+        return f"{ref.meta['provider']}/{ref.key}@{ref.effort}"
+    return f"{ref.meta['provider']}/{ref.key}"
+
+
+def _roster_pairs(config: dict) -> set[tuple[str, str]]:
+    """The config's own agents as ``(catalogue key, effort)`` roster pairs.
+
+    ``mode: primary`` entries are the mains, ``mode: subagent`` the workers,
+    any other or absent mode is in neither; an agent whose ``model`` is a plain
+    ``provider/model`` string (no ``@``) contributes no pair — it cannot be
+    named by intent sources, and a source that names it drops (below). The
+    pair, not the agent id, is the roster unit; mains ∪ workers counted once.
+    """
+    pairs: set[tuple[str, str]] = set()
+    block = config.get("config")
+    oc = block.get("opencodeConfig") if isinstance(block, dict) else None
+    agents = oc.get("agent") if isinstance(oc, dict) else None
+    if not isinstance(agents, dict):
+        return pairs
+    for name, entry in agents.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("mode") not in ("primary", "subagent"):
+            continue
+        model = entry.get("model")
+        if not isinstance(model, str) or "@" not in model:
+            continue
+        key, effort = _parse_carrier_ref(model, f"agent {name!r}")
+        pairs.add((key, effort))
+    return pairs
+
+
+def _intent_chains(intent: dict) -> dict[str, list[str]]:
+    """The intent's authored chains, shape-checked: source ref → rung ref list.
+
+    ``detect``/``maxWalk`` are deliberately not looked at here (or anywhere in
+    expansion) — authored data copied verbatim; ``failover_spec`` polices them
+    at launch. Absent or empty ``chains`` is zero chains — the omission rule.
+    """
+    chains = intent.get("chains")
+    if chains is None:
+        return {}
+    if not isinstance(chains, dict):
+        raise ExpansionError(
+            "`failoverIntent.chains` must be a JSON object mapping `<catalogue key>@<effort>` "
+            "source refs to lists of rung refs"
+        )
+    for source, rungs in chains.items():
+        if not isinstance(source, str) or not source.strip():
+            raise ExpansionError(
+                "`failoverIntent.chains` keys must be `<catalogue key>@<effort>` source ref strings"
+            )
+        if not isinstance(rungs, list) or not all(isinstance(rung, str) for rung in rungs):
+            raise ExpansionError(
+                f"`failoverIntent.chains` entry {source!r} must be a list of rung refs"
+            )
+    return chains
+
+
+def _resolve_failover_intent(
+    config: dict,
+    intent: dict,
+    catalog: dict,
+    carrier_meta: dict,
+    universe: list[tuple[str, str, str]],
+) -> list[tuple[str, _ModelRef, list[_ModelRef]]]:
+    """Resolve the intent, map the roster, filter the chains, extend the universe.
+
+    Returns the surviving chains as ``(authored source, resolved source ref,
+    resolved rung refs)`` in authored order; an empty list means the whole
+    block is omitted. Steps 1-4 of the resolution semantics — the order makes
+    the loud/quiet split match the builder's authoring-vs-resolution split.
+    """
+    chains = _intent_chains(intent)
+    # Step 1 — parse + resolve every intent ref loud, sources and rungs alike,
+    # before any filtering: a ref that does not parse, or names an unknown
+    # key/effort/model, is a named ExpansionError regardless of what the filter
+    # would later do (the run-time analogue of the manifest validator, which
+    # rejects unknown names in any chain before per-launcher filtering).
+    resolved_sources: dict[str, _ModelRef] = {}
+    resolved_rungs: dict[str, list[_ModelRef]] = {}
+    for source, rungs in chains.items():
+        key, effort = _parse_carrier_ref(source, "`failoverIntent` chain source")
+        resolved_sources[source] = _resolve_carrier_ref(
+            key, effort, f"`failoverIntent` chain source {source!r}", catalog, carrier_meta
+        )
+        resolved = []
+        for rung in rungs:
+            rung_key, rung_effort = _parse_carrier_ref(
+                rung, f"`failoverIntent` chain {source!r} rung"
+            )
+            resolved.append(
+                _resolve_carrier_ref(
+                    rung_key,
+                    rung_effort,
+                    f"`failoverIntent` chain {source!r} rung {rung!r}",
+                    catalog,
+                    carrier_meta,
+                )
+            )
+        resolved_rungs[source] = resolved
+    # Step 2 — roster mapping from the config's own agents.
+    role_pairs = _roster_pairs(config)
+    # Step 3 — the four filtering rules, verbatim mirrors of the builder's
+    # resolve_failover. A surviving chain's rungs are universe members by
+    # construction (the run-time analogue of the manifest's models = mains ∪
+    # workers ∪ surviving failover targets invariant), which is what makes
+    # rule 2 structurally retained but live-void under the union semantics of
+    # `failoverIntent` — a reviewer should expect the dead branch.
+    roster_survivors: list[tuple[str, _ModelRef, list[_ModelRef]]] = []
+    for source, rung_refs in resolved_rungs.items():
+        source_ref = resolved_sources[source]
+        if (source_ref.key, source_ref.effort) not in role_pairs:
+            continue  # rule 1 — a source outside mains ∪ workers is dropped
+        roster_survivors.append((source, source_ref, rung_refs))
+    universe_pairs = {(key, effort) for key, effort, _ in universe}
+    universe_pairs |= {
+        (rung_ref.key, rung_ref.effort)
+        for _source, _source_ref, rung_refs in roster_survivors
+        for rung_ref in rung_refs
+    }
+    surviving: list[tuple[str, _ModelRef, list[_ModelRef]]] = []
+    for source, source_ref, rung_refs in roster_survivors:
+        kept = [
+            rung_ref
+            for rung_ref in rung_refs
+            if (rung_ref.key, rung_ref.effort) in universe_pairs  # rule 2 — live-void
+        ]
+        if not kept:
+            continue  # rule 3 — a chain left without rungs is dropped
+        surviving.append((source, source_ref, kept))
+    if not surviving:
+        # rule 4 — zero surviving chains: the whole block is omitted.
+        # "Absence means ignore, never an error."
+        return []
+    # Step 4 — surviving chains' rung refs join the universe walk AFTER
+    # `expansionModels`, in authored chain/rung order (sources are already
+    # roster refs and add nothing). Dropped chains contribute nothing to
+    # filing — the parity-critical choice.
+    for source, _source_ref, kept in surviving:
+        for rung_ref in kept:
+            universe.append(
+                (rung_ref.key, rung_ref.effort, f"`failoverIntent` chain {source!r} rung")
+            )
+    return surviving
+
+
+def _derive_failover_block(
+    intent: dict,
+    surviving: list[tuple[str, _ModelRef, list[_ModelRef]]],
+    plans: dict[str, tuple[_ModelRef, set[str]]],
+    key_order: list[str],
+) -> dict:
+    """Translate the survivors and derive `rungOptions` + `vision`; emit the block.
+
+    Steps 5-8 of the resolution semantics, run after the universe plan loop
+    (they read the completed plans). ``detect``/``maxWalk`` are copied verbatim
+    from the intent — presence included: a degraded intent without them emits a
+    degraded block that launch-time ``failover_spec`` refuses, not an
+    expansion-time guess.
+    """
+    # Step 5 — per-carrier translation (the `_translated_failover_ref` seam).
+    # Two surviving sources translating to the same runtime ref are a named
+    # error — the builder's post-translation collision check, carried over;
+    # unreachable with explicit-only refs today, defensive as in the builder.
+    chains: dict[str, list[str]] = {}
+    sources_by_runtime_ref: dict[str, str] = {}
+    for source, source_ref, rung_refs in surviving:
+        runtime_source = _translated_failover_ref(source_ref, explicit_effort=True)
+        prior_source = sources_by_runtime_ref.get(runtime_source)
+        if prior_source is not None:
+            raise ExpansionError(
+                "failover chain source collision after runtime translation: "
+                f"{prior_source!r} and {source!r} both resolve to {runtime_source!r}"
+            )
+        sources_by_runtime_ref[runtime_source] = source
+        chains[runtime_source] = [
+            _translated_failover_ref(rung_ref, explicit_effort=True) for rung_ref in rung_refs
+        ]
+    used_rungs = {rung for rungs in chains.values() for rung in rungs}
+    # Step 6 — `rungOptions`, verbatim: universe models in first-appearance
+    # order, variant/reasoningEffort carriers only, each declared effort in
+    # canonical order, and only refs a surviving chain actually uses. The value
+    # key is `reasoning_effort` — snake_case, exactly as the builder emits
+    # (agent entries' `options.reasoningEffort` stays camelCase; the two
+    # conventions coexist inside one block by design).
+    rung_options: dict[str, dict] = {}
+    for key in key_order:
+        ref, efforts = plans[key]
+        if ref.carrier == "model-alias":
+            continue
+        for effort in EFFORT_ALPHABET:
+            if effort not in efforts:
+                continue
+            runtime_ref = _translated_failover_ref(
+                ref._replace(effort=effort), explicit_effort=True
+            )
+            if runtime_ref in used_rungs:
+                rung_options[runtime_ref] = {"reasoning_effort": effort}
+    # Step 7 — `vision` from `carrierMeta.vision`: one entry per universe
+    # model, walked provider-major (providers in first-appearance order, models
+    # in first-appearance order within — the filing walk); model-alias models
+    # additionally get one entry per declared effort at
+    # `provider/<aliases[effort]>` (canonical order). The fact itself is
+    # authored data the builder's projection adds to every carrierMeta entry;
+    # a universe model without it is the same class of gap as no carrierMeta.
+    vision: dict[str, bool] = {}
+    provider_order: list[str] = []
+    models_by_provider: dict[str, list[str]] = {}
+    for key in key_order:
+        provider_id = plans[key][0].meta["provider"]
+        if provider_id not in models_by_provider:
+            models_by_provider[provider_id] = []
+            provider_order.append(provider_id)
+        models_by_provider[provider_id].append(key)
+    for provider_id in provider_order:
+        for key in models_by_provider[provider_id]:
+            ref, efforts = plans[key]
+            flag = ref.meta.get("vision")
+            if not isinstance(flag, bool):
+                raise ExpansionError(
+                    f"model {key!r}'s `carrierMeta` entry has no `vision` fact — the "
+                    "failover vision map cannot be derived; add `vision: true|false` "
+                    "to its carrierMeta entry"
+                )
+            vision[f"{ref.meta['provider']}/{key}"] = flag
+            if ref.carrier == "model-alias":
+                for effort in EFFORT_ALPHABET:
+                    if effort in efforts:
+                        vision[f"{ref.meta['provider']}/{ref.meta['aliases'][effort]}"] = flag
+    # Step 8 — emit. `failoverIntent` itself is already stripped from the
+    # result (consumed intent, like `expansionModels`).
+    derived: dict = {}
+    if "detect" in intent:
+        derived["detect"] = intent["detect"]
+    if "maxWalk" in intent:
+        derived["maxWalk"] = intent["maxWalk"]
+    derived["vision"] = vision
+    derived["chains"] = chains
+    derived["rungOptions"] = rung_options
+    return derived
+
+
 def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | None = None) -> dict:
     """Expand a merged v2 config's intent into the effective launch config.
 
@@ -1457,21 +1729,40 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
     the provider filing order, canonical order fixes alias entry order, and
     nothing reads state beyond the catalogue file. Derived entries merge
     **under** what is already filed (modelRef output, authored inline entries),
-    the same authored-wins rule `modelRef` applies. `failover` blocks pass
-    through untouched (phase-3 scope). The bare-key error on `config.model`
-    fires only when the catalogue is loaded — with zero intent markers the
-    whole expansion is a no-op and a bare string is indistinguishable from a
-    plain model id.
+    the same authored-wins rule `modelRef` applies. A top-level
+    `failoverIntent` block is derived into the effective `failover` block (see
+    the `failoverIntent` section); a **precomputed** `failover` block passes
+    through untouched, and declaring both is a named error. The bare-key error
+    on `config.model` fires only when the catalogue is loaded — with zero
+    intent markers the whole expansion is a no-op and a bare string is
+    indistinguishable from a plain model id.
     """
     universe = _collect_universe(config)
-    result = {key: value for key, value in config.items() if key != "expansionModels"}
-    if not universe:
+    intent = config.get("failoverIntent")
+    result = {
+        key: value
+        for key, value in config.items()
+        if key not in ("expansionModels", "failoverIntent")
+    }
+    if "failover" in config and intent is not None:
+        raise ExpansionError(
+            "`failoverIntent` and a precomputed `failover` block are both declared — two "
+            "declarations of the same block, and the engine refuses to guess which wins: "
+            "write the intent form (`failoverIntent`) or the derived form (`failover`), "
+            "not both"
+        )
+    if intent is not None and not isinstance(intent, dict):
+        raise ExpansionError(
+            "`failoverIntent` must be a JSON object shaped like the manifest's `failover` "
+            "block — `detect` / `maxWalk` / `chains`"
+        )
+    if not universe and intent is None:
         return result
     if config.get("harness") != "opencode":
         raise ExpansionError(
-            "expansion intent (`@`-refs / `expansionModels`) is only implemented for "
-            "the opencode harness — expansion writes an opencode catalog block "
-            "(other harnesses have no carrier fields to derive today)"
+            "expansion intent (`@`-refs / `expansionModels` / `failoverIntent`) is only "
+            "implemented for the opencode harness — expansion writes an opencode catalog "
+            "block (other harnesses have no carrier fields to derive today)"
         )
 
     providers_root = base_dir or providers_dir()
@@ -1488,6 +1779,15 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
         catalog_path = providers_root / MODEL_CATALOGUE_NAME
     catalog_document = load_model_catalog_with_carrier_meta(catalog_path)
     catalog, carrier_meta = catalog_document.models, catalog_document.carrier_meta
+
+    # Failover intent first (Decision 2 sequencing): resolve every ref loud,
+    # map the roster, filter the chains, and extend the universe walk with the
+    # surviving chains' rung refs — so the plan loop below files them after
+    # `expansionModels`. Empty survivors means the block is omitted; the
+    # emitted block itself is derived last, from the completed plans.
+    surviving: list[tuple[str, _ModelRef, list[_ModelRef]]] = []
+    if intent is not None:
+        surviving = _resolve_failover_intent(config, intent, catalog, carrier_meta, universe)
 
     # Resolve the whole universe first-appearance, one plan per catalogue key:
     # carrier + facts + the set of declared efforts (canonical order at use).
@@ -1565,6 +1865,8 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
     oc["provider"] = oc_providers
     new_block["opencodeConfig"] = oc
     result["config"] = new_block
+    if intent is not None and surviving:
+        result["failover"] = _derive_failover_block(intent, surviving, plans, key_order)
     return result
 
 

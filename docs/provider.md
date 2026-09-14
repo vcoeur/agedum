@@ -315,13 +315,16 @@ Rules:
 `schema: agedum-provider/v2` is the **effort-carrier expansion opt-in**. A v2 document is
 byte-shaped exactly like a v1 document — same envelope, same authored policy blocks
 (prompts, permissions, `providerDef`, `requiredEnv` all stay authored verbatim) — with
-three deltas:
+these deltas:
 
 1. `schema: agedum-provider/v2` (the opt-in itself);
 2. agent entries and `config.model` may declare **`model: <catalogue-key>@<effort>`** refs;
 3. an optional top-level **`expansionModels:`** list of the same refs declares universe
    members with no agent entry (failover-only models and efforts). It is consumed like
-   `modelsCatalog` — stripped before the launch.
+   `modelsCatalog` — stripped before the launch;
+4. an optional top-level **`failoverIntent:`** block declares run-time failover intent
+   ([derived into the effective `failover` block](#failover-intent) from the config's own
+   agents). It is consumed like `expansionModels` — stripped before the launch.
 
 The engine derives everything carrier-specific; the author writes no `variant`,
 no `options.reasoningEffort`, no alias plumbing:
@@ -358,15 +361,18 @@ expansionModels: [k3@low]             # universe member with no agent entry
   (authored wins on conflict, the same rule `modelRef` applies).
 - JSON documents are v1 semantics forever: v2 is **YAML-only**.
 - **A v1 document carrying intent is a named load error.** An opencode `config.model` or
-  agent `model` string containing `@` — or a top-level `expansionModels` — in a v1
-  document fails the launch with *"this config looks like expansion intent …; declare
-  `schema: agedum-provider/v2`"*, instead of launching a garbage model ref that fails far
-  from the cause. No success path changes: intent slots only.
+  agent `model` string containing `@` — or a top-level `expansionModels` or
+  `failoverIntent` — in a v1 document fails the launch with *"this config looks like
+  expansion intent …; declare `schema: agedum-provider/v2`"*, instead of launching a
+  garbage model ref that fails far from the cause. No success path changes: intent slots
+  only.
 - **Non-opencode harnesses**: a v2 config with intent markers on any harness other than
   opencode is refused (the `modelRef` opencode-first rule). A v2 config with **no**
-  markers (`@`-refs and `expansionModels` absent) is a no-op — declaring v2 alone is not
-  intent.
-- `failover` blocks pass through untouched (a later phase authors failover as refs).
+  markers (`@`-refs, `expansionModels`, and `failoverIntent` all absent) is a no-op —
+  declaring v2 alone is not intent.
+- A precomputed **`failover`** block passes through untouched; a v2 document carrying
+  both it and `failoverIntent` is a named expansion error (two declarations of the same
+  block — the engine refuses to guess which wins). See [Failover](#failover-intent).
 
 ### `carrierMeta` — the catalogue's facts section
 
@@ -382,6 +388,7 @@ carrierMeta:
     family: deepseek        # selects the effort carrier
     efforts: [high, low]    # what the model accepts
     display: DS Flash       # display-name fact (may differ from the fragment's name)
+    vision: true            # failover vision-map fact (read by `failoverIntent` expansion)
   k3:
     provider: kimi-coding
     family: kimi
@@ -389,15 +396,18 @@ carrierMeta:
     display: Kimi K3
     aliases: {high: k3, low: k3-low}   # model-alias families only
     alias_model_id: k3                 # required iff `aliases`
+    vision: true
 ```
 
 Entries are validated whenever the catalogue loads (named `ModelCatalogSchemaError`s):
 `provider`/`family`/`display` non-empty strings, `efforts` a non-empty list inside the
 effort alphabet (`high`, `low`), `aliases` a mapping of alphabet efforts to non-empty
 strings, `alias_model_id` required iff `aliases` is present. Unknown keys inside an entry
-are ignored — future facts land here without a catalogue change. `modelRef` filing never
-reads the section, so the `models` map is byte-identical on every engine ≥ 0.60 (older
-engines ignore `carrierMeta` entirely).
+are ignored — future facts land here without a catalogue change. `vision` (a boolean) is
+one of those permissive facts: read only by [`failoverIntent`](#failover-intent)
+expansion, ignored everywhere else. `modelRef` filing never reads the section, so the
+`models` map is byte-identical on every engine ≥ 0.60 (older engines ignore `carrierMeta`
+entirely).
 
 ### Per-carrier semantics
 
@@ -414,6 +424,70 @@ pass through untouched.
 | gpt | `model: provider/key` + `variant: effort` | the fragment + `variants:` disabling every OpenCode variant the config does **not** declare (vocabulary order; declaring `sol@high` and `sol@low` anywhere in the config keeps `low` enabled) |
 | kimi | `model: provider/<aliases[effort]>` — the agent entry carries **no** carrier fields | one alias-keyed entry per declared effort (canonical `high`-first order), each `options.thinking: {type: enabled, effort}`; the `low` entry is rebuilt as `{id: alias_model_id, name: "<display> (low thinking)", …}` |
 
+### Failover — `failoverIntent` { #failover-intent }
+
+A v2 config may author its failover as intent instead of a precomputed block — the same
+shape the manifest template uses, with refs in the `key@effort` grammar:
+
+```yaml
+schema: agedum-provider/v2
+harness: opencode
+failoverIntent:
+  detect:                    # authored data — copied verbatim, never interpreted
+    status: [429, 402]
+    messages: [usage limit, quota, rate limit]
+  maxWalk: 3
+  chains:                    # explicit key@effort refs against catalogue keys
+    sol@low: [glm-flash@high]
+    terra@low: [glm-flash@high]
+```
+
+Expansion derives — from the config's **own agents** — the same top-level `failover`
+block a builder precomputes, then strips the intent (consumed, like `expansionModels`):
+
+- **Roster** — `mode: primary` agents are the mains, `mode: subagent` the workers, any
+  other or absent mode is in neither; an agent whose `model` is a plain `provider/model`
+  string contributes no pair. The pair, not the agent id, is the roster unit.
+- **Every intent ref resolves loud first** — a ref that does not parse or names an
+  unknown key/effort/model is a named expansion error *before* any filtering (resolution
+  errors are authoring errors; they never depend on what the filter would later do).
+- **Filtering** — a chain whose source is outside mains ∪ workers drops; a chain left
+  without rungs drops; zero surviving chains omit the whole block — no `failover` key in
+  the effective config. Absence means ignore, never an error: a hand config may inherit
+  an intent whose chains all drop and launch without failover.
+- **Universe** — the surviving chains' rung refs join the expansion universe after
+  `expansionModels`, in authored order; dropped chains contribute nothing to filing. A
+  rung-only model therefore files with no `expansionModels` (the key is subsumed in any
+  failover-bearing config; the two keys may also be combined — the universe is their
+  union).
+- **Translation** — rung and source refs translate per carrier: `provider/key@effort`
+  (variant / reasoningEffort families), the bare `provider/<aliases[effort]>` (kimi).
+  Two surviving sources translating to the same runtime ref would be a named error.
+- **`rungOptions`** — one `{"reasoning_effort": effort}` entry (snake_case, exactly as
+  the builder emits) per used variant/reasoningEffort rung, canonical effort order.
+  Model-alias rungs never appear.
+- **`vision`** — derived from the catalogue's `carrierMeta.vision` facts: one entry per
+  universe model, walked provider-major in first-appearance order; model-alias models
+  additionally get one entry per declared effort at `provider/<aliases[effort]>`. A
+  universe model whose `carrierMeta` lacks the fact is a named error — but only when a
+  block is actually derived (an omitted block demands no vision facts).
+
+`detect`/`maxWalk` are authored data copied verbatim, never interpreted or validated at
+expansion — launch-time validation polices the emitted block for derived and precomputed
+blocks alike. The engine filters and omits; it never enforces that a config's intent
+names its roster (authoring-side roster invariants stay builder-side).
+
+The key **collision rules**, per root schema:
+
+| root | keys present | behaviour |
+|---|---|---|
+| v1 | `failover` | passthrough — unchanged |
+| v1 | `failoverIntent` | the named intent load error (declare v2) |
+| v2 | `failoverIntent` only | intent expands; key stripped; derived block emitted |
+| v2 | `failoverIntent` + `failover` | named expansion error — two declarations of the same block |
+| v2 | `failover` only | passthrough untouched |
+| either | neither | nothing — the omission rule |
+
 ### Errors are named
 
 A ref that cannot resolve is an `ExpansionError` naming where it sits: unknown catalogue
@@ -426,6 +500,9 @@ guess); `@`-refs on a non-opencode harness. One authoring trap gets its own mess
 **bare catalogue key** in `config.model` (`model: ds-flash` — no `@`, no `/`) is not a
 ref and is not silently passed through; declare the effort or write the plain
 `provider/model` form. `expansionModels` must be a list of `key@effort` strings.
+`failoverIntent` adds its own named errors: a malformed block or chains shape; a
+universe model whose `carrierMeta` has no `vision` fact (when a block is derived); a v2
+document declaring both `failoverIntent` and a precomputed `failover` block.
 
 ## `--print-config` { #print-config }
 

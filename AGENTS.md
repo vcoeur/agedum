@@ -303,11 +303,31 @@ Two modes, dispatched in `cli/main.py` on the first argument:
    first-appearance order of the config's refs, merged **under** what `modelRef` filed or
    the author wrote inline. The **root document's** schema gates expansion (a v1 base
    under a v2 root expands; a v2 base under a v1 root does not); JSON documents are v1
-   semantics forever (v2 is YAML-only); `failover` blocks pass through untouched
-   (phase 3). A v1 config carrying intent markers (`@`-refs on opencode model slots /
-   `expansionModels`) is a named load error telling the author to declare v2; a v2 config
-   with intent on a non-opencode harness is refused (modelRef's opencode-first rule), and
-   a v2 config with no markers is a no-op (declaring v2 alone is not intent). Expansion
+   semantics forever (v2 is YAML-only). A v1 config carrying intent markers (`@`-refs on
+   opencode model slots / `expansionModels` / `failoverIntent`) is a named load error
+   telling the author to declare v2; a v2 config with intent on a non-opencode harness is
+   refused (modelRef's opencode-first rule), and a v2 config with no markers is a no-op
+   (declaring v2 alone is not intent). A v2 config may also carry a top-level
+   **`failoverIntent`** block — `detect` / `maxWalk` / `chains`, sources and rungs as
+   explicit `key@effort` refs — which the engine derives, from the config's own agents,
+   into the effective top-level `failover` block (the intent key is consumed like
+   `expansionModels`): `mode: primary` agents are the mains, `mode: subagent` the
+   workers, any other or absent mode neither, and a plain `provider/model` agent
+   contributes no pair; every intent ref must resolve before any filtering (unknown
+   key/effort/model is a named expansion error); chain sources outside mains ∪ workers
+   drop, chains left without rungs drop, and zero surviving chains omit the whole block
+   (absence means ignore, never an error); surviving chains' rung refs join the expansion
+   universe after `expansionModels` — a rung-only model files without `expansionModels` —
+   and translate per carrier (`provider/key@effort`; kimi rungs to the bare
+   `provider/<aliases[effort]>`); `rungOptions` carries `{"reasoning_effort": effort}`
+   (snake_case) for the used variant/reasoningEffort rungs in canonical effort order;
+   `vision` derives from the catalogue's `carrierMeta.vision` facts (one entry per
+   universe model, walked provider-major, alias entries per declared effort; a missing
+   fact is a named error). `detect`/`maxWalk` are copied verbatim, never validated at
+   expansion — launch-time `failover_spec` polices the emitted block. Collision rules: a
+   v2 document carrying both `failoverIntent` and a precomputed `failover` block is a
+   named expansion error; a v2 document with only the precomputed block passes it through
+   untouched. Expansion
    runs after modelRef filing, before launch building, so both `--dry-run` and
    **`--print-config`** (print the effective merged+expanded config as YAML, exit 0, no
    launch, no env resolution — accepted before or after the provider like `--dry-run`)
