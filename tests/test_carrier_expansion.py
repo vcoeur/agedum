@@ -1,5 +1,5 @@
-"""`agedum-provider/v2` — schema gating, the v1 intent diagnostic, and (later
-sections) `carrierMeta` validation + per-carrier expansion.
+"""`agedum-provider/v2` — schema gating, the v1 intent diagnostic, `carrierMeta`
+validation, and per-carrier expansion.
 
 Synthetic mechanism fixtures only: no fleet prose, no agentsconf content.
 """
@@ -11,10 +11,14 @@ import pytest
 from agedum.provider import (
     PROVIDER_SCHEMA_VERSION,
     PROVIDER_SCHEMA_VERSION_2,
+    ModelCatalogSchemaError,
     ProviderSchemaError,
     expand_carrier_refs,
+    expand_model_refs,
     load_config_with_format,
     load_merged_config_with_format,
+    load_model_catalog,
+    load_model_catalog_with_carrier_meta,
 )
 
 
@@ -180,3 +184,178 @@ def test_v2_strips_a_present_expansion_models_key():
     config = {"harness": "opencode", "expansionModels": []}
     expanded = expand_carrier_refs(config, root_schema=PROVIDER_SCHEMA_VERSION_2)
     assert "expansionModels" not in expanded
+
+
+# --- carrierMeta: the catalogue's expansion-facts section ---
+# One synthetic model per effort-carrier family: deepseek/glm carry
+# options.reasoningEffort, gpt carries variant, kimi rides model aliases.
+
+SYNTH_CATALOGUE = """\
+schema: agedum-models/v1
+models:
+  ds-flash:
+    name: DS Flash
+    limit: {context: 1000000, output: 65536}
+  glm-x:
+    name: GLM X
+    limit: {context: 200000, output: 32768}
+  sol:
+    name: GPT-5.6 Sol
+    attachment: true
+  k3:
+    name: Kimi K3
+    limit: {context: 262144, output: 32768}
+carrierMeta:
+  ds-flash:
+    provider: ds
+    family: deepseek
+    efforts: [high, low]
+    display: DS Flash
+  glm-x:
+    provider: glm-p
+    family: glm
+    efforts: [high, low]
+    display: GLM X
+  sol:
+    provider: openai
+    family: gpt
+    efforts: [high, low]
+    display: GPT-5.6 Sol
+  k3:
+    provider: kimi-coding
+    family: kimi
+    efforts: [high, low]
+    display: Kimi K3
+    aliases: {high: k3, low: k3-low}
+    alias_model_id: k3
+"""
+
+
+def _write_catalogue(root, text=SYNTH_CATALOGUE, rel="models.yaml"):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_synth_catalogue_loads_with_carrier_meta(tmp_path):
+    _write_catalogue(tmp_path)
+    catalog = load_model_catalog_with_carrier_meta(tmp_path / "models.yaml")
+    assert set(catalog.models) == {"ds-flash", "glm-x", "sol", "k3"}
+    assert catalog.carrier_meta["k3"] == {
+        "provider": "kimi-coding",
+        "family": "kimi",
+        "efforts": ["high", "low"],
+        "display": "Kimi K3",
+        "aliases": {"high": "k3", "low": "k3-low"},
+        "alias_model_id": "k3",
+    }
+
+
+def test_load_model_catalog_still_returns_the_models_map(tmp_path):
+    # The v1-shaped entry point is unchanged — models only (carrierMeta is
+    # validated on load but not returned there).
+    _write_catalogue(tmp_path)
+    models = load_model_catalog(tmp_path / "models.yaml")
+    assert models["ds-flash"] == {
+        "name": "DS Flash",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+
+
+def test_carrier_meta_absent_is_an_empty_facts_map(tmp_path):
+    _write_catalogue(tmp_path, "schema: agedum-models/v1\nmodels:\n  m1:\n    name: M1\n")
+    catalog = load_model_catalog_with_carrier_meta(tmp_path / "models.yaml")
+    assert catalog.carrier_meta == {}
+
+
+def test_carrier_meta_present_v1_filing_is_byte_identical(tmp_path):
+    # v1 `modelRef` filing reads only `models`: a catalogue carrying carrierMeta
+    # files the same verbatim fragment a 0.60 engine would (which ignores the
+    # section entirely).
+    _write_catalogue(tmp_path)
+    config = {
+        "harness": "opencode",
+        "config": {
+            "providerDef": {
+                "id": "ds",
+                "npm": "@ai-sdk/openai-compatible",
+                "modelRef": "ds-flash",
+            }
+        },
+    }
+    expanded = expand_model_refs(config, tmp_path)
+    assert expanded["config"]["opencodeConfig"]["provider"]["ds"]["models"]["ds-flash"] == {
+        "name": "DS Flash",
+        "limit": {"context": 1000000, "output": 65536},
+    }
+
+
+def test_unknown_carrier_meta_keys_are_ignored(tmp_path):
+    # Data-file philosophy: future facts (phase 3 adds `vision`) land here
+    # without a catalogue change.
+    text = SYNTH_CATALOGUE.replace(
+        "    display: DS Flash\n",
+        "    display: DS Flash\n    vision: true\n    someday: maybe\n",
+    )
+    _write_catalogue(tmp_path, text)
+    assert (
+        load_model_catalog_with_carrier_meta(tmp_path / "models.yaml").carrier_meta["ds-flash"][
+            "vision"
+        ]
+        is True
+    )
+
+
+# Base facts for the bad-entry matrix: the ds entry omits exactly the key under
+# test; the k3 entry is the model-alias shape with a non-alphabet effort to trip
+# the aliases checks.
+_DS_PROVIDER = "    provider: ds\n"
+_DS_FACTS = _DS_PROVIDER + "    family: deepseek\n    display: D\n"
+_DS_FACTS_NO_FAMILY = _DS_PROVIDER + "    display: D\n"
+_DS_FACTS_NO_DISPLAY = _DS_PROVIDER + "    family: deepseek\n"
+_K3_FACTS = "    provider: kimi-coding\n    family: kimi\n    display: K\n    efforts: [high]\n"
+
+
+@pytest.mark.parametrize(
+    ("meta_block", "match"),
+    [
+        ("  ds-flash: nope\n", "carrierMeta entry for model 'ds-flash' must be a mapping"),
+        ("  ds-flash:\n    family: deepseek\n", "key `provider`"),
+        ('  ds-flash:\n    provider: ""\n', "key `provider`"),
+        ("  ds-flash:\n    provider: 5\n", "key `provider`"),
+        ("  ds-flash:\n" + _DS_FACTS_NO_FAMILY, "key `family`"),
+        ("  ds-flash:\n" + _DS_FACTS_NO_DISPLAY, "key `display`"),
+        ("  ds-flash:\n" + _DS_FACTS, "key `efforts`"),
+        ("  ds-flash:\n" + _DS_FACTS + "    efforts: []\n", "key `efforts`"),
+        ("  ds-flash:\n" + _DS_FACTS + "    efforts: [high, turbo]\n", "key `efforts`"),
+        ("  ds-flash:\n" + _DS_FACTS + "    efforts: high\n", "key `efforts`"),
+        (
+            "  ds-flash:\n" + _DS_FACTS + "    efforts: [high]\n    alias_model_id: ds-flash\n",
+            "key `alias_model_id`",
+        ),
+        ("  k3:\n" + _K3_FACTS + "    aliases: {high: k3, turbo: k3-t}\n", "key `aliases`"),
+        ("  k3:\n" + _K3_FACTS + '    aliases: {high: ""}\n', "key `aliases`"),
+        ("  k3:\n" + _K3_FACTS + "    aliases: high\n", "key `aliases`"),
+        ("  k3:\n" + _K3_FACTS + "    aliases: {high: k3}\n", "key `alias_model_id`"),
+        (
+            "  k3:\n" + _K3_FACTS + '    aliases: {high: k3}\n    alias_model_id: ""\n',
+            "key `alias_model_id`",
+        ),
+    ],
+)
+def test_bad_carrier_meta_entries_error_naming_model_and_key(tmp_path, meta_block, match):
+    text = (
+        "schema: agedum-models/v1\nmodels:\n  ds-flash:\n    name: D\ncarrierMeta:\n" + meta_block
+    )
+    _write_catalogue(tmp_path, text)
+    with pytest.raises(ModelCatalogSchemaError, match=match):
+        load_model_catalog(tmp_path / "models.yaml")
+
+
+def test_carrier_meta_section_itself_must_be_a_mapping(tmp_path):
+    _write_catalogue(
+        tmp_path, "schema: agedum-models/v1\nmodels:\n  m1:\n    name: M1\ncarrierMeta: [a]\n"
+    )
+    with pytest.raises(ModelCatalogSchemaError, match="`carrierMeta` must be a mapping"):
+        load_model_catalog(tmp_path / "models.yaml")

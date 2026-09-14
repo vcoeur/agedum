@@ -829,12 +829,36 @@ def _merge_extends(base: dict, overlay: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def load_model_catalog(path: Path) -> dict[str, dict]:
-    """Read and validate a model catalogue: a YAML document declaring
-    ``schema: agedum-models/v1`` whose ``models`` map holds one entry per model id.
+class ModelCatalog(NamedTuple):
+    """A loaded model catalogue: the verbatim per-model fragments plus the
+    optional ``carrierMeta`` facts section (an empty mapping when absent).
 
-    Each entry is a **verbatim per-model fragment** in opencode's own catalog
-    vocabulary (``name``, ``limit: {context, output, …}``, ``attachment``,
+    ``models`` is what ``modelRef`` files verbatim; ``carrier_meta`` is what
+    v2 intent expansion derives from — provider/family/efforts/display facts,
+    plus Kimi's ``aliases``/``alias_model_id``.
+    """
+
+    models: dict[str, dict]
+    carrier_meta: dict[str, dict]
+
+
+def load_model_catalog(path: Path) -> dict[str, dict]:
+    """Read and validate a model catalogue, returning its ``models`` map.
+
+    Thin view over :func:`load_model_catalog_with_carrier_meta` — the file is
+    read and validated once, whole (including ``carrierMeta``, which this
+    function does not return).
+    """
+    return load_model_catalog_with_carrier_meta(path).models
+
+
+def load_model_catalog_with_carrier_meta(path: Path) -> ModelCatalog:
+    """Read and validate a model catalogue: a YAML document declaring
+    ``schema: agedum-models/v1`` whose ``models`` map holds one entry per model id,
+    plus an optional ``carrierMeta`` section of per-model expansion facts.
+
+    Each ``models`` entry is a **verbatim per-model fragment** in opencode's own
+    catalog vocabulary (``name``, ``limit: {context, output, …}``, ``attachment``,
     ``modalities: {input, output}``, plus any other key opencode consumes —
     ``variants``, ``options``, …), so what lands in a launch config is byte-for-byte
     what the generated oc configs carry inline. Entries are type-checked minimally —
@@ -842,9 +866,19 @@ def load_model_catalog(path: Path) -> dict[str, dict]:
     values integers or null, ``modalities`` values lists of strings — with errors
     naming the model id and key; every other key passes through untouched. The
     catalogue deliberately gets **no** YAML boolean-trap walk in v1 (a documented
-    limit: quote a value that reads as on/off/yes/no). Raises :class:`ProviderError`
-    (absent/unreadable/invalid file) or :class:`ModelCatalogSchemaError`
-    (schema/shape/type violations); returns the ``models`` map.
+    limit: quote a value that reads as on/off/yes/no).
+
+    ``carrierMeta`` is the v2 expansion facts section — a mapping of catalogue key
+    → ``{provider, family, efforts, display}`` plus, for model-alias families,
+    ``aliases`` (effort → alias id) and ``alias_model_id`` (required iff
+    ``aliases``). It is validated whenever the catalogue loads — a declared-but-
+    broken facts section must not be silent — but v1 filing never reads it, and a
+    catalogue without the section behaves exactly as before (0.60 engines ignore
+    it entirely). Unknown keys inside an entry are ignored (data-file philosophy:
+    future facts land here without a schema bump). Raises
+    :class:`ProviderError` (absent/unreadable/invalid file) or
+    :class:`ModelCatalogSchemaError` (schema/shape/type violations); returns the
+    :class:`ModelCatalog` pair.
     """
     try:
         raw = path.read_text()
@@ -881,7 +915,79 @@ def load_model_catalog(path: Path) -> dict[str, dict]:
                 f"not {type(entry).__name__}"
             )
         _validate_catalog_entry(model_id, entry, path)
-    return models
+    raw_meta = document.get("carrierMeta")
+    if raw_meta is None:
+        carrier_meta: dict[str, dict] = {}
+    else:
+        if not isinstance(raw_meta, dict):
+            raise ModelCatalogSchemaError(
+                f"{path}: model catalogue `carrierMeta` must be a mapping of "
+                f"model id → facts, not {type(raw_meta).__name__}"
+            )
+        for model_id, meta in raw_meta.items():
+            _validate_carrier_meta_entry(path, model_id, meta)
+        carrier_meta = raw_meta
+    return ModelCatalog(models, carrier_meta)
+
+
+def _validate_carrier_meta_entry(path: Path, model_id: str, meta: object) -> None:
+    """Validate one ``carrierMeta`` entry; errors name the model and the key.
+
+    Required facts: ``provider`` / ``family`` / ``display`` non-empty strings and
+    ``efforts`` a non-empty list inside :data:`EFFORT_ALPHABET`. The model-alias
+    pair is conditional: ``aliases`` (alphabet efforts → non-empty strings) may be
+    present only with ``alias_model_id``, and ``alias_model_id`` only with
+    ``aliases``. Anything else inside the entry passes through — future facts
+    (phase 3 adds ``vision``) land without a catalogue change.
+    """
+
+    def bad(key: str, expectation: str, value: object) -> ModelCatalogSchemaError:
+        return ModelCatalogSchemaError(
+            f"{path}: carrierMeta entry {model_id!r} key `{key}` must be {expectation}, "
+            f"got {value!r}"
+        )
+
+    if not isinstance(meta, dict):
+        raise ModelCatalogSchemaError(
+            f"{path}: carrierMeta entry for model {model_id!r} must be a mapping, "
+            f"not {type(meta).__name__}"
+        )
+    for key in ("provider", "family", "display"):
+        value = meta.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise bad(key, "a non-empty string", value)
+    efforts = meta.get("efforts")
+    if (
+        not isinstance(efforts, list)
+        or not efforts
+        or not all(isinstance(effort, str) and effort in EFFORT_ALPHABET for effort in efforts)
+    ):
+        raise bad("efforts", f"a non-empty list of efforts in {EFFORT_ALPHABET}", efforts)
+    aliases = meta.get("aliases")
+    alias_model_id = meta.get("alias_model_id")
+    if aliases is None and alias_model_id is None:
+        return
+    if aliases is not None:
+        if not isinstance(aliases, dict) or not all(
+            isinstance(effort, str)
+            and effort in EFFORT_ALPHABET
+            and isinstance(alias, str)
+            and alias.strip()
+            for effort, alias in aliases.items()
+        ):
+            raise bad(
+                "aliases",
+                f"a mapping of efforts in {EFFORT_ALPHABET} to non-empty strings",
+                aliases,
+            )
+        if not isinstance(alias_model_id, str) or not alias_model_id.strip():
+            raise bad(
+                "alias_model_id",
+                "a non-empty string (required when `aliases` is present)",
+                alias_model_id,
+            )
+    else:
+        raise bad("alias_model_id", "omitted when `aliases` is absent", alias_model_id)
 
 
 def _validate_catalog_entry(model_id: str, entry: dict, path: Path) -> None:
@@ -1050,6 +1156,12 @@ def expand_model_refs(config: dict, base_dir: Path | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # `agedum-provider/v2` — the effort-carrier grammar at run time
 # ---------------------------------------------------------------------------
+
+# The effort alphabet and its canonical order (the builder's VALID_EFFORTS and
+# declared_efforts): refs are `<catalogue key>@<effort>`, declared efforts are
+# enumerated high-first regardless of authoring order, and every catalogue
+# `carrierMeta.efforts` / `aliases` entry must be inside it.
+EFFORT_ALPHABET = ("high", "low")
 
 
 def _intent_markers(config: dict) -> list[str]:
