@@ -248,10 +248,11 @@ are documented there — keep `docs/` in sync when the source layout or a compil
 
 Two modes, dispatched in `cli/main.py` on the first argument:
 
-- **provider** (primary) — `agedum <config-ref> [--env <file>] [--dry-run] [harness args...]`.
+- **provider** (primary) — `agedum <config-ref> [--env <file>] [--dry-run] [--print-config] [harness args...]`.
   Read a condash-style provider config — **JSON** (the legacy format, no version key) or
-  **YAML** (a document declaring `schema: agedum-provider/v1`; missing or different is a
-  `ProviderSchemaError` naming the expected value, and a correct key is stripped so YAML yields
+  **YAML** (a document declaring `schema: agedum-provider/v1` or `agedum-provider/v2`;
+  missing or different is a `ProviderSchemaError` naming the expected value, and a correct
+  key is stripped so YAML yields
   the same dict the equivalent JSON would — parse, not translate). An unquoted YAML
    `on`/`off`/`yes`/`no` in a string-valued slot (env values, `secretEnv`/`requiredEnv` entries,
    `harness`, `extends`/`include` refs, the known string keys of `config`) is a `YamlBooleanTrapError` —
@@ -284,7 +285,33 @@ Two modes, dispatched in `cli/main.py` on the first argument:
    (`--providers`) skips the exact root-level `models.yaml` (a subdirectory one stays an
    ordinary candidate). Catalogue entries are type-checked minimally (name string, attachment
    boolean, limit integers-or-null, modalities string-lists) naming the model id and key; no
-   boolean-trap walk on the catalogue in v1. An **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
+   boolean-trap walk on the catalogue in v1. The catalogue may also carry an **optional
+   `carrierMeta` section** (schema stays `agedum-models/v1` — a permissive extension 0.60
+   engines ignore correctly): per-model expansion facts — `provider`/`family`/`efforts`/
+   `display`, plus `aliases` + `alias_model_id` (required iff `aliases`) for model-alias
+   families — validated whenever the catalogue loads, read by nothing on the v1 path
+   (`modelRef` filing stays byte-identical). A YAML config may declare
+   **`schema: agedum-provider/v2`** — the effort-carrier expansion opt-in: agent entries
+   and `config.model` may declare `model: <catalogue-key>@<effort>` refs, and an optional
+   top-level `expansionModels` list (consumed like `modelsCatalog`) declares universe
+   members with no agent entry (failover-only models). The engine derives the
+   carrier-specific output from `carrierMeta` — `options.reasoningEffort` (deepseek/glm),
+   `variant` plus the derived OpenCode variant disable-map over the config's declared
+   efforts (gpt), Kimi alias selection with `options.thinking.effort` and the low-alias
+   `{id, name: "<display> (low thinking)"}` redirect (kimi) — filing derived catalog
+   entries under `opencodeConfig.provider.<carrierMeta provider>.models` in
+   first-appearance order of the config's refs, merged **under** what `modelRef` filed or
+   the author wrote inline. The **root document's** schema gates expansion (a v1 base
+   under a v2 root expands; a v2 base under a v1 root does not); JSON documents are v1
+   semantics forever (v2 is YAML-only); `failover` blocks pass through untouched
+   (phase 3). A v1 config carrying intent markers (`@`-refs on opencode model slots /
+   `expansionModels`) is a named load error telling the author to declare v2; a v2 config
+   with intent on a non-opencode harness is refused (modelRef's opencode-first rule), and
+   a v2 config with no markers is a no-op (declaring v2 alone is not intent). Expansion
+   runs after modelRef filing, before launch building, so both `--dry-run` and
+   **`--print-config`** (print the effective merged+expanded config as YAML, exit 0, no
+   launch, no env resolution — accepted before or after the provider like `--dry-run`)
+   show the effective result. An **`abstract: true`** config is a base only — excluded from `--providers`, refuses direct launch;
    abstractness is not inherited (through extends or include); shared fragments carry it to stay
    out of `--providers`. A config's **identity/label is its path** (the `name` field is
    gone). Then resolve the env from `${AGENTS_ENV_FILE:-~/.config/agents/.env}` (or `--env`),
@@ -332,8 +359,11 @@ the command), `launcher.py` (`build_bwrap_argv`, `assert_safe`, `run_virtualfs` 
 appends `plan.extra_args`; an optional `Sandbox` switches the base bind to a read-only host
 + writable `writable_roots`), `provider.py` (`resolve_config_path` providers-root-anchored
 with the `.json`→`.yaml` fallback / `load_config` raw — JSON, or YAML declaring
-`schema: agedum-provider/v1`, via `load_config_with_format` which carries the source format —
+`schema: agedum-provider/v1` (or `/v2`), via `load_config_with_format` which carries the
+source format + the declared schema —
 + `load_merged_config` resolving the `include` fragments + `extends` chain into one effective config /
+`expand_model_refs` (catalogue filing) + `expand_carrier_refs` (`agedum-provider/v2`
+intent expansion, gated by the root document's schema) /
 `parse_env_file` / `build_launch` → a `Launch` of env-to-set/unset + base command;
 `list_providers` walks recursively + skips `abstract` → `ProviderSummary` rows for `--providers`;
 per-harness env mapping mirrors condash's pre-4.0 launcher), `proxy.py` (three localhost reverse
