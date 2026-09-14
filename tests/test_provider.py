@@ -3406,7 +3406,9 @@ def test_yaml_schema_key_is_required(tmp_path):
 
 
 def test_yaml_schema_key_wrong_value_names_the_expected_version(tmp_path):
-    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v2\nharness: claude\n")
+    # v2 is accepted since the carrier-expansion widening; the wrong-value case is
+    # an unknown version (the v2-refusal pin lives in test_carrier_expansion.py).
+    _write_yaml(tmp_path, "x.yaml", "schema: agedum-provider/v3\nharness: claude\n")
     with pytest.raises(ProviderSchemaError, match=r"`schema: agedum-provider/v1`"):
         load_config(tmp_path / "x.yaml")
 
