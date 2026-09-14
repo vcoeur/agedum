@@ -8,7 +8,9 @@ resolves its env from ``${AGENTS_ENV_FILE:-~/.config/agents/.env}`` (or ``--env`
 sets the provider/model/auth environment, and launches the harness named in the config
 inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked),
 the config's source format, the virtual files that would be injected, and the final argv
-without launching. See :mod:`agedum.provider`.
+without launching. ``--print-config`` prints the effective merged+expanded config as
+YAML and exits — the debug/parity view of what the launch would see.
+See :mod:`agedum.provider`.
 
 **wrapper**: ``agedum --wrapper <harness> [--dry-run] -- <command…>``. The harness before
 ``--`` chooses which virtual files to build (Claude / kimi / opencode / cline / reasonix /
@@ -31,6 +33,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import yaml
 from rich.console import Console
 
 from agedum import __version__
@@ -54,6 +57,7 @@ from agedum.provider import (
     ProviderError,
     build_launch,
     default_env_file,
+    expand_carrier_refs,
     expand_model_refs,
     failover_spec,
     list_providers,
@@ -83,7 +87,7 @@ _COMPILERS: dict[str, Callable[[Source, Source | None, Path], Plan]] = {
 
 USAGE = (
     "usage: agedum <provider-name|config.json|.yaml> [--env <file>] "
-    "[--prompt TEXT | --run TEXT] [--dry-run] [harness args...]\n"
+    "[--prompt TEXT | --run TEXT] [--dry-run] [--print-config] [harness args...]\n"
     "       agedum --wrapper <claude|kimi|opencode|cline|reasonix|aider|pi|codex> [--sandbox] "
     "[--rw-dir DIR]... [--dry-run] -- <command> [args...]"
 )
@@ -101,6 +105,10 @@ the env file and the agent-neutral source injected as virtual files:
   --dry-run             print the resolved env (secrets masked), the virtual files that
                         would be injected, and the argv — don't launch (accepted before
                         or after the provider)
+  --print-config        print the effective merged+expanded config as YAML and exit 0 —
+                        no launch, no env resolution; shows include/extends merging,
+                        modelRef filing, and v2 intent expansion exactly as the launch
+                        would see them (accepted before or after the provider)
   --prompt TEXT         seed the harness with an initial prompt, then stay interactive
   --run TEXT            run the prompt non-interactively, then exit (no interactive UI);
                         --prompt and --run are mutually exclusive
@@ -189,6 +197,7 @@ def _run_list_providers() -> int:
 def _run_config(argv: list[str]) -> int:
     env_file: str | None = None
     dry_run = False
+    print_config = False
     provider: str | None = None
     rest: list[str] = []
     prompt_text: str | None = None
@@ -229,6 +238,8 @@ def _run_config(argv: list[str]) -> int:
             env_file = argv[index]
         elif arg == "--dry-run":
             dry_run = True
+        elif arg == "--print-config":
+            print_config = True
         elif arg.startswith("--prompt=") or arg.startswith("--run="):
             flag, value = arg.split("=", 1)
             claim_prompt(flag == "--prompt", value)
@@ -266,6 +277,26 @@ def _run_config(argv: list[str]) -> int:
         # modelRef expansion (opt-in; a no-op without the keys) — after include/extends
         # merging, before the launch builds, so --dry-run shows the effective result.
         config = expand_model_refs(merged.config)
+        # `agedum-provider/v2` intent expansion — gated by the ROOT document's declared
+        # schema (JSON is v1 semantics forever), after modelRef filing so derived
+        # entries merge under what modelRef filed. The `modelsCatalog` pointer is read
+        # from the pre-strip merged dict because expand_model_refs consumes it.
+        config = expand_carrier_refs(
+            config,
+            root_schema=merged.schema,
+            catalog_ref=merged.config.get("modelsCatalog"),
+        )
+        if print_config:
+            # The parity/debug view: the effective config as YAML, nothing else —
+            # no env resolution, no launch. Builder serialization conventions
+            # (insertion order, block style) so the output round-trips.
+            print(
+                yaml.safe_dump(
+                    config, sort_keys=False, default_flow_style=False, allow_unicode=True
+                ),
+                end="",
+            )
+            return 0
         dotenv = parse_env_file(env_path) if env_path.is_file() else {}
         base_env = {**os.environ, **dotenv}
         # The failover proxy must be live before the opencode config document is built

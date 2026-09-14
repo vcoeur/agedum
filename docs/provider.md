@@ -6,11 +6,12 @@ description: Launch a harness from a provider config (JSON or YAML) — agedum r
 # Provider mode
 
 ```text
-agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [harness args...]
+agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [--print-config] [harness args...]
 ```
 
 Provider mode is the **normal way to launch** an agent. agedum reads a **provider config**
-(JSON, or YAML declaring `schema: agedum-provider/v1`), resolves the provider's secrets from a
+(JSON, or YAML declaring `schema: agedum-provider/v1` or `/v2`), resolves the provider's
+secrets from a
 `.env`, sets the provider/model/auth environment, and launches the harness named in the config
 — all in one process, inside the same virtual-file context [wrapper mode](wrapper.md) uses.
 There is no generated launcher script: the config is read at run time.
@@ -20,6 +21,7 @@ agedum claude-deepseek-auto                   # resolve the named provider, laun
 agedum claude-deepseek-auto -p "review this"  # extra args go to the harness
 agedum ./providers/my-claude.json             # a path instead of a name
 agedum claude-deepseek-auto --dry-run         # print the resolved env + argv, don't launch
+agedum claude-deepseek-auto --print-config    # print the effective config as YAML, exit
 ```
 
 This page covers the mechanism shared by every provider: how the config and env resolve,
@@ -57,7 +59,8 @@ path (e.g. `claude/deepseek`). A config's **identity and label are its path** �
 `name` field.
 
 Any token after the provider that isn't an agedum flag is passed to the harness verbatim
-(`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env` and `--dry-run` are
+(`agedum claude-deepseek-auto -p "hi"` runs `claude -p "hi"`). `--env`, `--dry-run`, and
+`--print-config` are
 agedum's own flags and may appear **before or after** the provider; to forward a literal
 `--dry-run`/`--env` to the harness, put it after a `--`
 (`agedum claude-deepseek-auto -- --dry-run`).
@@ -128,6 +131,9 @@ config:
   files, and JSON stays a permanent second input format.
 - JSON configs need no `schema` key and load exactly as they always have — the version key is
   a YAML-only requirement.
+- A YAML config may also declare **`schema: agedum-provider/v2`**, the
+  [effort-carrier expansion](#expansion) opt-in. JSON documents carry v1 semantics
+  forever: v2 is YAML-only.
 
 ### The YAML boolean trap { #yaml-boolean-trap }
 
@@ -299,6 +305,143 @@ Rules:
   `on`/`off`/`yes`/`no` yourself.
 - **opencode first** — claude and codex need no expansion today; a `modelRef` on their
   configs fails loudly rather than being ignored.
+- **`carrierMeta`** — the catalogue may carry an optional top-level facts section read by
+  [v2 expansion](#expansion); `modelRef` filing never reads it, so a catalogue with
+  `carrierMeta` files byte-identically on every engine ≥ 0.60 (older engines ignore the
+  section entirely — the schema stays `agedum-models/v1`).
+
+## Expansion — `agedum-provider/v2` { #expansion }
+
+`schema: agedum-provider/v2` is the **effort-carrier expansion opt-in**. A v2 document is
+byte-shaped exactly like a v1 document — same envelope, same authored policy blocks
+(prompts, permissions, `providerDef`, `requiredEnv` all stay authored verbatim) — with
+three deltas:
+
+1. `schema: agedum-provider/v2` (the opt-in itself);
+2. agent entries and `config.model` may declare **`model: <catalogue-key>@<effort>`** refs;
+3. an optional top-level **`expansionModels:`** list of the same refs declares universe
+   members with no agent entry (failover-only models and efforts). It is consumed like
+   `modelsCatalog` — stripped before the launch.
+
+The engine derives everything carrier-specific; the author writes no `variant`,
+no `options.reasoningEffort`, no alias plumbing:
+
+```yaml
+schema: agedum-provider/v2
+harness: opencode
+config:
+  model: ds-flash@high                # an @-ref — translated by the same rule as agents
+  opencodeConfig:
+    agent:
+      ds-flash-high:
+        mode: subagent
+        model: ds-flash@high          # intent: derived options.reasoningEffort: high
+      ds-flash-low:
+        mode: subagent
+        model: ds-flash@low
+  providerDef:                        # authored plumbing — never invented by the engine
+  - id: ds
+    npm: "@ai-sdk/openai-compatible"
+    baseUrl: https://api.deepseek.com
+    apiKeyEnv: DEEPSEEK_API_KEY
+expansionModels: [k3@low]             # universe member with no agent entry
+```
+
+### When expansion runs
+
+- The **root document's** declared schema gates it: a v1 base under a v2 root expands, a
+  v2 base under a v1 root does not (per-file checks are unchanged — any file in an
+  `extends`/`include` chain may declare either version).
+- It runs after [`modelRef`](#model-catalogue) filing, before the launch builds — so
+  `--dry-run` and [`--print-config`](#print-config) show the effective result. Derived
+  catalog entries merge **under** what `modelRef` filed or the author wrote inline
+  (authored wins on conflict, the same rule `modelRef` applies).
+- JSON documents are v1 semantics forever: v2 is **YAML-only**.
+- **A v1 document carrying intent is a named load error.** An opencode `config.model` or
+  agent `model` string containing `@` — or a top-level `expansionModels` — in a v1
+  document fails the launch with *"this config looks like expansion intent …; declare
+  `schema: agedum-provider/v2`"*, instead of launching a garbage model ref that fails far
+  from the cause. No success path changes: intent slots only.
+- **Non-opencode harnesses**: a v2 config with intent markers on any harness other than
+  opencode is refused (the `modelRef` opencode-first rule). A v2 config with **no**
+  markers (`@`-refs and `expansionModels` absent) is a no-op — declaring v2 alone is not
+  intent.
+- `failover` blocks pass through untouched (a later phase authors failover as refs).
+
+### `carrierMeta` — the catalogue's facts section
+
+Expansion resolves refs against the [model catalogue](#model-catalogue) extended with an
+optional top-level **`carrierMeta`** section — per-model facts, separate from the verbatim
+catalog fragments:
+
+```yaml
+# providers/models.yaml (continued)
+carrierMeta:
+  ds-flash:
+    provider: ds            # provider id catalog entries file under
+    family: deepseek        # selects the effort carrier
+    efforts: [high, low]    # what the model accepts
+    display: DS Flash       # display-name fact (may differ from the fragment's name)
+  k3:
+    provider: kimi-coding
+    family: kimi
+    efforts: [high, low]
+    display: Kimi K3
+    aliases: {high: k3, low: k3-low}   # model-alias families only
+    alias_model_id: k3                 # required iff `aliases`
+```
+
+Entries are validated whenever the catalogue loads (named `ModelCatalogSchemaError`s):
+`provider`/`family`/`display` non-empty strings, `efforts` a non-empty list inside the
+effort alphabet (`high`, `low`), `aliases` a mapping of alphabet efforts to non-empty
+strings, `alias_model_id` required iff `aliases` is present. Unknown keys inside an entry
+are ignored — future facts land here without a catalogue change. `modelRef` filing never
+reads the section, so the `models` map is byte-identical on every engine ≥ 0.60 (older
+engines ignore `carrierMeta` entirely).
+
+### Per-carrier semantics
+
+The **universe** is every `@`-ref in `config.model` and the `opencodeConfig.agent` model
+fields, plus `expansionModels`. Providers file their catalog entries in
+**first-appearance order** of their models' refs (agent entry order, then
+`expansionModels`) — no order constant lives in the engine. `config.model` `@`-refs are
+translated by the same ref function (authoring sugar); plain `provider/model` strings
+pass through untouched.
+
+| Family | `model: key@effort` derives | Catalog entry (filed under `provider.<provider>.models`) |
+|---|---|---|
+| deepseek, glm | `model: provider/key` + `options.reasoningEffort: effort` (merged into an authored `options` map) | the fragment, verbatim |
+| gpt | `model: provider/key` + `variant: effort` | the fragment + `variants:` disabling every OpenCode variant the config does **not** declare (vocabulary order; declaring `sol@high` and `sol@low` anywhere in the config keeps `low` enabled) |
+| kimi | `model: provider/<aliases[effort]>` — the agent entry carries **no** carrier fields | one alias-keyed entry per declared effort (canonical `high`-first order), each `options.thinking: {type: enabled, effort}`; the `low` entry is rebuilt as `{id: alias_model_id, name: "<display> (low thinking)", …}` |
+
+### Errors are named
+
+A ref that cannot resolve is an `ExpansionError` naming where it sits: unknown catalogue
+key; effort outside the alphabet (`high`/`low`); effort outside the model's `efforts`;
+a referenced model with no `carrierMeta` entry; a family with no effort carrier; a
+model-alias model without `aliases`/`alias_model_id`; a ref effort missing from
+`aliases`; an agent entry that *authors* a carrier field (`variant` or
+`options.reasoningEffort`) on a model whose ref also carries `@` (the engine refuses to
+guess); `@`-refs on a non-opencode harness. One authoring trap gets its own message: a
+**bare catalogue key** in `config.model` (`model: ds-flash` — no `@`, no `/`) is not a
+ref and is not silently passed through; declare the effort or write the plain
+`provider/model` form. `expansionModels` must be a list of `key@effort` strings.
+
+## `--print-config` { #print-config }
+
+Prints the **effective merged+expanded config** as YAML — `include`/`extends` resolved,
+`modelRef` filed, v2 intent expanded — and exits 0. No env resolution, no
+`requiredEnv` validation, no launch; the config document is the whole output, so the flag
+works without an env file:
+
+```bash
+agedum oxa --print-config            # flag before or after the provider, like --dry-run
+```
+
+This is the debug/parity view of exactly what a launch would see (`--dry-run` shows the
+same effective config inside the full launch view). Note `--print-config` prints the
+*config*; env-var references (`apiKeyEnv`, `requiredEnv`, `${VAR}` placeholders) appear
+as authored, never resolved.
 
 ## MCP servers — `config.mcpServers` { #mcp }
 

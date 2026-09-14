@@ -37,9 +37,11 @@ reference: [Provider mode](provider.md).
 | `agedum <provider> --prompt "<text>"` | Seed the harness with an initial prompt, then stay interactive. |
 | `agedum <provider> --run "<text>"` | Run the prompt non-interactively, then exit (no interactive UI). |
 | `agedum <provider> --dry-run` | Print the resolved env (secrets masked), the injected virtual files, and the argv; don't launch. |
+| `agedum <provider> --print-config` | Print the effective merged+expanded config as YAML and exit 0 — no launch, no env resolution. |
 
 `--env` and `--dry-run` are agedum's own flags and are recognised **before or after** the
-provider. Any other token after the provider is passed to the harness verbatim; reach for
+provider (so is `--print-config`). Any other token after the provider is passed to the
+harness verbatim; reach for
 a `--` to forward a literal `--dry-run`/`--env` to the harness (`agedum <provider> -- --dry-run`).
 
 ```bash
