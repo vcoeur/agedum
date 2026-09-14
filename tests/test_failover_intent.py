@@ -524,3 +524,98 @@ def test_failover_derivation_is_deterministic(tmp_path):
     assert list(first["failover"]["chains"]) == list(second["failover"]["chains"])
     assert list(first["failover"]["vision"]) == list(second["failover"]["vision"])
     assert list(first["failover"]["rungOptions"]) == list(second["failover"]["rungOptions"])
+
+
+# --- sequencing, vision walk, and presence gates (fresh review round) ---
+
+
+def test_unresolvable_ref_in_a_dropped_chain_still_errors(tmp_path):
+    # Step-1 sequencing: every intent ref resolves loud BEFORE any filtering.
+    # The `k3@low` chain's source is outside the roster, so the chain would
+    # drop — but its unknown rung must still be a named error (resolution
+    # errors are authoring errors, never filter-dependent).
+    _write_catalogue(tmp_path)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent=_intent({"sol@high": ["glm-x@high"], "k3@low": ["nosuchmodel@high"]}),
+    )
+    with pytest.raises(ExpansionError, match="'nosuchmodel' is not in the model catalogue"):
+        _expand(config, tmp_path)
+
+
+def test_non_bool_vision_fact_is_a_named_error(tmp_path):
+    # A `vision` fact that is not a boolean is the same un-derivable case as a
+    # missing one (launch-time `failover_spec` demands bools) — one named
+    # error class covers both.
+    un_bool = FAILOVER_CATALOGUE.replace(
+        "    display: GLM X\n    vision: true\n", "    display: GLM X\n    vision: 'yes'\n"
+    )
+    _write_catalogue(tmp_path, un_bool)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent=_intent({"sol@high": ["glm-x@high"]}),
+    )
+    with pytest.raises(ExpansionError, match="model 'glm-x'.*no `vision` fact"):
+        _expand(config, tmp_path)
+
+
+def test_vision_walk_is_provider_major_not_plain_first_appearance(tmp_path):
+    # The vision walk groups by provider (providers in first-appearance order,
+    # models in first-appearance order within): two models of one provider
+    # whose first appearances are separated by another provider land adjacent.
+    # A plain first-appearance walk would interleave glm-p between them.
+    catalogue = """\
+schema: agedum-models/v1
+models:
+  nova:
+    name: GPT Nova
+    attachment: true
+  glm-x:
+    name: GLM X
+    limit: {context: 200000, output: 32768}
+  sol:
+    name: GPT-5.6 Sol
+    attachment: true
+carrierMeta:
+  nova:
+    provider: openai
+    family: gpt
+    efforts: [high, low]
+    display: GPT Nova
+    vision: true
+  glm-x:
+    provider: glm-p
+    family: glm
+    efforts: [high, low]
+    display: GLM X
+    vision: true
+  sol:
+    provider: openai
+    family: gpt
+    efforts: [high, low]
+    display: GPT-5.6 Sol
+    vision: true
+"""
+    _write_catalogue(tmp_path, catalogue)
+    config = _config(
+        {"m": {"mode": "primary", "model": "glm-x@high"}},
+        model="nova@high",
+        failover_intent=_intent({"glm-x@high": ["sol@low"]}),
+    )
+    failover = _expand(config, tmp_path)["failover"]
+    assert list(failover["vision"]) == ["openai/nova", "openai/sol", "glm-p/glm-x"]
+
+
+def test_intent_without_detect_or_max_walk_emits_the_block_without_them(tmp_path):
+    # "Copied verbatim" includes presence: a degraded intent emits a degraded
+    # block — no expansion-time defaults, no expansion-time error; launch-time
+    # `failover_spec` polices the emitted block.
+    _write_catalogue(tmp_path)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent={"chains": {"sol@high": ["glm-x@high"]}},
+    )
+    failover = _expand(config, tmp_path)["failover"]
+    assert "detect" not in failover
+    assert "maxWalk" not in failover
+    assert failover["chains"] == {"openai/sol@high": ["glm-p/glm-x@high"]}
