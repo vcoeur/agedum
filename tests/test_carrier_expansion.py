@@ -188,6 +188,22 @@ def test_v2_strips_a_present_expansion_models_key():
     assert "expansionModels" not in expanded
 
 
+def test_malformed_expansion_models_is_a_named_error():
+    # The universe key is validated even when it is the only marker: a wrong
+    # shape is intent declared wrongly, not a silent no-op (both errors fire
+    # during universe collection, before any catalogue is read).
+    with pytest.raises(ExpansionError, match="`expansionModels` must be a list"):
+        expand_carrier_refs(
+            {"harness": "opencode", "expansionModels": "ds-flash@high"},
+            root_schema=PROVIDER_SCHEMA_VERSION_2,
+        )
+    with pytest.raises(ExpansionError, match="not a `<catalogue key>@<effort>` ref"):
+        expand_carrier_refs(
+            {"harness": "opencode", "expansionModels": ["ds-flash"]},
+            root_schema=PROVIDER_SCHEMA_VERSION_2,
+        )
+
+
 # --- carrierMeta: the catalogue's expansion-facts section ---
 # One synthetic model per effort-carrier family: deepseek/glm carry
 # options.reasoningEffort, gpt carries variant, kimi rides model aliases.
