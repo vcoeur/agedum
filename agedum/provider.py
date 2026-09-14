@@ -1245,7 +1245,8 @@ def expand_carrier_refs(
 
     A v2 root expands (see the ``_expand_v2`` section below); with **no intent
     markers at all** expansion is a no-op that only strips the (absent or empty)
-    `expansionModels` key — declaring v2 alone is not intent, which is what keeps
+    `expansionModels` key and any (absent) `failoverIntent` marker key —
+    declaring v2 alone is not intent, which is what keeps
     a marker-free v2 document legal on a non-opencode harness.
     ``catalog_ref`` is the merged config's `modelsCatalog` pointer read before
     :func:`expand_model_refs` consumed it; ``base_dir`` anchors refs like

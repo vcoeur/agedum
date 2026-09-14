@@ -469,7 +469,8 @@ block a builder precomputes, then strips the intent (consumed, like `expansionMo
 - **`vision`** — derived from the catalogue's `carrierMeta.vision` facts: one entry per
   universe model, walked provider-major in first-appearance order; model-alias models
   additionally get one entry per declared effort at `provider/<aliases[effort]>`. A
-  universe model whose `carrierMeta` lacks the fact is a named error — but only when a
+  universe model whose `carrierMeta` lacks the fact — or carries a non-boolean one —
+  is a named error — but only when a
   block is actually derived (an omitted block demands no vision facts).
 
 `detect`/`maxWalk` are authored data copied verbatim, never interpreted or validated at
