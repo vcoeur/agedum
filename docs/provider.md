@@ -153,6 +153,24 @@ booleans — `abstract: true`, `foldSystemMessages: true`, kimi's `thinking`, co
 `codexConfig` flags — are untouched. `${VAR}` placeholders are never interpolated by the YAML
 reader; they survive verbatim exactly as in JSON.
 
+## Config features by engine version { #engine-versions }
+
+Each row is an **engine capability floor** — the oldest agedum that loads a config using
+the feature; every later engine keeps it:
+
+| Feature | Minimum engine |
+|---|---|
+| [YAML configs](#yaml) load + `--providers` listing | 0.58 |
+| [`include` composition](#include) | 0.59 |
+| [`modelRef` + the `models.yaml` catalogue](#model-catalogue) | 0.60 |
+| [`carrierMeta`](#model-catalogue) tolerated in a catalogue (read only by v2 expansion) | 0.60 |
+| [`agedum-provider/v2` intent documents](#expansion) (carrier expansion) | 0.61 |
+| [`failoverIntent`](#failover-intent) | 0.62 |
+
+One silent-downgrade trap: a **0.61 engine loads a failover-bearing v2 config and
+silently runs it without failover** — `failoverIntent` postdates 0.61, and the engine
+ignores an unknown top-level key rather than refusing it.
+
 ## Extending configs — `extends` { #extends }
 
 A config can **`extends`** one or more **base** configs and inherit their settings, so shared
@@ -212,6 +230,39 @@ fragment's on conflict (inheritance overrides composition); then the file's own 
 { "include": "base/mcp-nodum.json", "harness": "claude",
   "config": { "settings": { "model": "opus" } } }
 ```
+
+Composition also carries [v2 intent](#expansion), and YAML declares the fragment
+abstract directly. This is the production pattern — a shared pool fragment included by
+every launcher in a harness family:
+
+```yaml
+# providers/oc/_pool.yaml — the shared fragment
+schema: agedum-provider/v2      # every YAML file declares a version — fragments too
+abstract: true                  # stays out of --providers, refuses a direct launch
+harness: opencode
+config:
+  opencodeConfig:
+    compaction:
+      auto: true
+
+# providers/oc/ds-flash.yaml — one launcher in the family
+schema: agedum-provider/v2      # the entry document's schema is the one that gates
+extends: base/conception-sandbox.yaml
+include: oc/_pool.yaml
+requiredEnv: [DEEPSEEK_API_KEY]
+config:
+  model: ds-flash@high          # expansion intent rides through composition unchanged
+  providerDef:
+  - id: ds
+    npm: "@ai-sdk/openai-compatible"
+    baseUrl: https://api.deepseek.com
+    apiKeyEnv: DEEPSEEK_API_KEY
+```
+
+Version gating reads the **entry document's** declared `schema`: include targets are
+resolved and merged first, the entry file's own `schema` then selects v1/v2 handling,
+and any file in an `include`/`extends` chain may declare either version — a fragment's
+or base's schema never gates the launcher ([when expansion runs](#expansion)).
 
 Rules:
 
@@ -370,7 +421,7 @@ expansionModels: [k3@low]             # universe member with no agent entry
   opencode is refused (the `modelRef` opencode-first rule). A v2 config with **no**
   markers (`@`-refs, `expansionModels`, and `failoverIntent` all absent) is a no-op —
   declaring v2 alone is not intent.
-- A precomputed **`failover`** block passes through untouched; a v2 document carrying
+- An authored **`failover`** block passes through untouched; a v2 document carrying
   both it and `failoverIntent` is a named expansion error (two declarations of the same
   block — the engine refuses to guess which wins). See [Failover](#failover-intent).
 
@@ -426,8 +477,8 @@ pass through untouched.
 
 ### Failover — `failoverIntent` { #failover-intent }
 
-A v2 config may author its failover as intent instead of a precomputed block — the same
-shape the manifest template uses, with refs in the `key@effort` grammar:
+A v2 config may author its failover as **intent** instead of writing the `failover`
+block directly — chain sources and rungs as explicit refs in the `key@effort` grammar:
 
 ```yaml
 schema: agedum-provider/v2
@@ -442,8 +493,9 @@ failoverIntent:
     terra@low: [glm-flash@high]
 ```
 
-Expansion derives — from the config's **own agents** — the same top-level `failover`
-block a builder precomputes, then strips the intent (consumed, like `expansionModels`):
+Expansion derives the effective top-level `failover` block from the config's **own
+agents and intent** at load time — nothing precomputes it — then strips the intent
+(consumed, like `expansionModels`):
 
 - **Roster** — `mode: primary` agents are the mains, `mode: subagent` the workers, any
   other or absent mode is in neither; an agent whose `model` is a plain `provider/model`
@@ -463,9 +515,10 @@ block a builder precomputes, then strips the intent (consumed, like `expansionMo
 - **Translation** — rung and source refs translate per carrier: `provider/key@effort`
   (variant / reasoningEffort families), the bare `provider/<aliases[effort]>` (kimi).
   Two surviving sources translating to the same runtime ref would be a named error.
-- **`rungOptions`** — one `{"reasoning_effort": effort}` entry (snake_case, exactly as
-  the builder emits) per used variant/reasoningEffort rung, canonical effort order.
-  Model-alias rungs never appear.
+- **`rungOptions`** — one `{"reasoning_effort": effort}` entry (snake_case — agent
+  entries' `options.reasoningEffort` stays camelCase; the two conventions coexist in
+  one block by design) per used variant/reasoningEffort rung, in canonical effort
+  order (`high` first). Model-alias rungs never appear.
 - **`vision`** — derived from the catalogue's `carrierMeta.vision` facts: one entry per
   universe model, walked provider-major in first-appearance order; model-alias models
   additionally get one entry per declared effort at `provider/<aliases[effort]>`. A
@@ -474,9 +527,9 @@ block a builder precomputes, then strips the intent (consumed, like `expansionMo
   block is actually derived (an omitted block demands no vision facts).
 
 `detect`/`maxWalk` are authored data copied verbatim, never interpreted or validated at
-expansion — launch-time validation polices the emitted block for derived and precomputed
+expansion — launch-time validation polices the emitted block for derived and authored
 blocks alike. The engine filters and omits; it never enforces that a config's intent
-names its roster (authoring-side roster invariants stay builder-side).
+names its roster — that invariant stays authoring-side.
 
 The key **collision rules**, per root schema:
 
@@ -503,7 +556,7 @@ ref and is not silently passed through; declare the effort or write the plain
 `provider/model` form. `expansionModels` must be a list of `key@effort` strings.
 `failoverIntent` adds its own named errors: a malformed block or chains shape; a
 universe model whose `carrierMeta` has no `vision` fact (when a block is derived); a v2
-document declaring both `failoverIntent` and a precomputed `failover` block.
+document declaring both `failoverIntent` and an authored `failover` block.
 
 ## `--print-config` { #print-config }
 
