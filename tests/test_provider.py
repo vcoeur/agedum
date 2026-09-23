@@ -26,6 +26,7 @@ from agedum.provider import (
     providers_dir,
     required_env,
     resolve_config_path,
+    resolve_prompt_templates,
     with_prompt,
 )
 
@@ -1302,6 +1303,142 @@ def _opencode_agents(config):
     """Build an opencode launch and return its config doc's `agent` block."""
     launch = build_launch({"harness": "opencode", "config": config}, base_env={})
     return json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])["agent"]
+
+
+def test_prompt_template_include_extends_overrides_and_append(tmp_path):
+    _write_config(
+        tmp_path,
+        "base/worker.json",
+        {
+            "abstract": True,
+            "promptTemplates": {"worker": "{ID}: {POOL} / {ID} {{literal}}"},
+            "config": {"promptVars": {"POOL": "shared", "ID": "default"}},
+        },
+    )
+    _write_config(
+        tmp_path,
+        "base/agents.json",
+        {
+            "abstract": True,
+            "config": {
+                "opencodeConfig": {
+                    "agent": {
+                        "luna": {
+                            "mode": "subagent",
+                            "model": "p/m",
+                            "description": "worker",
+                            "permission": {"bash": "deny"},
+                            "promptTemplate": "worker",
+                            "promptVars": {"ID": "Luna"},
+                            "agentAppend": "Next step.",
+                        }
+                    }
+                }
+            },
+        },
+    )
+    path = _write_config(
+        tmp_path,
+        "launcher.json",
+        {
+            "include": "base/worker",
+            "extends": "base/agents",
+            "harness": "opencode",
+            "config": {"promptVars": {"POOL": "launcher"}},
+        },
+    )
+    merged = load_merged_config(path, tmp_path)
+    resolved = resolve_prompt_templates(merged)
+    assert resolved["config"]["opencodeConfig"]["agent"]["luna"] == {
+        "mode": "subagent",
+        "model": "p/m",
+        "description": "worker",
+        "permission": {"bash": "deny"},
+        "agentAppend": "Next step.",
+        "prompt": "Luna: launcher / Luna {literal}",
+    }
+    assert "promptTemplates" not in resolved
+    assert "promptVars" not in resolved["config"]
+    assert merged["config"]["opencodeConfig"]["agent"]["luna"]["promptTemplate"] == "worker"
+    assert resolve_prompt_templates(resolved) is resolved
+    launched = json.loads(build_launch(merged, {}).env["OPENCODE_CONFIG_CONTENT"])
+    assert launched["agent"]["luna"]["prompt"] == "Luna: launcher / Luna {literal}\n\nNext step."
+    assert "agentAppend" not in launched["agent"]["luna"]
+
+
+@pytest.mark.parametrize(
+    ("template", "defaults", "overrides", "reference", "other", "error"),
+    [
+        ("{MISSING}", {}, {}, "worker", {}, "unresolved.*MISSING"),
+        ("{ID}", {"ID": 4}, {}, "worker", {}, "promptVars"),
+        ("{ID}", {"ID": "ok"}, {"ID": False}, "worker", {}, "promptVars"),
+        ("{ID}", {}, {}, "absent", {}, "unknown promptTemplate"),
+        ("{ID}", {}, {}, 3, {}, "unknown promptTemplate"),
+        ("{ID}", {"ID": "ok"}, {}, "worker", {"prompt": "literal"}, "ambiguous"),
+        ("{ID.x}", {}, {}, "worker", {}, "malformed"),
+        ("{ID[0]}", {}, {}, "worker", {}, "malformed"),
+        ("{ID!r}", {}, {}, "worker", {}, "malformed"),
+        ("{ID:}", {"ID": "ok"}, {}, "worker", {}, "malformed"),
+        ("{{ID:}} {ID:} {ID}", {"ID": "ok"}, {}, "worker", {}, "malformed"),
+        ("{{{ID:}}} / {ID}", {"ID": "ok"}, {}, "worker", {}, "malformed"),
+        ("{ID:>4}", {}, {}, "worker", {}, "malformed"),
+        ("{}", {}, {}, "worker", {}, "malformed"),
+        ("{ID", {}, {}, "worker", {}, "malformed"),
+    ],
+)
+def test_prompt_template_rejects_invalid_inputs(
+    template, defaults, overrides, reference, other, error
+):
+    config = {
+        "harness": "opencode",
+        "promptTemplates": {"worker": template},
+        "config": {
+            "promptVars": defaults,
+            "opencodeConfig": {
+                "agent": {"luna": {"promptTemplate": reference, "promptVars": overrides, **other}}
+            },
+        },
+    }
+    with pytest.raises(ProviderError, match=error):
+        resolve_prompt_templates(config)
+
+
+def test_prompt_template_substitutes_once_and_leaves_plain_agents_unchanged():
+    config = {
+        "harness": "opencode",
+        "promptTemplates": {"worker": "{ID} / {ID}"},
+        "config": {
+            "promptVars": {"ID": "{UNTOUCHED}"},
+            "opencodeConfig": {
+                "agent": {"luna": {"promptTemplate": "worker"}, "plain": {"prompt": "ordinary"}}
+            },
+        },
+    }
+    result = resolve_prompt_templates(config)
+    agents = result["config"]["opencodeConfig"]["agent"]
+    assert agents["luna"] == {"prompt": "{UNTOUCHED} / {UNTOUCHED}"}
+    assert agents["plain"] == {"prompt": "ordinary"}
+    assert "promptTemplates" in config
+
+
+def test_prompt_template_escaped_format_spelling_stays_literal_among_repeated_fields():
+    config = {
+        "harness": "opencode",
+        "promptTemplates": {"worker": "{{ID:}} {ID} {{{ID}}} {ID} {{{{ID:}}}}"},
+        "config": {
+            "promptVars": {"ID": "Luna"},
+            "opencodeConfig": {"agent": {"luna": {"promptTemplate": "worker"}}},
+        },
+    }
+    resolved = resolve_prompt_templates(config)
+    assert resolved["config"]["opencodeConfig"]["agent"]["luna"]["prompt"] == (
+        "{ID:} Luna {Luna} Luna {{ID:}}"
+    )
+
+
+def test_prompt_template_is_opencode_only():
+    with pytest.raises(ProviderError, match="opencode"):
+        resolve_prompt_templates({"harness": "claude", "promptTemplates": {"worker": "hello"}})
 
 
 def test_opencode_agent_append_folds_into_prompt():

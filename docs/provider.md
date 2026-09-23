@@ -98,6 +98,7 @@ The config is the condash-style agent envelope:
 | `config` | The per-harness option block — see the harness page table above. |
 | `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
 | `include` | Optional — a config reference **or list** of them; shared fragments pasted into this config (composition, not inheritance). See [Including fragments](#include). |
+| `promptTemplates` | Optional OpenCode-only mapping of template names to prompt strings; included abstract fragments may supply it. See [OpenCode prompt templates](harnesses/opencode.md#prompt-templates). |
 | `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
 | `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, its own state/config dir (e.g. `~/.cline`), `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
 
@@ -561,7 +562,7 @@ document declaring both `failoverIntent` and an authored `failover` block.
 ## `--print-config` { #print-config }
 
 Prints the **effective merged+expanded config** as YAML — `include`/`extends` resolved,
-`modelRef` filed, v2 intent expanded — and exits 0. No env resolution, no
+`modelRef` filed, v2 intent expanded, OpenCode prompt templates rendered — and exits 0. No env resolution, no
 `requiredEnv` validation, no launch; the config document is the whole output, so the flag
 works without an env file:
 
@@ -573,6 +574,9 @@ This is the debug/parity view of exactly what a launch would see (`--dry-run` sh
 same effective config inside the full launch view). Note `--print-config` prints the
 *config*; env-var references (`apiKeyEnv`, `requiredEnv`, `${VAR}` placeholders) appear
 as authored, never resolved.
+For OpenCode agents, it prints the rendered **base** `prompt` and a separate
+`agentAppend` if present; the launch builder alone folds that append into
+`OPENCODE_CONFIG_CONTENT` and strips its synthetic key.
 
 ## MCP servers — `config.mcpServers` { #mcp }
 

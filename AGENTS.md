@@ -44,7 +44,13 @@ match); top-level skills keep their declared name.
   effort knob; workers inherit their base model's chain) — so the session lands on a
   fallback instead of dying, and
   opencode never enters its same-model retry loop. Absent key → no proxy, byte-identical
-  config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
+   config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
+   **Prompt templates**: an abstract included YAML fragment may define top-level
+   `promptTemplates` names→strings; the launcher supplies `config.promptVars` defaults
+   and an agent opts in with `promptTemplate` plus optional agent `promptVars` overrides.
+   Resolve after merge/model expansion for print and launch; strip synthetic keys.
+   Print retains `agentAppend` separately; launch folds it into the final prompt.
+   Details: `docs/harnesses/opencode.md#prompt-templates`.
 - **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
   is read natively at `./AGENTS.md` (Cline reads it as a cross-tool rules file), so agedum
   leaves it in place. Global `AGENTS.md` → the cross-tool path `~/.agents/AGENTS.md` (not

@@ -67,6 +67,7 @@ from agedum.provider import (
     parse_env_file,
     providers_dir,
     resolve_config_path,
+    resolve_prompt_templates,
     with_prompt,
 )
 from agedum.sources import Source, load_global_source, load_source
@@ -286,6 +287,7 @@ def _run_config(argv: list[str]) -> int:
             root_schema=merged.schema,
             catalog_ref=merged.config.get("modelsCatalog"),
         )
+        config = resolve_prompt_templates(config)
         if print_config:
             # The parity/debug view: the effective config as YAML, nothing else —
             # no env resolution, no launch. Builder serialization conventions
