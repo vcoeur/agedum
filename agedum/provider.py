@@ -38,6 +38,7 @@ import functools
 import json
 import os
 import re
+import string
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,6 +119,133 @@ class ExpansionError(ProviderError):
 
 class YamlBooleanTrapError(ProviderError):
     """A YAML config has an unquoted on/off/yes/no where the envelope wants a string."""
+
+
+_PROMPT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def resolve_prompt_templates(config: dict) -> dict:
+    """Render explicitly referenced OpenCode agent templates in an effective config.
+
+    Called after include/extends and model expansion, before print or launch. Leaves
+    ordinary configs untouched and never changes the caller's nested dictionaries.
+
+    Args:
+        config: Merged provider envelope with optional prompt template declarations.
+    Returns:
+        An envelope with synthetic template fields consumed and base prompts rendered.
+    """
+    block = config.get("config")
+    options = block.get("opencodeConfig") if isinstance(block, dict) else None
+    agents = options.get("agent") if isinstance(options, dict) else None
+    has_agent_templates = isinstance(agents, dict) and any(
+        isinstance(entry, dict) and ("promptTemplate" in entry or "promptVars" in entry)
+        for entry in agents.values()
+    )
+    if (
+        not has_agent_templates
+        and "promptTemplates" not in config
+        and not (isinstance(block, dict) and "promptVars" in block)
+    ):
+        return config
+    if config.get("harness") != "opencode":
+        raise ProviderError("prompt templates and promptVars require the opencode harness")
+
+    templates = config.get("promptTemplates", {})
+    defaults = block.get("promptVars", {}) if isinstance(block, dict) else {}
+    if not isinstance(templates, dict) or not all(
+        isinstance(name, str) and isinstance(text, str) for name, text in templates.items()
+    ):
+        raise ProviderError("promptTemplates must map names to strings")
+    _validate_prompt_vars(defaults, "config.promptVars")
+    if isinstance(agents, dict):
+        resolved_agents = {}
+        for name, entry in agents.items():
+            if not isinstance(entry, dict):
+                resolved_agents[name] = entry
+                continue
+            if "promptVars" in entry and "promptTemplate" not in entry:
+                raise ProviderError(f"agent {name!r}: promptVars requires promptTemplate")
+            if "promptTemplate" not in entry:
+                resolved_agents[name] = entry
+                continue
+            template_name = entry["promptTemplate"]
+            if (
+                not isinstance(template_name, str)
+                or not template_name
+                or template_name not in templates
+            ):
+                raise ProviderError(f"agent {name!r}: unknown promptTemplate {template_name!r}")
+            if "prompt" in entry:
+                raise ProviderError(f"agent {name!r}: prompt and promptTemplate are ambiguous")
+            overrides = entry.get("promptVars", {})
+            _validate_prompt_vars(overrides, f"agent {name!r} promptVars")
+            variables = {**defaults, **overrides}
+            resolved_agents[name] = {
+                **{
+                    key: value
+                    for key, value in entry.items()
+                    if key not in ("promptTemplate", "promptVars")
+                },
+                "prompt": _render_prompt_template(templates[template_name], variables, name),
+            }
+    result = {key: value for key, value in config.items() if key != "promptTemplates"}
+    if isinstance(block, dict):
+        result_block = {key: value for key, value in block.items() if key != "promptVars"}
+        if isinstance(options, dict) and isinstance(agents, dict):
+            result_block["opencodeConfig"] = {**options, "agent": resolved_agents}
+        result["config"] = result_block
+    return result
+
+
+def _validate_prompt_vars(variables: object, where: str) -> None:
+    """Require explicit named string substitutions, never inferred or coerced."""
+    if not isinstance(variables, dict) or any(
+        not isinstance(name, str)
+        or not _PROMPT_VARIABLE_NAME.fullmatch(name)
+        or not isinstance(value, str)
+        for name, value in variables.items()
+    ):
+        raise ProviderError(f"{where} must map placeholder names to strings")
+
+
+def _render_prompt_template(template: str, variables: dict, agent_name: str) -> str:
+    """Substitute simple named braces once; reject attribute, index and format syntax."""
+    pieces = []
+    try:
+        # Formatter.parse loses the distinction between {NAME} and {NAME:}.
+        position = 0
+        while position < len(template):
+            if template[position] != "{":
+                position += 1
+                continue
+            if template.startswith("{{", position):
+                position += 2
+                continue
+            field_end = template.find("}", position + 1)
+            if field_end == -1:
+                break  # Formatter.parse reports the unmatched brace below.
+            if ":" in template[position + 1 : field_end]:
+                raise ProviderError(f"agent {agent_name!r}: malformed prompt placeholder")
+            position = field_end + 1
+        for literal, name, format_spec, conversion in string.Formatter().parse(template):
+            pieces.append(literal)
+            if name is None:
+                continue
+            if not _PROMPT_VARIABLE_NAME.fullmatch(name) or format_spec or conversion:
+                raise ProviderError(
+                    f"agent {agent_name!r}: malformed prompt placeholder {{{name}}}"
+                )
+            if name not in variables:
+                raise ProviderError(
+                    f"agent {agent_name!r}: unresolved prompt placeholder {{{name}}}"
+                )
+            pieces.append(variables[name])
+    except ValueError as error:
+        raise ProviderError(
+            f"agent {agent_name!r}: malformed prompt placeholder: {error}"
+        ) from error
+    return "".join(pieces)
 
 
 @dataclass(frozen=True)
@@ -2058,6 +2186,7 @@ def build_launch(
     running failover proxy; ``None`` — any config without a ``failover`` block — changes
     nothing (the rollback guarantee).
     """
+    config = resolve_prompt_templates(config)
     harness = config.get("harness")
     if harness not in HARNESSES:
         raise ProviderError(

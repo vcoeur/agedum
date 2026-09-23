@@ -73,6 +73,7 @@ env var; no file written):
 | `providerDef` | an explicit provider block with the key resolved from the environment — see [below](#providerdef) |
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
 | `opencodeConfig.agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
+| `promptVars` + `opencodeConfig.agent.<name>.promptTemplate` | explicit string variables and a named prompt template reference — see [below](#prompt-templates) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
 | `mcpServers` | MCP servers in the canonical cross-harness vocabulary, translated into opencode's `mcp` block — see [below](#mcp) |
 
@@ -272,6 +273,52 @@ chain, where a base's keys keep their position and a child's additions append af
 so a child override is evaluated last. Until v0.53.0 the document was serialized with
 sorted keys, which moved every `*…` guard ahead of the alphabetic allow-list and inverted
 exactly this case.
+
+### Prompt templates — shared agent text { #prompt-templates }
+
+An abstract YAML provider fragment may define a top-level `promptTemplates` mapping
+of names to string templates. An OpenCode launcher includes that fragment and provides
+`config.promptVars` string defaults; each agent explicitly opts in with
+`config.opencodeConfig.agent.<name>.promptTemplate` and may override defaults using
+its own `promptVars` mapping:
+
+```yaml
+# base/worker.yaml (included, abstract: true, schema: agedum-provider/v1)
+promptTemplates:
+  worker: 'You are {ID} in {POOL}. Use {{braces}} literally.'
+
+# launcher.yaml (schema: agedum-provider/v1, harness: opencode)
+include: base/worker.yaml
+config:
+  promptVars: {POOL: four-worker pool}
+  opencodeConfig:
+    agent:
+      luna:
+        mode: subagent
+        model: openai/example
+        description: Luna worker
+        promptTemplate: worker
+        promptVars: {ID: Luna}
+        permission: {bash: deny}
+        agentAppend: 'Report the result.'
+```
+
+After `include`/`extends` merging and model expansion, agedum substitutes only
+explicit `{NAME}` placeholders in the selected string; `{{`/`}}` escape literal
+braces. Default variables yield to per-agent variables. There is no nested
+templating, arbitrary YAML interpolation, file reference, implicit variable
+inference, or template expansion inside variable values. Missing templates,
+missing placeholders, malformed placeholders (including positional, attribute,
+index, conversion, and format syntax), non-string values, and an agent declaring
+both `prompt` and `promptTemplate` fail with the agent name. Keep permissions,
+mode, model, and description in the launcher agent entry: templates supply text
+only. Ordinary prompts and JSON providers without template fields keep their
+existing behavior.
+
+Both `--print-config` and launch use the same non-mutating resolver; neither emits
+`promptTemplates` or `promptVars`. Print shows the rendered base `prompt` and leaves
+`agentAppend` separate. The launch builder then folds that append with one blank
+line and strips it, so OpenCode receives a plain final `prompt`.
 
 ### `agentAppend` — per-agent instruction append { #agentappend }
 

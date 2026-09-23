@@ -1771,3 +1771,46 @@ def test_print_config_reports_the_v1_intent_diagnostic(monkeypatch, tmp_path, ca
         cli.app()
     assert exc.value.code == 1
     assert "looks like expansion intent" in capsys.readouterr().err
+
+
+def test_prompt_template_print_and_launch_share_base_but_append_only_at_launch(
+    monkeypatch, tmp_path, capsys
+):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "fragment.yaml").write_text(
+        "schema: agedum-provider/v1\nabstract: true\n"
+        "promptTemplates:\n  worker: 'Hello {ID} from {POOL}'\n"
+    )
+    (providers / "launcher.yaml").write_text(
+        "schema: agedum-provider/v1\ninclude: fragment.yaml\nharness: opencode\n"
+        "config:\n  promptVars: {POOL: launcher}\n  emitTranscript: false\n"
+        "  opencodeConfig:\n    agent:\n      worker:\n        mode: subagent\n"
+        "        promptTemplate: worker\n        promptVars: {ID: Luna}\n"
+        "        agentAppend: 'Do the work.'\n"
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(tmp_path / "missing-env"))
+    monkeypatch.setattr("sys.argv", ["agedum", "launcher", "--print-config"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.app()
+    assert exit_info.value.code == 0
+    printed = yaml.safe_load(capsys.readouterr().out)
+    assert "promptTemplates" not in printed
+    assert "promptVars" not in printed["config"]
+    assert printed["config"]["opencodeConfig"]["agent"]["worker"] == {
+        "mode": "subagent",
+        "prompt": "Hello Luna from launcher",
+        "agentAppend": "Do the work.",
+    }
+
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    captured = _capture_run(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "launcher"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.app()
+    assert exit_info.value.code == 0
+    assert captured["command"] == ["opencode"]
+    emitted = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])["agent"]["worker"]
+    assert emitted == {"mode": "subagent", "prompt": "Hello Luna from launcher\n\nDo the work."}
