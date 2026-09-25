@@ -74,6 +74,7 @@ env var; no file written):
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
 | `opencodeConfig.agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
 | `promptVars` + `opencodeConfig.agent.<name>.promptTemplate` | explicit string variables and a named prompt template reference — see [below](#prompt-templates) |
+| `permissionVars` + `opencodeConfig.agent.<name>.permissionTemplate` | explicit string variables and a named shared permission object — see [below](#permission-templates) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
 | `mcpServers` | MCP servers in the canonical cross-harness vocabulary, translated into opencode's `mcp` block — see [below](#mcp) |
 
@@ -319,6 +320,68 @@ Both `--print-config` and launch use the same non-mutating resolver; neither emi
 `promptTemplates` or `promptVars`. Print shows the rendered base `prompt` and leaves
 `agentAppend` separate. The launch builder then folds that append with one blank
 line and strips it, so OpenCode receives a plain final `prompt`.
+
+### Permission templates — shared tool actions { #permission-templates }
+
+An abstract included OpenCode fragment may define top-level `permissionTemplates`:
+each name maps to a permission object containing shared tool actions, **not** an agent
+object. The template must not contain `task`. Each agent opts in by name and may author
+only a literal `permission.task` rule map alongside it; agents without a local task map
+inherit OpenCode's normal task behavior. Non-templated agents retain literal permissions,
+and `opencodeConfig.permission` is untouched.
+
+```yaml
+# base/permissions.yaml (abstract included fragment)
+permissionTemplates:
+  worker:
+    read: allow
+    question: '{QUESTION}'
+    bash:
+      '*': deny
+      'git log*': allow
+      '*|*': deny
+
+# launcher.yaml (harness: opencode, includes base/permissions.yaml)
+config:
+  permissionVars: {QUESTION: deny}
+  opencodeConfig:
+    agent:
+      worker:
+        permissionTemplate: worker
+        permission:
+          task:
+            '*': deny
+            worker: allow
+      primary:
+        permissionTemplate: worker
+        permissionVars: {QUESTION: allow}
+        permission:
+          task:
+            '*': deny
+            worker: allow
+```
+
+Values in `permissionVars` are **strings only**; agent values override launcher defaults
+as whole values. In a template value, only an entire `{NAME}` scalar is replaced,
+**once**. Embedded braces (`echo {NAME}`), unmatched braces, and shell patterns are
+literal; an entire but malformed `{...}` reference errors. No keys are interpolated,
+and replacements are not parsed again. Template actions are strings or one-level ordered
+rule maps with string keys and string leaves (empty rule maps are accepted); nested maps,
+lists, non-string variables, missing variables, unknown templates, and an agent's
+`permissionVars` without `permissionTemplate` fail loudly. Unused variables are validated
+too. With a template, any literal `permission` key other than `task`, or a `task` that
+is not an ordered rule map, is rejected. The template and the literal task map never
+compete for a key. There is no inferred worker allow-list and no arbitrary permission
+merge. The resolver checks this bounded shape, not OpenCode's entire permission DSL.
+
+Resolution runs after include/extends and model expansion for both `--print-config` and
+direct launch, without mutating its input. Synthetic template and variable fields are
+removed from the effective document; the rendered permission map preserves rule order,
+including the trailing `bash` guard and the first `task` deny. **Source ownership is not
+enforced here**: include/extends deep-merges literal agent `permission.task` maps *before*
+this resolver, potentially retaining an inherited allow. A launcher fleet requiring
+source-local task lists must check its raw source and shared fragments separately; an
+effective-roster comparison alone cannot establish provenance.
 
 ### `agentAppend` — per-agent instruction append { #agentappend }
 
