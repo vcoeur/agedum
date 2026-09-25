@@ -1814,3 +1814,43 @@ def test_prompt_template_print_and_launch_share_base_but_append_only_at_launch(
     assert captured["command"] == ["opencode"]
     emitted = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])["agent"]["worker"]
     assert emitted == {"mode": "subagent", "prompt": "Hello Luna from launcher\n\nDo the work."}
+
+
+def test_permission_template_print_and_cli_launch_preserve_order(monkeypatch, tmp_path, capsys):
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "fragment.yaml").write_text(
+        "schema: agedum-provider/v1\nabstract: true\n"
+        "permissionTemplates:\n  shared:\n    question: '{QUESTION}'\n"
+        "    bash:\n      '*': deny\n      'git log*': allow\n      '*|*': deny\n"
+    )
+    (providers / "launcher.yaml").write_text(
+        "schema: agedum-provider/v1\ninclude: fragment.yaml\nharness: opencode\n"
+        "config:\n  permissionVars: {QUESTION: deny}\n  emitTranscript: false\n"
+        "  opencodeConfig:\n    agent:\n      worker:\n        permissionTemplate: shared\n"
+        "        permission:\n          task:\n            '*': deny\n            worker: allow\n"
+        "      primary:\n        permissionTemplate: shared\n"
+        "        permissionVars: {QUESTION: allow}\n"
+    )
+    monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
+    monkeypatch.setenv("AGENTS_ENV_FILE", str(tmp_path / "missing-env"))
+    monkeypatch.setattr("sys.argv", ["agedum", "launcher", "--print-config"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.app()
+    assert exit_info.value.code == 0
+    printed = yaml.safe_load(capsys.readouterr().out)
+    assert "permissionTemplates" not in printed
+    assert "permissionVars" not in printed["config"]
+    permission = printed["config"]["opencodeConfig"]["agent"]["worker"]["permission"]
+    assert list(permission["bash"]) == ["*", "git log*", "*|*"]
+    assert list(permission["task"]) == ["*", "worker"]
+
+    _hermetic_sources(monkeypatch)
+    monkeypatch.setitem(cli._COMPILERS, "opencode", lambda project, global_, dest: cli.Plan())
+    _capture_run(monkeypatch)
+    monkeypatch.setattr("sys.argv", ["agedum", "launcher"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.app()
+    assert exit_info.value.code == 0
+    runtime_agents = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])["agent"]
+    assert runtime_agents == printed["config"]["opencodeConfig"]["agent"]

@@ -122,6 +122,7 @@ class YamlBooleanTrapError(ProviderError):
 
 
 _PROMPT_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_PERMISSION_REFERENCE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}\Z")
 
 
 def resolve_prompt_templates(config: dict) -> dict:
@@ -246,6 +247,153 @@ def _render_prompt_template(template: str, variables: dict, agent_name: str) -> 
             f"agent {agent_name!r}: malformed prompt placeholder: {error}"
         ) from error
     return "".join(pieces)
+
+
+def resolve_permission_templates(config: dict) -> dict:
+    """Render OpenCode permission templates and attach only literal agent task rules.
+
+    Args:
+        config: Merged and expanded provider envelope.
+    Returns:
+        Envelope without synthetic permission fields, or the original when absent.
+    """
+    block = config.get("config")
+    options = block.get("opencodeConfig") if isinstance(block, dict) else None
+    agents = options.get("agent") if isinstance(options, dict) else None
+    has_agent_fields = isinstance(agents, dict) and any(
+        isinstance(entry, dict) and ("permissionTemplate" in entry or "permissionVars" in entry)
+        for entry in agents.values()
+    )
+    if (
+        not has_agent_fields
+        and "permissionTemplates" not in config
+        and not (isinstance(block, dict) and "permissionVars" in block)
+    ):
+        return config
+    if config.get("harness") != "opencode":
+        raise ProviderError("permission templates and permissionVars require the opencode harness")
+
+    templates = config.get("permissionTemplates", {})
+    defaults = block.get("permissionVars", {}) if isinstance(block, dict) else {}
+    if not isinstance(templates, dict):
+        raise ProviderError("permissionTemplates must map nonempty names to permission objects")
+    _validate_permission_vars(defaults, "config.permissionVars")
+    for name, template in templates.items():
+        if not isinstance(name, str) or not name or not isinstance(template, dict):
+            raise ProviderError("permissionTemplates must map nonempty names to permission objects")
+        if "task" in template:
+            raise ProviderError(
+                f"permissionTemplates.{name}.task is forbidden; author task on the agent"
+            )
+        _validate_permission_map(template, f"permissionTemplates.{name}")
+
+    resolved_agents = {}
+    if isinstance(agents, dict):
+        for name, entry in agents.items():
+            if not isinstance(entry, dict):
+                resolved_agents[name] = entry
+                continue
+            if "permissionVars" in entry and "permissionTemplate" not in entry:
+                raise ProviderError(f"agent {name!r}: permissionVars requires permissionTemplate")
+            if "permissionTemplate" not in entry:
+                resolved_agents[name] = entry
+                continue
+            template_name = entry["permissionTemplate"]
+            if (
+                not isinstance(template_name, str)
+                or not template_name
+                or template_name not in templates
+            ):
+                raise ProviderError(f"agent {name!r}: unknown permissionTemplate {template_name!r}")
+            overrides = entry.get("permissionVars", {})
+            _validate_permission_vars(overrides, f"agent {name!r} permissionVars")
+            local_permission = entry.get("permission", {})
+            if "permission" in entry and (
+                not isinstance(local_permission, dict) or set(local_permission) != {"task"}
+            ):
+                raise ProviderError(
+                    f"agent {name!r}: permissionTemplate allows only literal permission.task"
+                )
+            if "task" in local_permission:
+                _validate_permission_map(
+                    {"task": local_permission["task"]}, f"agent {name!r} permission"
+                )
+                if not isinstance(local_permission["task"], dict):
+                    raise ProviderError(
+                        f"agent {name!r} permission.task must be an ordered rule map"
+                    )
+            variables = {**defaults, **overrides}
+            rendered = {}
+            for tool, action in templates[template_name].items():
+                if isinstance(action, dict):
+                    rendered[tool] = {
+                        rule: _permission_value(
+                            value, variables, f"agent {name!r} permission.{tool}.{rule}"
+                        )
+                        for rule, value in action.items()
+                    }
+                else:
+                    rendered[tool] = _permission_value(
+                        action, variables, f"agent {name!r} permission.{tool}"
+                    )
+            if "task" in local_permission:
+                rendered["task"] = local_permission["task"].copy()
+            _validate_permission_map(rendered, f"agent {name!r} permission")
+            resolved_agents[name] = {
+                **{
+                    key: value
+                    for key, value in entry.items()
+                    if key not in ("permissionTemplate", "permissionVars", "permission")
+                },
+                "permission": rendered,
+            }
+
+    result = {key: value for key, value in config.items() if key != "permissionTemplates"}
+    if isinstance(block, dict):
+        result_block = {key: value for key, value in block.items() if key != "permissionVars"}
+        if isinstance(options, dict) and isinstance(agents, dict):
+            result_block["opencodeConfig"] = {**options, "agent": resolved_agents}
+        result["config"] = result_block
+    return result
+
+
+def _validate_permission_vars(variables: object, where: str) -> None:
+    """Require named string values even when a supplied variable is unused."""
+    if not isinstance(variables, dict) or any(
+        not isinstance(name, str)
+        or not _PROMPT_VARIABLE_NAME.fullmatch(name)
+        or not isinstance(value, str)
+        for name, value in variables.items()
+    ):
+        raise ProviderError(f"{where} must map placeholder names to strings")
+
+
+def _validate_permission_map(permission: object, where: str) -> None:
+    """Check the bounded permission object without interpreting OpenCode actions."""
+    if not isinstance(permission, dict):
+        raise ProviderError(f"{where} must be a permission object")
+    for tool, action in permission.items():
+        if not isinstance(tool, str):
+            raise ProviderError(f"{where} has a non-string tool key {tool!r}")
+        if isinstance(action, dict):
+            for rule, leaf in action.items():
+                if not isinstance(rule, str) or not isinstance(leaf, str):
+                    raise ProviderError(f"{where}.{tool}.{rule} must have a string rule and action")
+        elif not isinstance(action, str):
+            raise ProviderError(f"{where}.{tool} must be a string action or one-level rule map")
+
+
+def _permission_value(value: str, variables: dict, where: str) -> str:
+    """Replace one whole-scalar reference; never reinterpret its replacement."""
+    match = _PERMISSION_REFERENCE.fullmatch(value)
+    if match:
+        name = match.group(1)
+        if name not in variables:
+            raise ProviderError(f"{where}: unresolved permission placeholder {{{name}}}")
+        return variables[name]
+    if value.startswith("{") and value.endswith("}"):
+        raise ProviderError(f"{where}: malformed permission placeholder {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -2186,7 +2334,7 @@ def build_launch(
     running failover proxy; ``None`` — any config without a ``failover`` block — changes
     nothing (the rollback guarantee).
     """
-    config = resolve_prompt_templates(config)
+    config = resolve_permission_templates(resolve_prompt_templates(config))
     harness = config.get("harness")
     if harness not in HARNESSES:
         raise ProviderError(

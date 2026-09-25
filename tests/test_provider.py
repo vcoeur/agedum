@@ -26,6 +26,7 @@ from agedum.provider import (
     providers_dir,
     required_env,
     resolve_config_path,
+    resolve_permission_templates,
     resolve_prompt_templates,
     with_prompt,
 )
@@ -1439,6 +1440,138 @@ def test_prompt_template_escaped_format_spelling_stays_literal_among_repeated_fi
 def test_prompt_template_is_opencode_only():
     with pytest.raises(ProviderError, match="opencode"):
         resolve_prompt_templates({"harness": "claude", "promptTemplates": {"worker": "hello"}})
+
+
+def _permission_config(template=None, defaults=None, agents=None):
+    """Supply a small permission-template envelope for focused contract tests."""
+    return {
+        "harness": "opencode",
+        "permissionTemplates": {
+            "shared": template if template is not None else {"question": "{QUESTION}"}
+        },
+        "config": {
+            "permissionVars": defaults if defaults is not None else {"QUESTION": "deny"},
+            "opencodeConfig": {
+                "agent": (
+                    agents if agents is not None else {"worker": {"permissionTemplate": "shared"}}
+                )
+            },
+        },
+    }
+
+
+def test_permission_template_order_overrides_and_direct_launch():
+    template = {
+        "read": "allow",
+        "question": "{QUESTION}",
+        "bash": {"*": "deny", "git log*": "allow", "*|*": "deny"},
+    }
+    task = {"*": "deny", "worker": "allow"}
+    agents = {
+        "worker": {"permissionTemplate": "shared", "permission": {"task": task}},
+        "primary": {
+            "permissionTemplate": "shared",
+            "permissionVars": {"QUESTION": "allow"},
+            "permission": {"task": {"*": "deny"}},
+        },
+        "plain": {"permission": {"write": "deny"}},
+    }
+    config = _permission_config(template, agents=agents)
+    config["config"]["opencodeConfig"]["permission"] = {"bash": "ask"}
+    resolved = resolve_permission_templates(config)
+    rendered_agents = resolved["config"]["opencodeConfig"]["agent"]
+    assert list(rendered_agents["worker"]["permission"]) == ["read", "question", "bash", "task"]
+    assert list(rendered_agents["worker"]["permission"]["bash"]) == ["*", "git log*", "*|*"]
+    assert list(rendered_agents["worker"]["permission"]["task"]) == ["*", "worker"]
+    assert rendered_agents["worker"]["permission"]["question"] == "deny"
+    assert rendered_agents["primary"]["permission"]["question"] == "allow"
+    assert rendered_agents["plain"]["permission"] == {"write": "deny"}
+    assert resolved["config"]["opencodeConfig"]["permission"] == {"bash": "ask"}
+    assert "permissionTemplates" not in resolved
+    assert "permissionVars" not in resolved["config"]
+    assert resolve_permission_templates(resolved) is resolved
+    assert config["permissionTemplates"] == {"shared": template}
+    assert agents["worker"]["permission"]["task"] == task
+    launched = json.loads(build_launch(config, {}).env["OPENCODE_CONFIG_CONTENT"])
+    assert launched["agent"] == rendered_agents
+    assert launched["permission"] == {"bash": "ask"}
+
+
+@pytest.mark.parametrize(
+    ("template", "defaults", "agents", "error"),
+    [
+        ({"task": "deny"}, {}, None, "task is forbidden"),
+        ({"read": ["allow"]}, {}, None, "permissionTemplates.shared.read"),
+        ({"bash": {"*": {"nested": "allow"}}}, {}, None, "permissionTemplates.shared.bash"),
+        ({"bash": {1: "allow"}}, {}, None, "permissionTemplates.shared.bash"),
+        ({"read": "{QUESTION}"}, {"QUESTION": False}, None, "permissionVars"),
+        ({"read": "allow"}, {"UNUSED": 1}, None, "permissionVars"),
+        ({"read": "{MISSING}"}, {}, None, "worker.*permission.read.*MISSING"),
+        ({"read": "{NAME:}"}, {}, None, "worker.*permission.read.*malformed"),
+        ({"read": "{x.y}"}, {}, None, "worker.*permission.read.*malformed"),
+        ({"read": "{}"}, {}, None, "worker.*permission.read.*malformed"),
+        (None, None, {"worker": {"permissionTemplate": "unknown"}}, "worker.*unknown"),
+        (None, None, {"worker": {"permissionVars": {}}}, "worker.*requires"),
+        (
+            None,
+            None,
+            {"worker": {"permissionTemplate": "shared", "permissionVars": {"UNUSED": []}}},
+            "permissionVars",
+        ),
+        (
+            None,
+            None,
+            {"worker": {"permissionTemplate": "shared", "permission": {"read": "deny"}}},
+            "worker.*only literal permission.task",
+        ),
+        (
+            None,
+            None,
+            {"worker": {"permissionTemplate": "shared", "permission": {"task": "deny"}}},
+            "worker.*task must be",
+        ),
+        (
+            None,
+            None,
+            {"worker": {"permissionTemplate": "shared", "permission": {"task": {"*": ["deny"]}}}},
+            "worker.*permission.task",
+        ),
+    ],
+)
+def test_permission_template_rejects_invalid_shape(template, defaults, agents, error):
+    with pytest.raises(ProviderError, match=error):
+        resolve_permission_templates(_permission_config(template, defaults, agents))
+
+
+def test_permission_template_literals_subset_empty_and_one_shot_values():
+    config = _permission_config(
+        {"question": "{QUESTION}", "bash": {"echo {QUESTION}": "allow", "{": "deny"}, "edit": {}},
+        {"QUESTION": "{STILL_LITERAL}"},
+        {
+            "worker": {"permissionTemplate": "shared", "permission": {"task": {"*": "deny"}}},
+            "no_task": {"permissionTemplate": "shared"},
+        },
+    )
+    agents = resolve_permission_templates(config)["config"]["opencodeConfig"]["agent"]
+    assert agents["worker"]["permission"] == {
+        "question": "{STILL_LITERAL}",
+        "bash": {"echo {QUESTION}": "allow", "{": "deny"},
+        "edit": {},
+        "task": {"*": "deny"},
+    }
+    assert "task" not in agents["no_task"]["permission"]
+    plain = {
+        "harness": "opencode",
+        "config": {"opencodeConfig": {"agent": {"plain": {"permission": {"task": "allow"}}}}},
+    }
+    assert resolve_permission_templates(plain) is plain
+
+
+def test_permission_template_is_opencode_only():
+    config = _permission_config()
+    config["harness"] = "claude"
+    with pytest.raises(ProviderError, match="opencode"):
+        resolve_permission_templates(config)
 
 
 def test_opencode_agent_append_folds_into_prompt():
