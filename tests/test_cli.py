@@ -1827,10 +1827,11 @@ def test_permission_template_print_and_cli_launch_preserve_order(monkeypatch, tm
     (providers / "launcher.yaml").write_text(
         "schema: agedum-provider/v1\ninclude: fragment.yaml\nharness: opencode\n"
         "config:\n  permissionVars: {QUESTION: deny}\n  emitTranscript: false\n"
-        "  opencodeConfig:\n    agent:\n      worker:\n        permissionTemplate: shared\n"
-        "        permission:\n          task:\n            '*': deny\n            worker: allow\n"
-        "      primary:\n        permissionTemplate: shared\n"
-        "        permissionVars: {QUESTION: allow}\n"
+        "  opencodeConfig:\n    agent:\n      worker:\n        permission:\n"
+        "          _template: shared\n          task:\n"
+        "            '*': deny\n            worker: allow\n"
+        "      primary:\n        permission:\n          _template: shared\n"
+        "          _vars: {QUESTION: allow}\n"
     )
     monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
     monkeypatch.setenv("AGENTS_ENV_FILE", str(tmp_path / "missing-env"))
@@ -1841,6 +1842,8 @@ def test_permission_template_print_and_cli_launch_preserve_order(monkeypatch, tm
     printed = yaml.safe_load(capsys.readouterr().out)
     assert "permissionTemplates" not in printed
     assert "permissionVars" not in printed["config"]
+    assert "_template" not in str(printed)
+    assert "_vars" not in str(printed)
     permission = printed["config"]["opencodeConfig"]["agent"]["worker"]["permission"]
     assert list(permission["bash"]) == ["*", "git log*", "*|*"]
     assert list(permission["task"]) == ["*", "worker"]

@@ -261,7 +261,15 @@ def resolve_permission_templates(config: dict) -> dict:
     options = block.get("opencodeConfig") if isinstance(block, dict) else None
     agents = options.get("agent") if isinstance(options, dict) else None
     has_agent_fields = isinstance(agents, dict) and any(
-        isinstance(entry, dict) and ("permissionTemplate" in entry or "permissionVars" in entry)
+        isinstance(entry, dict)
+        and (
+            "permissionTemplate" in entry
+            or "permissionVars" in entry
+            or (
+                isinstance(entry.get("permission"), dict)
+                and ("_template" in entry["permission"] or "_vars" in entry["permission"])
+            )
+        )
         for entry in agents.values()
     )
     if (
@@ -293,23 +301,45 @@ def resolve_permission_templates(config: dict) -> dict:
             if not isinstance(entry, dict):
                 resolved_agents[name] = entry
                 continue
+            local_permission = entry.get("permission", {})
+            inline = isinstance(local_permission, dict) and (
+                "_template" in local_permission or "_vars" in local_permission
+            )
+            if inline and ("permissionTemplate" in entry or "permissionVars" in entry):
+                raise ProviderError(
+                    f"agent {name!r}: cannot mix inline and legacy permission templates"
+                )
+            if inline and "_template" not in local_permission:
+                raise ProviderError(
+                    f"agent {name!r}: permission._vars requires permission._template"
+                )
             if "permissionVars" in entry and "permissionTemplate" not in entry:
                 raise ProviderError(f"agent {name!r}: permissionVars requires permissionTemplate")
-            if "permissionTemplate" not in entry:
+            if not inline and "permissionTemplate" not in entry:
                 resolved_agents[name] = entry
                 continue
-            template_name = entry["permissionTemplate"]
+            template_name = local_permission["_template"] if inline else entry["permissionTemplate"]
             if (
                 not isinstance(template_name, str)
                 or not template_name
                 or template_name not in templates
             ):
-                raise ProviderError(f"agent {name!r}: unknown permissionTemplate {template_name!r}")
-            overrides = entry.get("permissionVars", {})
-            _validate_permission_vars(overrides, f"agent {name!r} permissionVars")
-            local_permission = entry.get("permission", {})
+                raise ProviderError(
+                    f"agent {name!r}: unknown permission template {template_name!r}"
+                )
+            overrides = (
+                local_permission.get("_vars", {}) if inline else entry.get("permissionVars", {})
+            )
+            _validate_permission_vars(
+                overrides,
+                f"agent {name!r} permission._vars" if inline else f"agent {name!r} permissionVars",
+            )
             if "permission" in entry and (
-                not isinstance(local_permission, dict) or set(local_permission) != {"task"}
+                not isinstance(local_permission, dict)
+                or (
+                    set(local_permission) - ({"_template", "_vars", "task"} if inline else {"task"})
+                )
+                or (not inline and set(local_permission) != {"task"})
             ):
                 raise ProviderError(
                     f"agent {name!r}: permissionTemplate allows only literal permission.task"
