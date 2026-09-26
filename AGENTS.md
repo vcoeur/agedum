@@ -53,13 +53,14 @@ match); top-level skills keep their declared name.
     Details: `docs/harnesses/opencode.md#prompt-templates`.
     **Permission templates**: an abstract included fragment may define top-level
     `permissionTemplates` names→permission objects (without `task`). An opted-in agent
-    supplies `permissionTemplate`, optional string-only `permissionVars` (overriding
-    `config.permissionVars`), and optionally only a literal `permission.task` ordered rule
-    map. The renderer attaches the task map after the shared actions, never merges arbitrary
-    permission fields. Print and direct launch strip the synthetic keys; plain permissions
-    and top-level OpenCode permissions are untouched. Include/extends can deep-merge an
-    agent's literal task map before resolution: source-local task ownership needs a separate
-    authoring-side check. Details: `docs/harnesses/opencode.md#permission-templates`.
+     supplies `permission: {_template: name, _vars: {QUESTION: allow}, task: {...}}`;
+     `_vars` is optional, string-only, and overrides `config.permissionVars`. Legacy
+     agent-level `permissionTemplate`/`permissionVars` remain accepted but cannot mix with
+     inline metadata. The renderer attaches only the literal task map after shared actions,
+     never merges arbitrary permission fields. Print and direct launch strip synthetic keys;
+     plain and top-level permissions stay untouched. Include/extends can deep-merge an
+     agent's literal task map before resolution: source-local task ownership needs a separate
+     authoring-side check. Details: `docs/harnesses/opencode.md#permission-templates`.
 - **Cline** — pure path-discovery (no flags), same shape as opencode. Project `AGENTS.md`
   is read natively at `./AGENTS.md` (Cline reads it as a cross-tool rules file), so agedum
   leaves it in place. Global `AGENTS.md` → the cross-tool path `~/.agents/AGENTS.md` (not

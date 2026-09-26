@@ -1497,6 +1497,119 @@ def test_permission_template_order_overrides_and_direct_launch():
     assert launched["permission"] == {"bash": "ask"}
 
 
+def test_inline_permission_template_matches_legacy_bytes_without_mutation():
+    template = {
+        "read": "allow",
+        "question": "{QUESTION}",
+        "bash": {"*": "deny", "git log*": "allow", "*|*": "deny"},
+    }
+    task = {"*": "deny", "worker": "allow"}
+    legacy = _permission_config(
+        template,
+        agents={
+            "worker": {"permissionTemplate": "shared", "permission": {"task": task}},
+            "primary": {"permissionTemplate": "shared", "permissionVars": {"QUESTION": "allow"}},
+        },
+    )
+    inline = _permission_config(
+        template,
+        agents={
+            "worker": {"permission": {"_template": "shared", "task": task}},
+            "primary": {"permission": {"_template": "shared", "_vars": {"QUESTION": "allow"}}},
+        },
+    )
+    original = json.loads(json.dumps(inline))
+    legacy_output = build_launch(legacy, {}).env["OPENCODE_CONFIG_CONTENT"]
+    inline_output = build_launch(inline, {}).env["OPENCODE_CONFIG_CONTENT"]
+    assert inline_output == legacy_output
+    assert inline == original
+    agents = resolve_permission_templates(inline)["config"]["opencodeConfig"]["agent"]
+    assert list(agents["worker"]["permission"]) == ["read", "question", "bash", "task"]
+    assert list(agents["worker"]["permission"]["task"]) == ["*", "worker"]
+    assert "_template" not in inline_output and "_vars" not in inline_output
+
+
+@pytest.mark.parametrize(
+    ("agent", "error"),
+    [
+        ({"permission": {"_vars": {"QUESTION": "allow"}}}, "_vars requires.*_template"),
+        ({"permission": {"_template": "shared", "_vars": []}}, "permission._vars"),
+        ({"permission": {"_template": "shared", "_vars": {"QUESTION": False}}}, "permission._vars"),
+        ({"permission": {"_template": "shared", "read": "allow"}}, "only literal permission.task"),
+        ({"permission": {"_template": "shared", "task": "deny"}}, "task must be"),
+        (
+            {"permission": {"_template": "shared", "task": {"*": {"nested": "deny"}}}},
+            "permission.task",
+        ),
+        ({"permission": {"_template": "missing"}}, "unknown permission template"),
+        ({"permission": {"_template": None}}, "unknown permission template"),
+        ({"permissionTemplate": "shared", "permission": {"_template": "shared"}}, "cannot mix"),
+        ({"permissionVars": {}, "permission": {"_template": "shared"}}, "cannot mix"),
+    ],
+)
+def test_inline_permission_template_rejects_invalid_shape(agent, error):
+    with pytest.raises(ProviderError, match=error):
+        resolve_permission_templates(_permission_config(agents={"worker": agent}))
+
+
+def test_inline_permission_template_include_extends_preserves_task_order(tmp_path):
+    _write_config(
+        tmp_path,
+        "fragment.json",
+        {
+            "abstract": True,
+            "permissionTemplates": {
+                "shared": {"bash": {"*": "deny", "git log*": "allow", "*|*": "deny"}}
+            },
+        },
+    )
+    _write_config(
+        tmp_path,
+        "base.json",
+        {
+            "harness": "opencode",
+            "config": {
+                "permissionVars": {"QUESTION": "deny"},
+                "opencodeConfig": {
+                    "agent": {
+                        "worker": {
+                            "mode": "subagent",
+                            "permission": {"_template": "shared", "task": {"*": "deny"}},
+                        },
+                    }
+                },
+            },
+        },
+    )
+    child = _write_config(
+        tmp_path,
+        "child.json",
+        {
+            "include": "fragment.json",
+            "extends": "base.json",
+            "config": {
+                "opencodeConfig": {
+                    "agent": {
+                        "worker": {"permission": {"task": {"worker": "allow"}}},
+                    }
+                }
+            },
+        },
+    )
+    merged = load_merged_config(child, tmp_path)
+    resolved = resolve_permission_templates(merged)
+    worker = resolved["config"]["opencodeConfig"]["agent"]["worker"]
+    assert worker["mode"] == "subagent"
+    assert worker["permission"] == {
+        "bash": {"*": "deny", "git log*": "allow", "*|*": "deny"},
+        "task": {"*": "deny", "worker": "allow"},
+    }
+    assert list(worker["permission"]["task"]) == ["*", "worker"]
+    assert (
+        merged["config"]["opencodeConfig"]["agent"]["worker"]["permission"]["_template"] == "shared"
+    )
+
+
 @pytest.mark.parametrize(
     ("template", "defaults", "agents", "error"),
     [

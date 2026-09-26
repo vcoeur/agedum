@@ -74,7 +74,7 @@ env var; no file written):
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
 | `opencodeConfig.agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
 | `promptVars` + `opencodeConfig.agent.<name>.promptTemplate` | explicit string variables and a named prompt template reference — see [below](#prompt-templates) |
-| `permissionVars` + `opencodeConfig.agent.<name>.permissionTemplate` | explicit string variables and a named shared permission object — see [below](#permission-templates) |
+| `permissionVars` + `opencodeConfig.agent.<name>.permission._template` | explicit string defaults and an inline reference to a shared permission object — see [below](#permission-templates) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
 | `mcpServers` | MCP servers in the canonical cross-harness vocabulary, translated into opencode's `mcp` block — see [below](#mcp) |
 
@@ -325,8 +325,9 @@ line and strips it, so OpenCode receives a plain final `prompt`.
 
 An abstract included OpenCode fragment may define top-level `permissionTemplates`:
 each name maps to a permission object containing shared tool actions, **not** an agent
-object. The template must not contain `task`. Each agent opts in by name and may author
-only a literal `permission.task` rule map alongside it; agents without a local task map
+object. The template must not contain `task`. Each agent opts in with
+`permission._template`, optionally overrides defaults with `permission._vars`, and may author
+only a literal `permission.task` rule map alongside them; agents without a local task map
 inherit OpenCode's normal task behavior. Non-templated agents retain literal permissions,
 and `opencodeConfig.permission` is untouched.
 
@@ -347,32 +348,35 @@ config:
   opencodeConfig:
     agent:
       worker:
-        permissionTemplate: worker
         permission:
+          _template: worker
           task:
             '*': deny
             worker: allow
       primary:
-        permissionTemplate: worker
-        permissionVars: {QUESTION: allow}
         permission:
+          _template: worker
+          _vars: {QUESTION: allow}
           task:
             '*': deny
             worker: allow
 ```
 
-Values in `permissionVars` are **strings only**; agent values override launcher defaults
+Values in `config.permissionVars` and agent `permission._vars` are **strings only**; agent values override launcher defaults
 as whole values. In a template value, only an entire `{NAME}` scalar is replaced,
 **once**. Embedded braces (`echo {NAME}`), unmatched braces, and shell patterns are
 literal; an entire but malformed `{...}` reference errors. No keys are interpolated,
 and replacements are not parsed again. Template actions are strings or one-level ordered
 rule maps with string keys and string leaves (empty rule maps are accepted); nested maps,
-lists, non-string variables, missing variables, unknown templates, and an agent's
-`permissionVars` without `permissionTemplate` fail loudly. Unused variables are validated
-too. With a template, any literal `permission` key other than `task`, or a `task` that
+lists, non-string variables, missing variables, unknown templates, and `permission._vars`
+without `permission._template` fail loudly. Unused variables are validated too. With a
+template, any literal `permission` key other than `_template`, `_vars`, and `task`, or a `task` that
 is not an ordered rule map, is rejected. The template and the literal task map never
 compete for a key. There is no inferred worker allow-list and no arbitrary permission
-merge. The resolver checks this bounded shape, not OpenCode's entire permission DSL.
+merge. The deprecated agent-level `permissionTemplate`/`permissionVars` spelling remains
+accepted with the same rendering, but mixing either legacy field with inline metadata on
+one agent is an error. The resolver checks this bounded shape, not OpenCode's entire
+permission DSL.
 
 Resolution runs after include/extends and model expansion for both `--print-config` and
 direct launch, without mutating its input. Synthetic template and variable fields are
