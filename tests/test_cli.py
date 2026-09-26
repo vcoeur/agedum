@@ -1780,13 +1780,13 @@ def test_prompt_template_print_and_launch_share_base_but_append_only_at_launch(
     providers.mkdir()
     (providers / "fragment.yaml").write_text(
         "schema: agedum-provider/v1\nabstract: true\n"
-        "promptTemplates:\n  worker: 'Hello {ID} from {POOL}'\n"
+        "promptTemplates:\n  worker: 'Héllo {ID} from {POOL} {{literal}}'\n"
     )
     (providers / "launcher.yaml").write_text(
         "schema: agedum-provider/v1\ninclude: fragment.yaml\nharness: opencode\n"
         "config:\n  promptVars: {POOL: launcher}\n  emitTranscript: false\n"
         "  opencodeConfig:\n    agent:\n      worker:\n        mode: subagent\n"
-        "        promptTemplate: worker\n        promptVars: {ID: Luna}\n"
+        "        prompt: {_template: worker, _vars: {ID: Luna}}\n"
         "        agentAppend: 'Do the work.'\n"
     )
     monkeypatch.setenv("AGENTS_PROVIDERS_DIR", str(providers))
@@ -1800,7 +1800,7 @@ def test_prompt_template_print_and_launch_share_base_but_append_only_at_launch(
     assert "promptVars" not in printed["config"]
     assert printed["config"]["opencodeConfig"]["agent"]["worker"] == {
         "mode": "subagent",
-        "prompt": "Hello Luna from launcher",
+        "prompt": "Héllo Luna from launcher {literal}",
         "agentAppend": "Do the work.",
     }
 
@@ -1813,7 +1813,15 @@ def test_prompt_template_print_and_launch_share_base_but_append_only_at_launch(
     assert exit_info.value.code == 0
     assert captured["command"] == ["opencode"]
     emitted = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])["agent"]["worker"]
-    assert emitted == {"mode": "subagent", "prompt": "Hello Luna from launcher\n\nDo the work."}
+    assert emitted == {
+        "mode": "subagent",
+        "prompt": printed["config"]["opencodeConfig"]["agent"]["worker"]["prompt"]
+        + "\n\n"
+        + printed["config"]["opencodeConfig"]["agent"]["worker"]["agentAppend"],
+    }
+    assert emitted["prompt"].encode("utf-8") == (
+        "Héllo Luna from launcher {literal}\n\nDo the work.".encode()
+    )
 
 
 def test_permission_template_print_and_cli_launch_preserve_order(monkeypatch, tmp_path, capsys):

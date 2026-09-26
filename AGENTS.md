@@ -47,8 +47,11 @@ match); top-level skills keep their declared name.
    config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
    **Prompt templates**: an abstract included YAML fragment may define top-level
    `promptTemplates` names→strings; the launcher supplies `config.promptVars` defaults
-   and an agent opts in with `promptTemplate` plus optional agent `promptVars` overrides.
-   Resolve after merge/model expansion for print and launch; strip synthetic keys.
+    and an agent opts in with `prompt: {_template: name, _vars: {ID: value}}`;
+    `_vars` is optional and string-only, overriding `config.promptVars`. Legacy agent
+    `promptTemplate`/`promptVars` remain accepted but cannot mix with nested metadata.
+    Resolve after merge/model expansion for print and launch; strip synthetic keys,
+    leaving ordinary literal prompts untouched and inputs unmodified.
    Print retains `agentAppend` separately; launch folds it into the final prompt.
     Details: `docs/harnesses/opencode.md#prompt-templates`.
     **Permission templates**: an abstract included fragment may define top-level

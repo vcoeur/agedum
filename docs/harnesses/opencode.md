@@ -73,7 +73,7 @@ env var; no file written):
 | `providerDef` | an explicit provider block with the key resolved from the environment — see [below](#providerdef) |
 | `opencodeConfig` | a literal opencode config object, deep-merged last (wins on conflict) — see [below](#opencodeconfig) |
 | `opencodeConfig.agent.<name>.agentAppend` | per-agent instructions folded onto the end of that agent's `prompt` — see [below](#agentappend) |
-| `promptVars` + `opencodeConfig.agent.<name>.promptTemplate` | explicit string variables and a named prompt template reference — see [below](#prompt-templates) |
+| `promptVars` + `opencodeConfig.agent.<name>.prompt._template` | explicit string defaults and an inline prompt template reference with optional `prompt._vars` overrides — see [below](#prompt-templates) |
 | `permissionVars` + `opencodeConfig.agent.<name>.permission._template` | explicit string defaults and an inline reference to a shared permission object — see [below](#permission-templates) |
 | `emitTranscript` | inject the bundled transcript-capture plugin (default **on**); set `false` to opt out — see [below](#emittranscript) |
 | `mcpServers` | MCP servers in the canonical cross-harness vocabulary, translated into opencode's `mcp` block — see [below](#mcp) |
@@ -280,8 +280,8 @@ exactly this case.
 An abstract YAML provider fragment may define a top-level `promptTemplates` mapping
 of names to string templates. An OpenCode launcher includes that fragment and provides
 `config.promptVars` string defaults; each agent explicitly opts in with
-`config.opencodeConfig.agent.<name>.promptTemplate` and may override defaults using
-its own `promptVars` mapping:
+`config.opencodeConfig.agent.<name>.prompt._template` and may override defaults using
+`prompt._vars`:
 
 ```yaml
 # base/worker.yaml (included, abstract: true, schema: agedum-provider/v1)
@@ -298,8 +298,7 @@ config:
         mode: subagent
         model: openai/example
         description: Luna worker
-        promptTemplate: worker
-        promptVars: {ID: Luna}
+        prompt: {_template: worker, _vars: {ID: Luna}}
         permission: {bash: deny}
         agentAppend: 'Report the result.'
 ```
@@ -310,8 +309,11 @@ braces. Default variables yield to per-agent variables. There is no nested
 templating, arbitrary YAML interpolation, file reference, implicit variable
 inference, or template expansion inside variable values. Missing templates,
 missing placeholders, malformed placeholders (including positional, attribute,
-index, conversion, and format syntax), non-string values, and an agent declaring
-both `prompt` and `promptTemplate` fail with the agent name. Keep permissions,
+index, conversion, and format syntax), non-string values, malformed `_template`,
+`_vars` without `_template`, and extra keys inside a templated `prompt` fail with
+the agent name. Legacy agent-level `promptTemplate`/`promptVars` remain accepted,
+but mixing either with nested `prompt` metadata on the same agent is an error. A
+legacy template reference alongside a literal `prompt` is also ambiguous. Keep permissions,
 mode, model, and description in the launcher agent entry: templates supply text
 only. Ordinary prompts and JSON providers without template fields keep their
 existing behavior.

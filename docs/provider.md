@@ -98,7 +98,7 @@ The config is the condash-style agent envelope:
 | `config` | The per-harness option block — see the harness page table above. |
 | `extends` | Optional — a config reference **or list** of them; the named base(s) are deep-merged and this config's keys applied last. See [Extending configs](#extends). |
 | `include` | Optional — a config reference **or list** of them; shared fragments pasted into this config (composition, not inheritance). See [Including fragments](#include). |
-| `promptTemplates` | Optional OpenCode-only mapping of template names to prompt strings; included abstract fragments may supply it. See [OpenCode prompt templates](harnesses/opencode.md#prompt-templates). |
+| `promptTemplates` | Optional OpenCode-only mapping of template names to prompt strings; included abstract fragments may supply it. Agents select one through `prompt._template`, optionally overriding `config.promptVars` with `prompt._vars`. See [OpenCode prompt templates](harnesses/opencode.md#prompt-templates). |
 | `permissionTemplates` | Optional OpenCode-only mapping of names to shared permission objects without `task`; agents opt in explicitly and may attach literal task rules. See [OpenCode permission templates](harnesses/opencode.md#permission-templates). |
 | `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
 | `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, its own state/config dir (e.g. `~/.cline`), `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
