@@ -140,7 +140,15 @@ def resolve_prompt_templates(config: dict) -> dict:
     options = block.get("opencodeConfig") if isinstance(block, dict) else None
     agents = options.get("agent") if isinstance(options, dict) else None
     has_agent_templates = isinstance(agents, dict) and any(
-        isinstance(entry, dict) and ("promptTemplate" in entry or "promptVars" in entry)
+        isinstance(entry, dict)
+        and (
+            "promptTemplate" in entry
+            or "promptVars" in entry
+            or (
+                isinstance(entry.get("prompt"), dict)
+                and ("_template" in entry["prompt"] or "_vars" in entry["prompt"])
+            )
+        )
         for entry in agents.values()
     )
     if (
@@ -165,22 +173,39 @@ def resolve_prompt_templates(config: dict) -> dict:
             if not isinstance(entry, dict):
                 resolved_agents[name] = entry
                 continue
+            local_prompt = entry.get("prompt")
+            inline = isinstance(local_prompt, dict) and (
+                "_template" in local_prompt or "_vars" in local_prompt
+            )
+            if inline and ("promptTemplate" in entry or "promptVars" in entry):
+                raise ProviderError(
+                    f"agent {name!r}: cannot mix inline and legacy prompt templates"
+                )
+            if inline and "_template" not in local_prompt:
+                raise ProviderError(f"agent {name!r}: prompt._vars requires prompt._template")
             if "promptVars" in entry and "promptTemplate" not in entry:
                 raise ProviderError(f"agent {name!r}: promptVars requires promptTemplate")
-            if "promptTemplate" not in entry:
+            if not inline and "promptTemplate" not in entry:
                 resolved_agents[name] = entry
                 continue
-            template_name = entry["promptTemplate"]
+            if inline and set(local_prompt) - {"_template", "_vars"}:
+                raise ProviderError(
+                    f"agent {name!r}: prompt template allows only _template and _vars"
+                )
+            template_name = local_prompt["_template"] if inline else entry["promptTemplate"]
             if (
                 not isinstance(template_name, str)
                 or not template_name
                 or template_name not in templates
             ):
-                raise ProviderError(f"agent {name!r}: unknown promptTemplate {template_name!r}")
-            if "prompt" in entry:
+                raise ProviderError(f"agent {name!r}: unknown prompt template {template_name!r}")
+            if "prompt" in entry and not inline:
                 raise ProviderError(f"agent {name!r}: prompt and promptTemplate are ambiguous")
-            overrides = entry.get("promptVars", {})
-            _validate_prompt_vars(overrides, f"agent {name!r} promptVars")
+            overrides = local_prompt.get("_vars", {}) if inline else entry.get("promptVars", {})
+            variable_source = (
+                f"agent {name!r} prompt._vars" if inline else f"agent {name!r} promptVars"
+            )
+            _validate_prompt_vars(overrides, variable_source)
             variables = {**defaults, **overrides}
             resolved_agents[name] = {
                 **{

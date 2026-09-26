@@ -1329,8 +1329,7 @@ def test_prompt_template_include_extends_overrides_and_append(tmp_path):
                             "model": "p/m",
                             "description": "worker",
                             "permission": {"bash": "deny"},
-                            "promptTemplate": "worker",
-                            "promptVars": {"ID": "Luna"},
+                            "prompt": {"_template": "worker", "_vars": {"ID": "Luna"}},
                             "agentAppend": "Next step.",
                         }
                     }
@@ -1360,11 +1359,59 @@ def test_prompt_template_include_extends_overrides_and_append(tmp_path):
     }
     assert "promptTemplates" not in resolved
     assert "promptVars" not in resolved["config"]
-    assert merged["config"]["opencodeConfig"]["agent"]["luna"]["promptTemplate"] == "worker"
+    assert merged["config"]["opencodeConfig"]["agent"]["luna"]["prompt"] == {
+        "_template": "worker",
+        "_vars": {"ID": "Luna"},
+    }
     assert resolve_prompt_templates(resolved) is resolved
     launched = json.loads(build_launch(merged, {}).env["OPENCODE_CONFIG_CONTENT"])
     assert launched["agent"]["luna"]["prompt"] == "Luna: launcher / Luna {literal}\n\nNext step."
     assert "agentAppend" not in launched["agent"]["luna"]
+
+
+def test_inline_prompt_template_inheritance_deep_merges_variables(tmp_path):
+    _write_config(
+        tmp_path,
+        "base.json",
+        {
+            "abstract": True,
+            "harness": "opencode",
+            "promptTemplates": {"worker": "{ID} / {MODEL_LABEL} / {EFFORT}"},
+            "config": {
+                "promptVars": {"EFFORT": "default"},
+                "opencodeConfig": {
+                    "agent": {
+                        "worker": {
+                            "prompt": {
+                                "_template": "worker",
+                                "_vars": {"ID": "Sol", "MODEL_LABEL": "old"},
+                            }
+                        }
+                    }
+                },
+            },
+        },
+    )
+    path = _write_config(
+        tmp_path,
+        "launcher.json",
+        {
+            "extends": "base",
+            "config": {
+                "opencodeConfig": {
+                    "agent": {"worker": {"prompt": {"_vars": {"MODEL_LABEL": "new"}}}}
+                }
+            },
+        },
+    )
+    merged = load_merged_config(path, tmp_path)
+    assert merged["config"]["opencodeConfig"]["agent"]["worker"]["prompt"] == {
+        "_template": "worker",
+        "_vars": {"ID": "Sol", "MODEL_LABEL": "new"},
+    }
+    assert resolve_prompt_templates(merged)["config"]["opencodeConfig"]["agent"]["worker"] == {
+        "prompt": "Sol / new / default"
+    }
 
 
 @pytest.mark.parametrize(
@@ -1373,8 +1420,8 @@ def test_prompt_template_include_extends_overrides_and_append(tmp_path):
         ("{MISSING}", {}, {}, "worker", {}, "unresolved.*MISSING"),
         ("{ID}", {"ID": 4}, {}, "worker", {}, "promptVars"),
         ("{ID}", {"ID": "ok"}, {"ID": False}, "worker", {}, "promptVars"),
-        ("{ID}", {}, {}, "absent", {}, "unknown promptTemplate"),
-        ("{ID}", {}, {}, 3, {}, "unknown promptTemplate"),
+        ("{ID}", {}, {}, "absent", {}, "unknown prompt template"),
+        ("{ID}", {}, {}, 3, {}, "unknown prompt template"),
         ("{ID}", {"ID": "ok"}, {}, "worker", {"prompt": "literal"}, "ambiguous"),
         ("{ID.x}", {}, {}, "worker", {}, "malformed"),
         ("{ID[0]}", {}, {}, "worker", {}, "malformed"),
@@ -1440,6 +1487,62 @@ def test_prompt_template_escaped_format_spelling_stays_literal_among_repeated_fi
 def test_prompt_template_is_opencode_only():
     with pytest.raises(ProviderError, match="opencode"):
         resolve_prompt_templates({"harness": "claude", "promptTemplates": {"worker": "hello"}})
+
+
+@pytest.mark.parametrize(
+    ("agent", "error"),
+    [
+        ({"prompt": {"_vars": {"ID": "ok"}}}, "prompt._vars requires prompt._template"),
+        ({"prompt": {"_template": ""}}, "unknown prompt template"),
+        ({"prompt": {"_template": 1}}, "unknown prompt template"),
+        ({"prompt": {"_template": "missing"}}, "unknown prompt template"),
+        ({"prompt": {"_template": "worker", "_vars": {"ID": 2}}}, "prompt._vars"),
+        ({"prompt": {"_template": "worker", "_vars": None}}, "prompt._vars"),
+        ({"prompt": {"_template": "worker", "extra": "x"}}, "only _template and _vars"),
+        ({"prompt": {"_template": "worker"}, "promptTemplate": "worker"}, "cannot mix"),
+        ({"prompt": {"_template": "worker"}, "promptVars": {}}, "cannot mix"),
+    ],
+)
+def test_inline_prompt_template_rejects_invalid_and_mixed_syntax(agent, error):
+    config = {
+        "harness": "opencode",
+        "promptTemplates": {"worker": "{ID}"},
+        "config": {
+            "promptVars": {"ID": "default"},
+            "opencodeConfig": {"agent": {"worker": agent}},
+        },
+    }
+    with pytest.raises(ProviderError, match=error):
+        resolve_prompt_templates(config)
+
+
+def test_inline_prompt_template_preserves_literal_and_legacy_agents_without_mutating_input():
+    config = {
+        "harness": "opencode",
+        "promptTemplates": {"worker": "{{ID}} {ID} {ID}"},
+        "config": {
+            "promptVars": {"ID": "{RAW}"},
+            "opencodeConfig": {
+                "agent": {
+                    "inline": {"prompt": {"_template": "worker"}},
+                    "legacy": {"promptTemplate": "worker", "promptVars": {"ID": "legacy"}},
+                    "literal": {"prompt": "Literal {ID} {{braces}}"},
+                }
+            },
+        },
+    }
+    result = resolve_prompt_templates(config)
+    agents = result["config"]["opencodeConfig"]["agent"]
+    assert agents == {
+        "inline": {"prompt": "{ID} {RAW} {RAW}"},
+        "legacy": {"prompt": "{ID} legacy legacy"},
+        "literal": {"prompt": "Literal {ID} {{braces}}"},
+    }
+    assert config["config"]["opencodeConfig"]["agent"]["inline"]["prompt"] == {
+        "_template": "worker"
+    }
+    assert resolve_prompt_templates(result) is result
+    assert json.loads(build_launch(config, {}).env["OPENCODE_CONFIG_CONTENT"])["agent"] == agents
 
 
 def _permission_config(template=None, defaults=None, agents=None):
