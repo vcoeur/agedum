@@ -439,7 +439,7 @@ carrierMeta:
   ds-flash:
     provider: ds            # provider id catalog entries file under
     family: deepseek        # selects the effort carrier
-    efforts: [high, low]    # what the model accepts
+    efforts: [high, low]    # what this model accepts; medium is opt-in per model
     display: DS Flash       # display-name fact (may differ from the fragment's name)
     vision: true            # failover vision-map fact (read by `failoverIntent` expansion)
   k3:
@@ -454,8 +454,11 @@ carrierMeta:
 
 Entries are validated whenever the catalogue loads (named `ModelCatalogSchemaError`s):
 `provider`/`family`/`display` non-empty strings, `efforts` a non-empty list inside the
-effort alphabet (`high`, `low`), `aliases` a mapping of alphabet efforts to non-empty
-strings, `alias_model_id` required iff `aliases` is present. Unknown keys inside an entry
+effort alphabet (`high`, `medium`, `low` in canonical order), `aliases` a mapping of alphabet
+efforts to non-empty strings, `alias_model_id` required iff `aliases` is present. A model
+accepts `medium` only when its own `efforts` lists it; existing high/low-only entries
+stay unchanged. A model-alias entry needs an alias for each effort actually referenced,
+not every effort declared in `efforts`. Unknown keys inside an entry
 are ignored — future facts land here without a catalogue change. `vision` (a boolean) is
 one of those permissive facts: read only by [`failoverIntent`](#failover-intent)
 expansion, ignored everywhere else. `modelRef` filing never reads the section, so the
@@ -474,8 +477,8 @@ pass through untouched.
 | Family | `model: key@effort` derives | Catalog entry (filed under `provider.<provider>.models`) |
 |---|---|---|
 | deepseek, glm | `model: provider/key` + `options.reasoningEffort: effort` (merged into an authored `options` map) | the fragment, verbatim |
-| gpt | `model: provider/key` + `variant: effort` | the fragment + `variants:` disabling every OpenCode variant the config does **not** declare (vocabulary order; declaring `sol@high` and `sol@low` anywhere in the config keeps `low` enabled) |
-| kimi | `model: provider/<aliases[effort]>` — the agent entry carries **no** carrier fields | one alias-keyed entry per declared effort (canonical `high`-first order), each `options.thinking: {type: enabled, effort}`; the `low` entry is rebuilt as `{id: alias_model_id, name: "<display> (low thinking)", …}` |
+| gpt | `model: provider/key` + `variant: effort` | the fragment + `variants:` disabling every OpenCode variant the config does **not** declare (vocabulary order; declaring `astra@medium` leaves medium enabled only when that model's `efforts` includes it) |
+| kimi | `model: provider/<aliases[effort]>` — the agent entry carries **no** carrier fields | one alias-keyed entry per declared effort (canonical `high`, `medium`, `low` order), each `options.thinking: {type: enabled, effort}`; the `low` entry is rebuilt as `{id: alias_model_id, name: "<display> (low thinking)", …}` |
 
 ### Failover — `failoverIntent` { #failover-intent }
 
@@ -520,7 +523,7 @@ agents and intent** at load time — nothing precomputes it — then strips the 
 - **`rungOptions`** — one `{"reasoning_effort": effort}` entry (snake_case — agent
   entries' `options.reasoningEffort` stays camelCase; the two conventions coexist in
   one block by design) per used variant/reasoningEffort rung, in canonical effort
-  order (`high` first). Model-alias rungs never appear.
+  order (`high`, `medium`, `low`). Model-alias rungs never appear.
 - **`vision`** — derived from the catalogue's `carrierMeta.vision` facts: one entry per
   universe model, walked provider-major in first-appearance order; model-alias models
   additionally get one entry per declared effort at `provider/<aliases[effort]>`. A
@@ -547,7 +550,7 @@ The key **collision rules**, per root schema:
 ### Errors are named
 
 A ref that cannot resolve is an `ExpansionError` naming where it sits: unknown catalogue
-key; effort outside the alphabet (`high`/`low`); effort outside the model's `efforts`;
+key; effort outside the alphabet (`high`/`medium`/`low`); effort outside the model's `efforts`;
 a referenced model with no `carrierMeta` entry; a family with no effort carrier; a
 model-alias model without `aliases`/`alias_model_id`; a ref effort missing from
 `aliases`; an agent entry that *authors* a carrier field (`variant` or

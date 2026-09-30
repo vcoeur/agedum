@@ -471,6 +471,40 @@ def test_gpt_config_declaring_only_high_disables_low_too(tmp_path):
     assert list(variants) == ["none", "minimal", "low", "medium", "xhigh", "max"]
 
 
+def test_gpt_medium_agent_enables_only_authored_variants(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    family: gpt\n    efforts: [high, low]\n",
+        "    family: gpt\n    efforts: [high, medium, low]\n",
+    )
+    config = _v2_config({"astra": {"model": "sol@medium"}, "high": {"model": "sol@high"}})
+    expanded = _expand_v2(config, tmp_path)
+    agents = expanded["config"]["opencodeConfig"]["agent"]
+    assert agents["astra"] == {"model": "openai/sol", "variant": "medium"}
+    assert agents["high"] == {"model": "openai/sol", "variant": "high"}
+    variants = expanded["config"]["opencodeConfig"]["provider"]["openai"]["models"]["sol"][
+        "variants"
+    ]
+    assert list(variants) == ["none", "minimal", "low", "xhigh", "max"]
+    assert all(state == {"disabled": True} for state in variants.values())
+
+
+def test_gpt_high_medium_low_all_remain_available_when_declared(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    family: gpt\n    efforts: [high, low]\n",
+        "    family: gpt\n    efforts: [high, medium, low]\n",
+    )
+    config = _v2_config(
+        {effort: {"model": f"sol@{effort}"} for effort in ("low", "medium", "high")}
+    )
+    expanded = _expand_v2(config, tmp_path)
+    variants = expanded["config"]["opencodeConfig"]["provider"]["openai"]["models"]["sol"][
+        "variants"
+    ]
+    assert list(variants) == ["none", "minimal", "xhigh", "max"]
+
+
 def test_kimi_agents_select_aliases_and_file_alias_entries(tmp_path):
     _write_catalogue(tmp_path)
     config = _v2_config({"a": {"model": "k3@low"}, "b": {"model": "k3@high"}})
@@ -644,6 +678,12 @@ def test_effort_outside_the_models_efforts_is_named(tmp_path):
         _expand_v2(config, tmp_path)
 
 
+def test_medium_ref_rejected_when_model_does_not_declare_it(tmp_path):
+    _write_catalogue(tmp_path)
+    with pytest.raises(ExpansionError, match="'medium' is not one of model 'sol''s declared"):
+        _expand_v2(_v2_config({"w": {"model": "sol@medium"}}), tmp_path)
+
+
 def test_family_without_a_carrier_is_named(tmp_path):
     _catalogue_with(
         tmp_path,
@@ -688,6 +728,37 @@ def test_ref_effort_missing_from_aliases_is_named(tmp_path):
     config = _v2_config({"w": {"model": "k3@low"}})
     with pytest.raises(ExpansionError, match="'low' is not in model 'k3''s `aliases`"):
         _expand_v2(config, tmp_path)
+
+
+def test_alias_medium_requires_an_authored_alias_only_when_referenced(tmp_path):
+    _catalogue_with(
+        tmp_path,
+        "    family: kimi\n    efforts: [high, low]\n",
+        "    family: kimi\n    efforts: [high, medium, low]\n",
+    )
+    config = _v2_config({"high": {"model": "k3@high"}})
+    agents = _expand_v2(config, tmp_path)["config"]["opencodeConfig"]["agent"]
+    assert agents["high"]["model"] == "kimi-coding/k3"
+    with pytest.raises(ExpansionError, match="'medium' is not in model 'k3''s `aliases`"):
+        _expand_v2(_v2_config({"medium": {"model": "k3@medium"}}), tmp_path)
+
+
+def test_authored_medium_alias_is_filed_between_high_and_low(tmp_path):
+    catalogue = SYNTH_CATALOGUE.replace(
+        "    family: kimi\n    efforts: [high, low]\n",
+        "    family: kimi\n    efforts: [high, medium, low]\n",
+    ).replace(
+        "aliases: {high: k3, low: k3-low}",
+        "aliases: {high: k3, medium: k3-medium, low: k3-low}",
+    )
+    _write_catalogue(tmp_path, catalogue)
+    config = _v2_config({effort: {"model": f"k3@{effort}"} for effort in ("low", "medium", "high")})
+    expanded = _expand_v2(config, tmp_path)
+    models = expanded["config"]["opencodeConfig"]["provider"]["kimi-coding"]["models"]
+    assert list(models) == ["k3", "k3-medium", "k3-low"]
+    assert models["k3-medium"]["options"] == {"thinking": {"type": "enabled", "effort": "medium"}}
+    agents = expanded["config"]["opencodeConfig"]["agent"]
+    assert agents["medium"]["model"] == "kimi-coding/k3-medium"
 
 
 def test_authored_carrier_field_conflicts_with_the_ref(tmp_path):

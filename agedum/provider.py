@@ -1496,7 +1496,7 @@ def expand_model_refs(config: dict, base_dir: Path | None = None) -> dict:
 # declared_efforts): refs are `<catalogue key>@<effort>`, declared efforts are
 # enumerated high-first regardless of authoring order, and every catalogue
 # `carrierMeta.efforts` / `aliases` entry must be inside it.
-EFFORT_ALPHABET = ("high", "low")
+EFFORT_ALPHABET = ("high", "medium", "low")
 
 # Family → effort carrier (the builder's EFFORT_CARRIERS): where a declared
 # effort lands in the derived output. ``variant`` → a `variant` field on the

@@ -414,6 +414,34 @@ def test_rung_options_canonical_order_while_chains_keep_authored_order(tmp_path)
     assert failover["rungOptions"]["glm-p/glm-x@low"] == {"reasoning_effort": "low"}
 
 
+def test_medium_source_and_rungs_preserve_exact_effort_and_canonical_order(tmp_path):
+    catalogue = FAILOVER_CATALOGUE.replace(
+        "    family: gpt\n    efforts: [high, low]\n",
+        "    family: gpt\n    efforts: [high, medium, low]\n",
+    ).replace(
+        "    family: glm\n    efforts: [high, low]\n",
+        "    family: glm\n    efforts: [high, medium, low]\n",
+    )
+    _write_catalogue(tmp_path, catalogue)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@medium"}},
+        failover_intent=_intent({"sol@medium": ["glm-x@low", "glm-x@medium", "glm-x@high"]}),
+    )
+    expanded = _expand(config, tmp_path)
+    assert expanded["config"]["opencodeConfig"]["agent"]["m"]["variant"] == "medium"
+    assert expanded["failover"]["chains"] == {
+        "openai/sol@medium": ["glm-p/glm-x@low", "glm-p/glm-x@medium", "glm-p/glm-x@high"]
+    }
+    assert list(expanded["failover"]["rungOptions"]) == [
+        "glm-p/glm-x@high",
+        "glm-p/glm-x@medium",
+        "glm-p/glm-x@low",
+    ]
+    assert expanded["failover"]["rungOptions"]["glm-p/glm-x@medium"] == {
+        "reasoning_effort": "medium"
+    }
+
+
 def test_vision_walk_is_provider_major_over_the_universe(tmp_path):
     _write_catalogue(tmp_path)
     config = _config(

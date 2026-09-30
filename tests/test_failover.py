@@ -1209,6 +1209,18 @@ def test_resolve_chain_exact_variant_still_preferred_over_fallback():
     )
 
 
+def test_resolve_chain_exact_medium_variant_precedes_high_and_low():
+    route = _route("http://up", models={"m1": {"id": "m1"}})
+    chains = {
+        "p/m1@high": ("f1/r1",),
+        "p/m1@medium": ("f2/r2",),
+        "p/m1@low": ("f3/r3",),
+    }
+    assert _resolver(chains)._resolve_chain(
+        "p", route, {"model": "m1", "reasoning_effort": "medium"}
+    ) == ("p/m1@medium", ("f2/r2",))
+
+
 def test_resolve_chain_base_fallback_is_sorted_and_deterministic():
     # A variant with no authored chain (medium) misses both exact candidates; the
     # fallback picks the sorted-first surviving chain sharing the base.
@@ -1217,6 +1229,15 @@ def test_resolve_chain_base_fallback_is_sorted_and_deterministic():
     assert _resolver(chains)._resolve_chain(
         "p", route, {"model": "m1", "reasoning_effort": "medium"}
     ) == ("p/m1@high", ("f2/r2",))
+
+
+def test_resolve_chain_missing_exact_effort_uses_surviving_medium_for_same_model():
+    route = _route("http://up", models={"m1": {"id": "m1"}})
+    chains = {"p/m1@medium": ("f1/r1",), "p/other@high": ("f2/r2",)}
+    assert _resolver(chains)._resolve_chain("p", route, {"model": "m1"}) == (
+        "p/m1@medium",
+        ("f1/r1",),
+    )
 
 
 def test_resolve_chain_base_fallback_needs_a_matching_base():

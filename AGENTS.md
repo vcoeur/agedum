@@ -311,7 +311,9 @@ Two modes, dispatched in `cli/main.py` on the first argument:
    families — validated whenever the catalogue loads, read by nothing on the v1 path
    (`modelRef` filing stays byte-identical). A YAML config may declare
    **`schema: agedum-provider/v2`** — the effort-carrier expansion opt-in: agent entries
-   and `config.model` may declare `model: <catalogue-key>@<effort>` refs, and an optional
+    and `config.model` may declare `model: <catalogue-key>@<effort>` refs (`high`,
+    `medium`, `low` in canonical order, only when listed in that model's
+    `carrierMeta.efforts`), and an optional
    top-level `expansionModels` list (consumed like `modelsCatalog`) declares universe
    members with no agent entry (failover-only models). The engine derives the
    carrier-specific output from `carrierMeta` — `options.reasoningEffort` (deepseek/glm),
@@ -337,7 +339,7 @@ Two modes, dispatched in `cli/main.py` on the first argument:
    drop, chains left without rungs drop, and zero surviving chains omit the whole block
    (absence means ignore, never an error); surviving chains' rung refs join the expansion
    universe after `expansionModels` — a rung-only model files without `expansionModels` —
-   and translate per carrier (`provider/key@effort`; kimi rungs to the bare
+    and translate per carrier (`provider/key@effort`; kimi rungs to the bare
    `provider/<aliases[effort]>`); `rungOptions` carries `{"reasoning_effort": effort}`
    (snake_case) for the used variant/reasoningEffort rungs in canonical effort order;
    `vision` derives from the catalogue's `carrierMeta.vision` facts (one entry per
