@@ -1130,7 +1130,7 @@ def test_duplicate_provider_rungs_deduped():
             "kimi-coding/k3-low": ["kimi-coding/k3"],
         }
     )
-    spec, _ = failover_spec(config, {"KIMI_API_KEY": "sk-kimi"})
+    spec, _ = failover_spec(config, {"KIMI_API_KEY": "sk"})
     assert spec["chains"]["kimi-coding/k3"] == ("kimi-coding/k3-low",)
 
 
@@ -1944,6 +1944,50 @@ def test_wait_cleared_after_forged_wall_pins_nothing(capsys):
     assert "agedum failover: p/m1 wait cleared — primary answered after" in stderr
 
 
+def test_wait_chainless_engagement_ignores_a_same_named_chain_pin(capsys):
+    # N1 — the hazard the no-pin-read rule guards against: an `id` override puts only
+    # the wire id in the reverse map, so a request for the KEY name is chainless while
+    # its engagement chain_key (`p/m1`) IS a real chain key. A naive pin-table read
+    # would inherit the mapped request's pin, start the chainless walk at index >= 1,
+    # skip the only attempt, and synthesize a 502.
+    with (
+        _StubUpstream("p", script=[(429, "usage limit exceeded", {})] * 2) as a,
+        _StubUpstream("f1") as b,
+    ):
+        routes = {
+            "p": _route(a.base_url, models={"m1": {"id": "mY"}}),
+            "f1": _route(b.base_url, models={"r1": {"id": "r1"}}),
+        }
+        spec = _spec(
+            routes,
+            {"p/m1": ["f1/r1"]},
+            vision={"p/m1": True, "f1/r1": True},
+            wait=_wait(),
+        )
+        with FailoverProxy(spec) as proxy:
+            handler = proxy._server.RequestHandlerClass
+            # A mapped request (the wire id) walls at the primary and lands on the
+            # rung: the pin the naive read would trip on now exists.
+            first = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body(model="mY"))
+            assert handler._pins == {"p/m1#text": 1}
+            # The key-name-as-wire-model request is chainless: the engagement walks
+            # the primary despite the pin, and the primary's wall forges.
+            second = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body(model="m1"))
+    assert first[0] == 200
+    assert json.loads(first[2]) == {"ok": "f1"}
+    assert second[0] == 429
+    assert second[1]["Retry-After"] == "3600"
+    assert second[2] == b"usage limit exceeded"
+    assert len(a.requests) == 2  # the chainless walk reached the primary
+    assert len(b.requests) == 1  # ...and only the primary (no rung, no 502)
+    assert list(handler._wait_forges) == ["p/m1#text"]
+    stderr = capsys.readouterr().err
+    assert (
+        "agedum failover: p/m1 wait: walled at rung 0 (primary)"
+        " — retryable wall sent, opencode retries in 3600s" in stderr
+    )
+
+
 def test_wait_vision_filtered_exhaustion_waits_on_the_primary_wall(capsys):
     # An image-bearing request whose chain rungs are all non-vision exhausts with the
     # primary's wall as last error — waitable, keyed per vision class.
@@ -1993,6 +2037,12 @@ def test_retry_after_parsing_delta_date_and_garbage():
     assert _retry_after_seconds([("Retry-After", "nan")]) is None
     assert _retry_after_seconds([("Content-Type", "text/plain")]) is None
     assert _retry_after_seconds([]) is None
+
+
+def test_retry_after_negative_delta_clamps_to_zero():
+    # The float-branch clamp: a negative delta-seconds value (nonsense from the
+    # upstream) means retry-now, exactly like an HTTP-date already past.
+    assert _retry_after_seconds([("Retry-After", "-5")]) == 0.0
 
 
 def test_waitable_reset_rule():
