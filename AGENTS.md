@@ -36,15 +36,27 @@ match); top-level skills keep their declared name.
   `FailoverProxy` (`proxy.py`) and rewrites the routed providers' `options.baseURL` to
   `<proxy>/oc/<id>` in `OPENCODE_CONFIG_CONTENT`: on an admission wall (429/402/limit
   text) the proxy walks the model's configured chain — rewriting auth, model id, and
-  effort options per exact runtime rung (including `rungOptions` overrides for
-  `<provider>/<model>@<effort>`), translating a Responses-shaped (openai/OAuth) request
-  onto its chat-completions rungs (`/chat/completions` + Responses SSE back, via the
-  codex translator), and resolving a knob-less body to its model key's authored chain
-  when the exact-variant and bare lookups miss (openai's Responses wire carries no
-  effort knob; workers inherit their base model's chain) — so the session lands on a
-  fallback instead of dying, and
-  opencode never enters its same-model retry loop. Absent key → no proxy, byte-identical
-   config (the rollback switch). Detail: `docs/harnesses/opencode.md#failover`.
+   effort options per exact runtime rung (including `rungOptions` overrides for
+   `<provider>/<model>@<effort>`), translating a Responses-shaped (openai/OAuth) request
+   onto its chat-completions rungs (`/chat/completions` + Responses SSE back, via the
+   codex translator), and resolving a knob-less body to its model key's authored chain
+   when the exact-variant and bare lookups miss (openai's Responses wire carries no
+   effort knob; workers inherit their base model's chain) — so the session lands on a
+   fallback instead of dying, and
+   opencode never enters its same-model retry loop. A **`wait`** sub-block
+   (`{maxWaitHours, probeSeconds?}`) opts into wait-for-the-limit-reset: at true chain
+   exhaustion on a classified wall the proxy emits a retryable `429 + Retry-After`
+   (the wall's own header when it parses and fits `maxWaitHours`, else `probeSeconds`,
+   body verbatim) instead of the verbatim error, and opencode's own session retry
+   bridges the window; with `wait` present `chains` becomes optional (the wait-only
+   shape — an unmapped model walks its primary alone instead of transparent-forwarding,
+   so a wall is waitable there too), and the first primary 200 after a wait logs
+   `wait cleared`. Absent key → no proxy, byte-identical
+    config (the rollback switch); without `wait` every failover behaviour is
+   byte-identical too. Engines older than the release introducing `wait` silently drop
+   an authored `failoverIntent.wait` key (unknown intent keys are ignored) — the
+   launcher runs without wait, no error; same documented-minimum pattern as the 0.61
+   window. Detail: `docs/harnesses/opencode.md#failover`.
    **Prompt templates**: an abstract included YAML fragment may define top-level
    `promptTemplates` names→strings; the launcher supplies `config.promptVars` defaults
     and an agent opts in with `prompt: {_template: name, _vars: {ID: value}}`;

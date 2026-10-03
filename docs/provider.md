@@ -171,7 +171,10 @@ the feature; every later engine keeps it:
 
 One silent-downgrade trap: a **0.61 engine loads a failover-bearing v2 config and
 silently runs it without failover** — `failoverIntent` postdates 0.61, and the engine
-ignores an unknown top-level key rather than refusing it.
+ignores an unknown top-level key rather than refusing it. The same applies to
+`failoverIntent.wait` on engines older than the release that introduced it: the authored
+key is dropped, the launcher runs without wait, and no error surfaces (the numbered
+[capability floor](#engine-versions) row lands with that release).
 
 ## Extending configs — `extends` { #extends }
 
@@ -493,8 +496,11 @@ failoverIntent:
     status: [429, 402]
     messages: [usage limit, quota, rate limit]
   maxWalk: 3
-  chains:                    # explicit key@effort refs against catalogue keys
-    sol@low: [glm-flash@high]
+  wait:                      # authored data — wait-for-the-limit-reset opt-in
+    maxWaitHours: 8
+    probeSeconds: 3600
+  chains:                    # explicit key@effort refs against catalogue keys;
+    sol@low: [glm-flash@high]  # optional when `wait` is authored (the wait-only shape)
     terra@low: [glm-flash@high]
 ```
 
@@ -510,8 +516,11 @@ agents and intent** at load time — nothing precomputes it — then strips the 
   errors are authoring errors; they never depend on what the filter would later do).
 - **Filtering** — a chain whose source is outside mains ∪ workers drops; a chain left
   without rungs drops; zero surviving chains omit the whole block — no `failover` key in
-  the effective config. Absence means ignore, never an error: a hand config may inherit
-  an intent whose chains all drop and launch without failover.
+  the effective config — **unless `wait` is authored**: the wait-only shape survives with
+  `chains: {}` / `rungOptions: {}` and the derived `vision` (the walk then runs the
+  primary alone and waits at exhaustion). Absence means ignore, never an error: a hand
+  config may inherit an intent whose chains all drop — without `wait` it launches without
+  failover, with `wait` it launches wait-only.
 - **Universe** — the surviving chains' rung refs join the expansion universe after
   `expansionModels`, in authored order; dropped chains contribute nothing to filing. A
   rung-only model therefore files with no `expansionModels` (the key is subsumed in any
@@ -531,10 +540,11 @@ agents and intent** at load time — nothing precomputes it — then strips the 
   is a named error — but only when a
   block is actually derived (an omitted block demands no vision facts).
 
-`detect`/`maxWalk` are authored data copied verbatim, never interpreted or validated at
-expansion — launch-time validation polices the emitted block for derived and authored
-blocks alike. The engine filters and omits; it never enforces that a config's intent
-names its roster — that invariant stays authoring-side.
+`detect`/`maxWalk`/`wait` are authored data copied verbatim, never interpreted or validated
+at expansion — launch-time validation polices the emitted block for derived and authored
+blocks alike (`wait`'s semantics live at
+[`failover.wait`](harnesses/opencode.md#failover-wait)). The engine filters and omits; it
+never enforces that a config's intent names its roster — that invariant stays authoring-side.
 
 The key **collision rules**, per root schema:
 
