@@ -271,6 +271,102 @@ def test_zero_surviving_chains_omits_the_whole_block(tmp_path):
     assert "failoverIntent" not in expanded
 
 
+# --- the `wait` key (failover option: wait for the limit reset) ---
+
+
+_WAIT = {"maxWaitHours": 8, "probeSeconds": 3600}
+
+
+def test_wait_only_intent_emits_the_block(tmp_path):
+    # The wait-only shape: no `chains` key at all, the block still derived —
+    # empty chains/rungOptions, vision from the universe — and the intent
+    # consumed.
+    _write_catalogue(tmp_path)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent={"detect": _DETECT, "maxWalk": 3, "wait": dict(_WAIT)},
+    )
+    expanded = _expand(config, tmp_path)
+    assert "failoverIntent" not in expanded
+    assert expanded["failover"] == {
+        "detect": _DETECT,
+        "maxWalk": 3,
+        "wait": _WAIT,
+        "vision": {"openai/sol": True},
+        "chains": {},
+        "rungOptions": {},
+    }
+    # Determinism: the same input twice expands to the identical dict.
+    assert _expand(config, tmp_path) == expanded
+
+
+def test_wait_only_intent_with_zero_universe_derives_an_empty_vision_map(tmp_path):
+    # A wait-only launcher with no `@`-refs and no expansionModels has an empty
+    # universe: the derived vision map is empty (and launch-time `failover_spec`
+    # accepts it — the primary is exempt from the vision filter anyway).
+    _write_catalogue(tmp_path)
+    config = _config(
+        {},
+        failover_intent={"detect": _DETECT, "maxWalk": 3, "wait": dict(_WAIT)},
+    )
+    assert _expand(config, tmp_path)["failover"]["vision"] == {}
+
+
+def test_zero_surviving_chains_with_wait_emits_the_block(tmp_path):
+    # The changed omission rule: with `wait` authored, zero surviving chains
+    # still emits (the wait-only shape survives the filter); without `wait`
+    # the omission above is untouched.
+    _write_catalogue(tmp_path)
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent={
+            "detect": _DETECT,
+            "maxWalk": 3,
+            "wait": dict(_WAIT),
+            "chains": {"k3@high": ["glm-x@high"]},  # k3 is outside the roster — dropped
+        },
+    )
+    failover = _expand(config, tmp_path)["failover"]
+    assert failover["wait"] == _WAIT
+    assert failover["chains"] == {}
+    assert failover["rungOptions"] == {}
+    assert failover["vision"] == {"openai/sol": True}
+
+
+def test_wait_is_copied_verbatim_into_the_derived_block(tmp_path):
+    # `wait` joins `detect`/`maxWalk` as authored data copied verbatim — never
+    # interpreted at expansion; launch-time `failover_spec` polices it.
+    _write_catalogue(tmp_path)
+    wait = {"maxWaitHours": 6, "probeSeconds": 1800}
+    config = _config(
+        {"m": {"mode": "primary", "model": "sol@high"}},
+        failover_intent={
+            "detect": _DETECT,
+            "maxWalk": 3,
+            "wait": wait,
+            "chains": {"sol@high": ["glm-x@high"]},
+        },
+    )
+    failover = _expand(config, tmp_path)["failover"]
+    assert failover["wait"] == {"maxWaitHours": 6, "probeSeconds": 1800}
+    assert failover["chains"] == {"openai/sol@high": ["glm-p/glm-x@high"]}
+
+
+def test_v1_precomputed_failover_with_wait_passes_through_byte_identical():
+    # v1 documents never expand: a precomputed `failover` block (it is not an
+    # intent marker) carrying `wait` passes through untouched — `wait`'s only v1
+    # surface is `failover_spec` at launch.
+    block = {
+        "detect": _DETECT,
+        "maxWalk": 3,
+        "vision": {"ds/ds-flash": True},
+        "chains": {"ds/ds-v4-pro@high": ["ds/ds-flash@high"]},
+        "wait": dict(_WAIT),
+    }
+    config = {"harness": "opencode", "failover": block, "config": {"model": "ds/ds-v4-pro"}}
+    assert expand_carrier_refs(config, root_schema=PROVIDER_SCHEMA_VERSION) is config
+
+
 def test_filter_is_idempotent_on_a_survivor_shape_intent(tmp_path):
     # A converted-shape intent (every chain a survivor) re-filters to itself:
     # the derived chains are the authored chains translated 1:1 — nothing

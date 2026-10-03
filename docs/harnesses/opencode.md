@@ -206,6 +206,64 @@ never told a fallback answered, and the stderr walk lines are the user's only si
 Omitting the key starts no proxy and leaves the emitted config byte-identical — the
 rollback switch.
 
+#### `wait` — wait for the limit reset { #failover-wait }
+
+The optional `wait` sub-block opts a launch into **wait-for-the-limit-reset**. Without it,
+chain exhaustion returns the last upstream error verbatim (native retry/death behaviour).
+With it, a *waitable wall* at **true exhaustion** — the walk reached the end of its
+attempts, never a `maxWalk` cap break, and never the proxy's own unreachable-upstream 502 —
+is answered with a **retryable `429 + Retry-After`** instead: opencode's own session-level
+retry sleeps exactly that long and re-issues the same request through the proxy, which
+re-walks from scratch. One assistant step bridges ≈5× the emitted `Retry-After` (opencode
+retries 5 times per step; the budget resets each step).
+
+```json
+"failover": {
+  "detect": { "status": [429, 402], "messages": ["usage limit", "quota"] },
+  "chains": { "kimi-coding/k3": ["kimi-coding/k3-low"] },
+  "vision": { "kimi-coding/k3": true, "kimi-coding/k3-low": true },
+  "wait": { "maxWaitHours": 8, "probeSeconds": 3600 }
+}
+```
+
+- `maxWaitHours` (required, number > 0) bounds what the proxy itself emits: a forged
+  `Retry-After` never exceeds it, and a wall whose own `Retry-After` exceeds it is not
+  waitable (it passes verbatim). It does not cap a header-carrying wall the client
+  already received — the verbatim passthrough hands the header to opencode, which honours
+  it (hours-scale included).
+- `probeSeconds` (optional integer > 0, default 3600) is the `Retry-After` forged when the
+  wall carries no usable header: a bounded probe — the client re-issues, the proxy
+  re-classifies, and a still-walled wall gets a fresh forge.
+- The reset source is the wall's own `Retry-After` (delta-seconds or HTTP-date) when it
+  parses and fits the cap, else `probeSeconds`. A wall that is already `429` with a usable
+  `Retry-After` within the cap passes through **verbatim** — the forge would be a no-op.
+  Any other waitable wall is forged: status line `429`, the captured headers replayed with
+  exactly one `Retry-After` (the computed reset) replacing any captured one, `Content-Length`
+  recomputed, and the **original upstream body verbatim** (the user's error display
+  survives). A 402 balance wall becomes a retryable 429; a headerless 429 stops dying
+  after ~65 s. Everything else — no `wait` key, a non-wall, a cap break, a reset beyond
+  the cap — is the silent verbatim passthrough, byte-identical to the pre-`wait` proxy.
+
+**The wait-only shape.** With `wait` present, `chains` becomes optional. A chainless
+launcher (`chains` absent or empty) walks its primary alone: the wall reaches true
+exhaustion and the forge fires, so the session waits for the model it was launched with
+instead of dying. The engagement is uniform — a chains-bearing launcher's *unmapped* model
+also walks its primary alone under `wait` (a model with no fallback has exactly one rung
+worth waiting for); without `wait`, an unmapped model still transparent-forwards verbatim.
+A chainless walk is never pinned, and after a wait-retry succeeds on the primary nothing
+is pinned — the next request starts at the primary again.
+
+**stderr lines** (same `agedum failover:` prefix as the walk lines): at the forge (and at
+an already-headered 429 passing verbatim), `wait: walled at rung <index> (<rung>) —
+retryable wall sent, opencode retries in <N>s`; at a non-waitable exhaustion under `wait`,
+`exhausted (<rung>) — wall not waitable (reset beyond maxWaitHours), passing through`; and
+on the first primary 200 after a forge, `wait cleared — primary answered after <T>s`.
+
+**Engine floor.** Engines older than the release introducing `wait` silently drop an
+authored `failoverIntent.wait` key (unknown intent keys are ignored, no error) — the
+launcher runs without wait. Configs start rolling out only once the fleet is past that
+floor.
+
 ### `emitTranscript` — in-band transcript capture (default on) { #emittranscript }
 
 opencode runs as a full-screen alternate-screen TUI, so a terminal capturer (condash,

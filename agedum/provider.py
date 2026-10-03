@@ -515,6 +515,10 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
       ``rung_options`` — straight from the block, with openai rungs pruned (D4: not a
       fallback target in v1 — the OAuth bearer only arrives on openai primaries; a pruned
       rung is a warning) and duplicate runtime rungs deduped (first occurrence wins).
+    - ``wait`` — the authored wait-for-reset block (``maxWaitHours`` required number > 0,
+      ``probeSeconds`` optional integer > 0 defaulting 3600), or ``None``: today's
+      behaviour byte-for-byte. Present, ``chains`` becomes optional (the wait-only
+      shape — the walk runs the primary alone); every other chains rule is unchanged.
     """
     block = config.get("failover")
     if not block:
@@ -645,8 +649,43 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
     if not isinstance(vision, dict) or not all(isinstance(flag, bool) for flag in vision.values()):
         raise ProviderError("`failover.vision` must be a JSON object of model key -> boolean")
 
+    # The wait-for-reset opt-in (design Decision 5): authored data validated here,
+    # never interpreted at expansion. Fail-loud on shapes — `wait` is new, so it
+    # starts strict, unlike the top-level block's silent unknown keys.
+    wait_raw = block.get("wait")
+    wait: dict | None = None
+    if wait_raw is not None:
+        if not isinstance(wait_raw, dict):
+            raise ProviderError("`failover.wait` must be a JSON object")
+        unknown = sorted(set(wait_raw) - {"maxWaitHours", "probeSeconds"})
+        if unknown:
+            raise ProviderError(
+                "`failover.wait` has unknown key(s): " + ", ".join(repr(key) for key in unknown)
+            )
+        max_wait_hours = wait_raw.get("maxWaitHours")
+        if (
+            not isinstance(max_wait_hours, (int, float))
+            or isinstance(max_wait_hours, bool)
+            or not max_wait_hours > 0
+        ):
+            raise ProviderError("`failover.wait.maxWaitHours` must be a number > 0")
+        probe_seconds = wait_raw.get("probeSeconds", 3600)
+        if (
+            not isinstance(probe_seconds, int)
+            or isinstance(probe_seconds, bool)
+            or probe_seconds < 1
+        ):
+            raise ProviderError("`failover.wait.probeSeconds` must be a positive integer")
+        wait = {"maxWaitHours": max_wait_hours, "probeSeconds": probe_seconds}
+
     chains_raw = block.get("chains")
-    if not isinstance(chains_raw, dict) or not chains_raw:
+    if chains_raw is None or chains_raw == {}:
+        # `chains` is optional iff `wait` is present (the wait-only shape: the walk
+        # runs the primary alone); without `wait` today's requirement stands verbatim.
+        if wait is None:
+            raise ProviderError("`failover.chains` must be a non-empty JSON object")
+        chains_raw = {}
+    elif not isinstance(chains_raw, dict):
         raise ProviderError("`failover.chains` must be a non-empty JSON object")
     warnings: list[str] = []
     chains: dict[str, tuple[str, ...]] = {}
@@ -709,6 +748,7 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
             "chains": chains,
             "rung_options": rung_options,
             "routes": routes,
+            "wait": wait,
         },
         warnings,
     )
@@ -1967,10 +2007,12 @@ def _derive_failover_block(
     """Translate the survivors and derive `rungOptions` + `vision`; emit the block.
 
     Steps 5-8 of the resolution semantics, run after the universe plan loop
-    (they read the completed plans). ``detect``/``maxWalk`` are copied verbatim
-    from the intent — presence included: a degraded intent without them emits a
-    degraded block that launch-time ``failover_spec`` refuses, not an
-    expansion-time guess.
+    (they read the completed plans). ``detect``/``maxWalk``/``wait`` are copied
+    verbatim from the intent — presence included: a degraded intent without them
+    emits a degraded block that launch-time ``failover_spec`` refuses, not an
+    expansion-time guess. With zero survivors the caller still emits when
+    ``wait`` is authored (the wait-only shape): this function then returns
+    ``chains: {}`` / ``rungOptions: {}`` with `vision` derived from the universe.
     """
     # Step 5 — per-carrier translation (the `_translated_failover_ref` seam).
     # Two surviving sources translating to the same runtime ref are a named
@@ -2048,6 +2090,8 @@ def _derive_failover_block(
         derived["detect"] = intent["detect"]
     if "maxWalk" in intent:
         derived["maxWalk"] = intent["maxWalk"]
+    if "wait" in intent:
+        derived["wait"] = intent["wait"]
     derived["vision"] = vision
     derived["chains"] = chains
     derived["rungOptions"] = rung_options
@@ -2115,8 +2159,9 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
     # Failover intent first (Decision 2 sequencing): resolve every ref loud,
     # map the roster, filter the chains, and extend the universe walk with the
     # surviving chains' rung refs — so the plan loop below files them after
-    # `expansionModels`. Empty survivors means the block is omitted; the
-    # emitted block itself is derived last, from the completed plans.
+    # `expansionModels`. Empty survivors omits the block unless a `wait` is
+    # authored (the wait-only shape); the emitted block itself is derived last,
+    # from the completed plans.
     surviving: list[tuple[str, _ModelRef, list[_ModelRef]]] = []
     if intent is not None:
         surviving = _resolve_failover_intent(config, intent, catalog, carrier_meta, universe)
@@ -2197,7 +2242,10 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
     oc["provider"] = oc_providers
     new_block["opencodeConfig"] = oc
     result["config"] = new_block
-    if intent is not None and surviving:
+    # Zero surviving chains normally omits the block (absence means ignore) — but a
+    # `wait` intent is meaningful with no chains at all (the wait-only shape: the
+    # walk runs the primary alone), so the block is emitted then.
+    if intent is not None and (surviving or "wait" in intent):
         result["failover"] = _derive_failover_block(intent, surviving, plans, key_order)
     return result
 

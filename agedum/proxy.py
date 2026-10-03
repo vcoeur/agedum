@@ -35,9 +35,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import sys
 import threading
+import time
 import uuid
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import count
 from urllib.parse import SplitResult, urlsplit
@@ -1819,8 +1823,9 @@ class _FailoverHandler(_BaseProxyHandler):
 
     Class attributes are bound per :class:`FailoverProxy` instance (the ``type(...)``
     pattern below), so several proxies can coexist — as the test suite does — without
-    sharing state. Only the rung pin is mutable shared state, guarded by a lock: one
-    launch's main + workers all ride the same proxy instance.
+    sharing state. Two pieces of mutable shared state, both guarded by a lock: the
+    rung pin and the wait-window state (one launch's main + workers all ride the same
+    proxy instance).
     """
 
     routes: dict = {}
@@ -1830,11 +1835,19 @@ class _FailoverHandler(_BaseProxyHandler):
     chains: dict = {}
     vision: dict = {}
     rung_options: dict = {}
+    # The authored `wait` block (design Decision 2): None — or absent from the spec —
+    # is today's behaviour byte-for-byte; present, true exhaustion on a waitable wall
+    # emits a retryable 429 + Retry-After instead of the verbatim error.
+    wait: dict | None = None
     # Stashed by _prepare_rung for the walk's relay (one handler instance per
     # request): non-empty when the rung hop translated a Responses request onto a
     # chat-completions rung, carrying the rung's upstream model id.
     _translated_model: str = ""
     _pins: dict = {}
+    # Wait-window state (design Decision 4): `{chain_key#vision_class: first_forged_ts}`
+    # — the first forge per key opens the window; the first primary 200 closes it and
+    # logs the cleared line. Fresh per proxy instance, guarded by the pin lock.
+    _wait_forges: dict = {}
     _pins_lock: threading.Lock = threading.Lock()
 
     def do_POST(self) -> None:  # noqa: N802 (http.server naming)
@@ -1895,20 +1908,32 @@ class _FailoverHandler(_BaseProxyHandler):
         vision_class = "vision" if _body_has_image(parsed) else "text"
         chain_key, chain = self._resolve_chain(provider_id, route, parsed)
         if chain is None:
-            # This model key has no mechanical chain: transparent primary forward — an
-            # unmapped model degrades to exactly today's behaviour, never to something
-            # worse (goal 1's floor).
-            self._forward_once(route, rest, raw)
-            return
+            if not self.wait:
+                # This model key has no mechanical chain: transparent primary forward —
+                # an unmapped model degrades to exactly today's behaviour, never to
+                # something worse (goal 1's floor).
+                self._forward_once(route, rest, raw)
+                return
+            # Engagement (design Decision 3): with `wait` configured the chainless
+            # lookup still walks — the primary alone (attempts [None]) — so a wall
+            # reaches true exhaustion and the waitable-wall forge. The log key is the
+            # wire reference the client asked for; no variant suffix, because no
+            # chain resolution happened.
+            chain_key = f"{provider_id}/{parsed.get('model') or ''}"
+            chain = ()
 
         # attempts[0] is the primary (the route's own provider); the rest are the chain
         # rungs in walk order. The primary is exempt from the vision filter (opencode
         # routed the request there); a modality rejection from it matches the safety
         # net below and the walk continues.
         attempts: list[str | None] = [None, *chain]
-        index = self._pinned_rung(chain_key, vision_class)
+        # A chainless walk has nothing pinnable — and no pin-table read either: a pin
+        # under a same-named real chain key could skip the only attempt.
+        index = self._pinned_rung(chain_key, vision_class) if chain else 0
         start_index = index
-        last_error: tuple[int, list[tuple[str, str]], bytes] | None = None
+        last_error: tuple[int, list[tuple[str, str]], bytes, bool] | None = None
+        last_error_index = 0
+        last_error_rung: str | None = None
         rungs_tried = 0
         while index < len(attempts):
             rung = attempts[index]
@@ -1935,7 +1960,9 @@ class _FailoverHandler(_BaseProxyHandler):
                     502,
                     [],
                     f"agedum failover proxy: upstream error: {exc}".encode(),
+                    False,
                 )
+                last_error_index, last_error_rung = index, rung
                 if rung is not None:
                     rungs_tried += 1
                 index += 1
@@ -1944,11 +1971,17 @@ class _FailoverHandler(_BaseProxyHandler):
             if wall:
                 self._log_walk(chain_key, index, rung)
                 last_error = self._capture_error(response, head)
+                last_error_index, last_error_rung = index, rung
                 connection.close()
                 if rung is not None:
                     rungs_tried += 1
                 index += 1
                 continue
+            if rung is None and response.status == 200:
+                # A primary 200 ends a wait window (design Decision 6, line 3): logged
+                # once — the first one after a forge — then the key is dropped. With no
+                # forge in flight the dict is empty and this is a no-op.
+                self._log_wait_cleared(chain_key, vision_class)
             if rung is not None and 200 <= response.status < 300:
                 self._pin_rung(chain_key, vision_class, index)
             try:
@@ -1976,7 +2009,17 @@ class _FailoverHandler(_BaseProxyHandler):
             finally:
                 connection.close()
             return
-        self._send_last_error(last_error)
+        # `index >= len(attempts)` is true exhaustion; the loop's other exit is the
+        # `max_walk` cap break (untried rungs remain) — the forge fires only on the
+        # former (design Decision 2).
+        self._send_last_error(
+            last_error,
+            chain_key=chain_key,
+            vision_class=vision_class,
+            wall_index=last_error_index,
+            wall_rung=last_error_rung,
+            exhausted=index >= len(attempts),
+        )
 
     def _resolve_chain(
         self, provider_id: str, route: dict, parsed: dict
@@ -2142,23 +2185,103 @@ class _FailoverHandler(_BaseProxyHandler):
 
     def _capture_error(
         self, response: http.client.HTTPResponse, head: bytes
-    ) -> tuple[int, list[tuple[str, str]], bytes]:
-        """The last upstream error, captured for the exhaustion passthrough."""
+    ) -> tuple[int, list[tuple[str, str]], bytes, bool]:
+        """The last upstream error, captured for the exhaustion passthrough.
+
+        The 4th slot marks the error a *classified* wall — the synthesized
+        unreachable-upstream 502s carry ``False`` — and only classified walls are
+        waitable (design Decision 2).
+        """
         rest = response.read()
         headers = [
             (key, value)
             for key, value in response.getheaders()
             if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
         ]
-        return response.status, headers, head + rest
+        return response.status, headers, head + rest, True
 
-    def _send_last_error(self, last_error: tuple[int, list[tuple[str, str]], bytes] | None) -> None:
+    def _send_last_error(
+        self,
+        last_error: tuple[int, list[tuple[str, str]], bytes, bool] | None,
+        *,
+        chain_key: str = "",
+        vision_class: str = "text",
+        wall_index: int = 0,
+        wall_rung: str | None = None,
+        exhausted: bool = True,
+    ) -> None:
         """Chain exhausted: the last upstream error verbatim (``Retry-After`` survives —
-        it is not hop-by-hop), so opencode's hardcoded retry runs exactly as today."""
+        it is not hop-by-hop), so opencode's hardcoded retry runs exactly as today.
+
+        Under the ``wait`` opt-in, a *classified wall* at true exhaustion is instead
+        made waitable (design Decision 2): a 429 already carrying a usable
+        ``Retry-After`` within the cap passes verbatim — the forge would be a no-op,
+        the client bridges it today (probe A); any other waitable wall is forged into
+        ``429 + Retry-After`` (the wall's own header when it has one, else
+        ``probeSeconds``) with the body byte-verbatim; a wall whose reset exceeds
+        ``maxWaitHours`` passes verbatim with the not-waitable line. Everything else
+        — no ``wait``, a non-wall (incl. the synthesized 502), a cap break — is
+        today's silent verbatim passthrough.
+        """
         if last_error is None:
             self._send_error(502, "agedum failover proxy: no upstream answered")
             return
-        status, headers, body = last_error
+        status, headers, body, is_wall = last_error
+        wait = self.wait if (is_wall and exhausted) else None
+        header_seconds = _retry_after_seconds(headers) if wait else None
+        reset = _waitable_reset(wait, headers) if wait else None
+        where = "primary" if wall_rung is None else wall_rung
+        if wait is not None and reset is None:
+            # A classified wall whose reset is beyond the cap: not waitable — the
+            # client sees the wall verbatim, exactly as without the key.
+            print(
+                f"agedum failover: {chain_key} exhausted ({where})"
+                " — wall not waitable (reset beyond maxWaitHours), passing through",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif wait is not None and status == 429 and header_seconds is not None:
+            # Already a retryable wall carrying its own usable header within the cap:
+            # today's passthrough IS the wait (probe A) — name it and pass through
+            # untouched. A headerless 429 takes the forge instead (probe B).
+            print(
+                f"agedum failover: {chain_key} wait: walled at rung {wall_index} ({where})"
+                f" — retryable wall sent, opencode retries in {math.ceil(reset)}s",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif wait is not None:
+            # The forge: status rewritten to the retryable 429, the captured header
+            # list replayed with exactly one Retry-After (the computed reset, ceil to
+            # whole seconds) replacing any captured one, Content-Length recomputed,
+            # body byte-verbatim (the user's error display survives intact). The
+            # capture already strips hop-by-hop headers + Content-Length, and the
+            # hop's Accept-Encoding: identity guarantees an uncompressed body.
+            seconds = math.ceil(reset)
+            with self._pins_lock:
+                self._wait_forges.setdefault(f"{chain_key}#{vision_class}", time.monotonic())
+            print(
+                f"agedum failover: {chain_key} wait: walled at rung {wall_index} ({where})"
+                f" — retryable wall sent, opencode retries in {seconds}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            self.send_response(429)
+            replaced = False
+            for key, value in headers:
+                if key.lower() == "retry-after":
+                    if not replaced:
+                        self.send_header(key, str(seconds))
+                        replaced = True
+                    continue
+                self.send_header(key, value)
+            if not replaced:
+                self.send_header("Retry-After", str(seconds))
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_response(status)
         for key, value in headers:
             self.send_header(key, value)
@@ -2166,6 +2289,20 @@ class _FailoverHandler(_BaseProxyHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
+
+    def _log_wait_cleared(self, chain_key: str, vision_class: str) -> None:
+        """The wait-window completion line (design Decision 6, line 3): the first
+        primary 200 after a forge logs it once and closes the window."""
+        with self._pins_lock:
+            forged_at = self._wait_forges.pop(f"{chain_key}#{vision_class}", None)
+        if forged_at is None:
+            return
+        waited = time.monotonic() - forged_at
+        print(
+            f"agedum failover: {chain_key} wait cleared — primary answered after {waited:.0f}s",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _relay_buffered(self, response: http.client.HTTPResponse, head: bytes) -> None:
         """Relay a non-wall 4xx whose head the classifier already buffered."""
@@ -2228,6 +2365,48 @@ def _join(upstream: SplitResult, rest: str) -> str:
     return upstream.path.rstrip("/") + "/" + rest
 
 
+def _retry_after_seconds(headers: list[tuple[str, str]]) -> float | None:
+    """A wall's own ``Retry-After`` as seconds (delta-seconds or HTTP-date), or ``None``.
+
+    The first ``Retry-After`` header wins; a value that parses as neither form (or a
+    non-finite delta) means the wall is headerless for wait purposes. Negative values
+    (an HTTP-date already past) clamp to 0 — retry now.
+    """
+    for key, value in headers:
+        if key.lower() != "retry-after":
+            continue
+        text = value.strip()
+        try:
+            seconds = float(text)
+        except ValueError:
+            seconds = None
+        if seconds is not None:
+            return max(0.0, seconds) if math.isfinite(seconds) else None
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    return None
+
+
+def _waitable_reset(wait: dict, headers: list[tuple[str, str]]) -> float | None:
+    """The waitable reset in seconds for a classified wall, or ``None`` (not waitable).
+
+    The wall's own ``Retry-After`` when it parses, else the configured
+    ``probeSeconds`` (design Decision 2); a computed reset beyond
+    ``maxWaitHours × 3600`` is not waitable — the probe-forged header never exceeds
+    the cap, and a wall whose own header exceeds it passes verbatim.
+    """
+    header = _retry_after_seconds(headers)
+    reset = header if header is not None else wait["probeSeconds"]
+    if reset > wait["maxWaitHours"] * 3600:
+        return None
+    return reset
+
+
 class FailoverProxy(_LocalProxy):
     """A localhost failover proxy over a resolved route table.
 
@@ -2237,7 +2416,8 @@ class FailoverProxy(_LocalProxy):
     ``provider.<id>.options.baseURL`` as ``<base_url>/oc/<id>`` while the ``with`` block
     is open. ``spec`` carries the route table (per provider id: upstream, resolved key,
     model catalogue, wire-id reverse map), the wall-detection lists, the mechanical
-    chains, the vision map, and the walk cap.
+    chains, the vision map, the walk cap, and the optional ``wait`` block (None —
+    today's behaviour byte-for-byte; present — the waitable-wall forge at exhaustion).
     """
 
     def __init__(self, spec: dict) -> None:
@@ -2253,9 +2433,11 @@ class FailoverProxy(_LocalProxy):
                     "chains": spec["chains"],
                     "vision": spec["vision"],
                     "rung_options": spec.get("rung_options", {}),
+                    "wait": spec.get("wait"),
                     # Fresh per proxy instance: two proxies in one process (tests) must
-                    # not share a pin table.
+                    # not share a pin table or a wait-window state.
                     "_pins": {},
+                    "_wait_forges": {},
                     "_pins_lock": threading.Lock(),
                 },
             )
