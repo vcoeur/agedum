@@ -168,6 +168,7 @@ the feature; every later engine keeps it:
 | [`carrierMeta`](#model-catalogue) tolerated in a catalogue (read only by v2 expansion) | 0.60 |
 | [`agedum-provider/v2` intent documents](#expansion) (carrier expansion) | 0.61 |
 | [`failoverIntent`](#failover-intent) | 0.62 |
+| [`failoverIntent.wait`](harnesses/opencode.md#failover-wait) (wait-for-the-limit-reset) | 0.66 |
 
 One silent-downgrade trap: a **0.61 engine loads a failover-bearing v2 config and
 silently runs it without failover** — `failoverIntent` postdates 0.61, and the engine
