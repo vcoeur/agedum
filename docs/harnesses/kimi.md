@@ -132,14 +132,17 @@ The above launches `kimi --model kimi-k2.7-code`, reading the generated `config.
 at startup and persists it by writing a temp file and **renaming it over** `config.toml` — and
 a rename cannot replace a bind mount, so a read-only bind there fails `EBUSY` and the harness
 reports `Skipped refreshing <provider>` on every launch. So a `baseUrl` launcher instead gets
-its own Kimi home: agedum sets **`KIMI_CODE_HOME`** to `~/.cache/agedum/kimi/<endpoint-model
-slug>` and *seeds* `config.toml` (and `mcp.json`) there as real files. The rewrite lands, the
+an endpoint/model Kimi home: agedum sets **`KIMI_CODE_HOME`** to
+`~/.cache/agedum/kimi/<endpoint-model-sha256>` and *seeds* `config.toml` (and `mcp.json`)
+there as real files. The rewrite lands, the
 user's own `~/.kimi-code` is untouched, and the launcher stays authoritative because agedum
 re-seeds every launch — whatever Kimi discovered in-session is replaced by the declared
 config. `kimi_config_dir()` reads the same variable, so the instruction and skill targets
-follow into that home. The dir is derived from endpoint + model, so repeat launches of one
-launcher reuse it (skills, sessions, logs); **two launchers do not share session history, and
-neither sees `~/.kimi-code`'s**. Without `baseUrl` nothing is generated: Kimi runs on its own
+follow into that home. The digest uses the exact endpoint/model pair, preserving case and
+punctuation, not credentials or MCP/effort settings. The same pair intentionally shares
+skills, sessions and logs across launchers; distinct pairs use distinct homes. Old slug-based
+directories are not migrated automatically. Neither home sees `~/.kimi-code`'s history.
+Without `baseUrl` nothing is generated: Kimi runs on its own
 account config in `~/.kimi-code`, and an injected `mcp.json` is read-only bound there as before.
 
 ### Several models — tiers and subagents { #several-models }

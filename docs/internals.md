@@ -5,10 +5,11 @@ description: How agedum injects compiled files — a private bubblewrap mount na
 
 # Internals
 
-agedum's launch is deliberately simple: compile the source to a throwaway directory,
-then run the command under [bubblewrap](https://github.com/containers/bubblewrap) so
+agedum compiles source into a throwaway directory and binds required files at their
+harness-visible targets under [bubblewrap](https://github.com/containers/bubblewrap), so
 the compiled files appear at their expected paths for that process — and only that
-process. The real working tree and `$HOME` are never written to.
+process. Compiled context stays in temporary staging; writable provider seeds and mountpoint
+preparation are deliberate persistent filesystem writes, described below.
 
 ## The launch pipeline
 
@@ -45,9 +46,11 @@ Provider mode adds one more injection channel on top of the same pipeline:
 `settings.json`, deep-merged onto any existing file). The CLI writes each into the
 throwaway dir and appends it to `plan.binds`, so generated configs go through the same
 git-safety check and stub sweep as every other bind. A config file flagged **writable**
-(cline's `providers.json`) is instead seeded straight into its real target — which the
-harness has already put in `plan.writable_dirs` — with **no** `--ro-bind`, so a harness that
-rewrites its own config (Cline persisting its provider selection) doesn't hit `EROFS`.
+(Kimi's custom-endpoint `config.toml` or Cline's `providers.json`) is atomically replaced at
+its real target, created owner-only before any secret bytes are written, and rejected if its
+parent or target is unsafe. It has **no** `--ro-bind`, so harness rewrites remain possible.
+Dry-run uses the same plan construction as runtime and computes prospective grants and
+read-only generated-config binds without creating a seed.
 
 The compiled tree lives under a `tempfile.mkdtemp()` directory that is removed when the
 command exits.

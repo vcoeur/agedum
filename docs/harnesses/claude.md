@@ -273,9 +273,20 @@ as the fold proxy:
   `thinking: {"type": …}` param instead of being dropped.
 - **Response** — OpenAI → Anthropic, streaming and non-streaming. A streamed OpenAI SSE
   response is re-serialised to the Anthropic event sequence (`message_start` →
-  `content_block_*` → `message_delta` → `message_stop`), with tool-call arguments streamed as
-  `input_json_delta` fragments. Upstream errors are translated to the Anthropic error
-  envelope with the status preserved, so the real cause still surfaces in Claude Code.
+  `content_block_*` → `message_delta` → `message_stop`). Text streams immediately; tool-call
+  argument fragments accumulate per upstream call index until stream end, then each tool is
+  emitted sequentially as start → `input_json_delta` fragments → stop. This preserves genuinely
+  interleaved parallel calls without sending deltas to stopped blocks; tool display is delayed
+  until the fragments are collected. No tool block is exposed until every call has non-empty
+  identity/name and complete JSON-object arguments, a successful `stop`/`tool_calls` finish,
+  and `[DONE]`. Stream errors, malformed frames, disconnects, missing terminals and
+  length/filter termination with buffered tools end with an Anthropic SSE `error` event
+  (`api_error`), without tool blocks or normal `message_delta`/`message_stop`. Already
+  streamed text is retained; text-only `length` plus `[DONE]` finishes as `max_tokens`.
+  Every Chat chunk is validated before changing output or terminal state; conflicting finish
+  reasons and malformed post-finish frames cannot become success. Non-empty refusal and
+  deprecated `function_call` output fail explicitly. HTTP-level upstream errors keep their
+  status in the Anthropic error envelope; stream error details are not echoed downstream.
 
 Example config (OpenCode Go, `kimi-k2.7-code`):
 

@@ -72,6 +72,14 @@ Secrets are read from `${AGENTS_ENV_FILE:-~/.config/agents/.env}`, overridable p
 surrounding quotes are honoured; `#` lines and blanks are skipped). Every variable named in
 the config's `requiredEnv` (plus `secretEnv`) must be present and non-empty, or agedum
 fails fast with a clear message before launching.
+Whitespace-prefixed trailing comments work after unquoted or closed quoted values;
+`#` inside quotes stays literal. Quoted values are not shell-evaluated or expanded,
+and backslashes remain literal. Unclosed quotes or unsupported text after a closing quote
+fail with the variable name, never the value.
+
+Nested provider launches clear only agedum-owned proxy controls (fold/translate,
+OpenAI cache/thinking and Codex chat-upstream switches), then apply their current settings.
+Unrelated user/auth environment variables remain inherited.
 
 Unlike the retired `--build-script` codegen — which emitted a wrapper that sourced the
 `.env` itself, so agedum never saw a token — provider mode reads the env file into the
@@ -477,6 +485,17 @@ fields, plus `expansionModels`. Providers file their catalog entries in
 `expansionModels`) — no order constant lives in the engine. `config.model` `@`-refs are
 translated by the same ref function (authoring sugar); plain `provider/model` strings
 pass through untouched.
+
+For `config.model` refs, DeepSeek/GLM/GPT effort is carried in
+`defaultOptions.reasoningEffort`, then filed on the selected model's native `options`.
+GPT has no top-level default variant selector: model options provide its default wire effort,
+while explicit agent variants and options keep precedence. Explicit same-model GPT agent
+variants remain enabled in the derived variant map, including a model supplied by
+`agentOptions` and a variant supplied by `opencodeConfig.agent`. Preservation follows the
+runtime merge: modeled rows are built in order, then native agent entries deep-merge last
+and win conflicting model selections. Mixing an `@` default with an authored
+`effortLevel` or `defaultOptions.reasoningEffort` is an expansion error. Kimi still selects
+the alias and keeps its existing thinking options.
 
 | Family | `model: key@effort` derives | Catalog entry (filed under `provider.<provider>.models`) |
 |---|---|---|

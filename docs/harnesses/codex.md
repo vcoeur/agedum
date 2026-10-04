@@ -145,6 +145,11 @@ produce `response.incomplete` with a reason. Upstream error frames, malformed st
 transport failures and invalid tool arguments produce `response.failed`; incomplete/failed
 turns never finalize tool-call arguments or present them as completed calls. Partial text is
 retained in the terminal response, without echoing raw upstream error details.
+Upstream SSE reads relay available data rather than waiting for a fixed-size buffer or EOF.
+The proxy replaces every client `Accept-Encoding` spelling with one `identity` header. A
+gzip-capable upstream must honor that negotiation; any non-identity `Content-Encoding`,
+including unsolicited gzip, receives an explicit 502 rather than being parsed as SSE. The
+translator does not decompress upstream bodies.
 Every chunk is validated before it can mutate translated output or lifecycle state. Choices
 must be a list and deltas objects; optional `tool_calls`, tool `function` and deprecated
 `function_call` containers may also be null. Consumed text, reasoning, refusal, identity,
@@ -259,7 +264,8 @@ agedum binds agent definitions into those dirs three ways:
   only in the launch's working tree; overrides a personal agent of the same name).
 
 Source files are bound verbatim, except agedum injects a default **`sandbox_mode = "workspace-write"`**
-when the source omits it (matching agedum's write-confined launch; an explicit `sandbox_mode` is
+when the parsed TOML root omits it (matching agedum's write-confined launch; an explicit root
+`sandbox_mode` is
 passed through). Two agents resolving to the same target — e.g. a `flash.toml` source colliding
 with `subagentModel`'s flash — is a hard error.
 

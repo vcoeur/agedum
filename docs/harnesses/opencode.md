@@ -142,6 +142,12 @@ baked-in key. Entries apply in order (later deep-merge over earlier), and every 
 ### `failover` — mechanical provider-wall failover { #failover }
 
 A top-level `failover` block (sibling of `requiredEnv`) makes agedum start a local
+proxy only when valid. An absent or null block disables it; present empty objects, lists,
+false, empty strings and other malformed values fail loudly, including on other harnesses.
+The built-in OpenAI route recognizes the effective default model as well as native/modeled
+agent model selections, so a default-only OpenAI primary needs no redundant agent declaration.
+
+The valid block starts a local
 **failover proxy** for the launch and point the routed providers' `options.baseURL` at it
 (`<proxy>/oc/<id>`; the built-in `openai` provider is overlaid the same way, OAuth
 untouched). The proxy forwards the primary attempt verbatim and — when it hits an
@@ -162,6 +168,10 @@ temporary env values are restored on exit. Browser `Origin` is rejected as addit
 defense, not the authentication mechanism. Callers already able to read the child's private
 runtime environment are outside this admission boundary.
 
+Transparent primary and untranslated fallback routes preserve the original query string,
+including repeated keys and percent-encoded values. Routing uses the path alone. SSE bodies
+relay available upstream data before EOF rather than waiting for a fixed-size buffer.
+
 **openai primaries translate onto chat-completions rungs.** The OAuth/codex route speaks
 the Responses API, so a Responses-shaped request (`input` present) keeps its verbatim
 primary forward, but a fallback rung — a `providerDef`, always Chat Completions — receives
@@ -175,6 +185,10 @@ any other. The shared converter requires a successful finish reason and `[DONE]`
 `response.completed`: EOF/length/filter become `response.incomplete`, and upstream errors,
 malformed streams or invalid tool arguments become `response.failed`. Failed/incomplete
 turns never finalize tool arguments. Untranslated hops (chat primaries → chat rungs) are unchanged.
+Translated Responses hops deliberately replace the source route and query with
+`/chat/completions`. Like the Codex proxy, they send exactly one `Accept-Encoding: identity`;
+any non-identity upstream `Content-Encoding` produces an explicit 502, not an empty
+successful turn. No decompression is attempted.
 
 Chain exhaustion returns the last
 upstream error verbatim (native retry/death behaviour, never worse); image-bearing requests
@@ -243,7 +257,7 @@ retries 5 times per step; the budget resets each step).
 }
 ```
 
-- `maxWaitHours` (required, number > 0) bounds what the proxy itself emits: a forged
+- `maxWaitHours` (required, finite number > 0; NaN/infinity rejected) bounds what the proxy itself emits: a forged
   `Retry-After` never exceeds it, and a wall whose own `Retry-After` exceeds it is not
   waitable (it passes verbatim). It does not cap a header-carrying wall the client
   already received — the verbatim passthrough hands the header to opencode, which honours

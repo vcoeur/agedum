@@ -158,7 +158,9 @@ every other `*.md` and every non-markdown file is carried through unchanged.
 !!! note "A skill nested inside a skill"
     If a skill directory itself contains a subfolder with its own `SKILL.md`, that
     subfolder is compiled as its own (nested) skill — not copied in as the parent's
-    asset. Both end up in the harness's skills location, at their own flattened names.
+    asset. Only that nested skill's subtree is excluded; ordinary sibling files and
+    directories are still copied recursively. Both skills end up in the harness's
+    skills location, at their own flattened names.
 
 ## Scopes { #scopes }
 

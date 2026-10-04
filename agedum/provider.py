@@ -35,11 +35,14 @@ never present in the merged result.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
+import math
 import os
 import re
 import string
 import subprocess
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -501,7 +504,7 @@ class FailoverPlan(NamedTuple):
 def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
     """Parse + validate a launcher's top-level ``failover`` block into the proxy spec.
 
-    Returns ``(spec, warnings)``; ``(None, [])`` when the block is absent. Raises
+    Returns ``(spec, warnings)``; ``(None, [])`` when the block is absent or null. Raises
     :class:`ProviderError` on an invalid block — a bad chain must fail the launch, not
     silently degrade to no failover. The spec shape is what
     :class:`agedum.proxy.FailoverProxy` consumes:
@@ -510,8 +513,8 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
       model catalogue (``id`` override + ``options`` per model key) and the wire-id
       reverse map. Built from the launcher's ``providerDef`` list plus the built-in
       ``openai`` OAuth route (D1 PASS: verbatim forwarding to the codex endpoint);
-      model keys the catalogue doesn't declare are seeded from the agents' ``model``
-      references (openai's models live in opencode's own registry, not the config).
+      undeclared model keys are seeded from the effective default and agent selections
+      (openai's models live in opencode's own registry, not the config).
     - ``status`` / ``messages`` / ``max_walk`` / ``vision`` / ``chains`` /
       ``rung_options`` — straight from the block, with openai rungs pruned (D4: not a
       fallback target in v1 — the OAuth bearer only arrives on openai primaries; a pruned
@@ -522,7 +525,7 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
       shape — the walk runs the primary alone); every other chains rule is unchanged.
     """
     block = config.get("failover")
-    if not block:
+    if block is None:
         return None, []
     if config.get("harness") != "opencode":
         raise ProviderError("`failover` is only implemented for the opencode harness")
@@ -579,16 +582,19 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
                     "id": str(entry.get("id") or key),
                     "options": entry.get("options") or {},
                 }
-    agents_cfg = oc_cfg.get("agent") or {}
+    effective = _opencode_config_doc(block_cfg)
+    agents_cfg = effective.get("agent") or {}
+    model_seeds = [effective.get("model")]
     if isinstance(agents_cfg, dict):
         for agent in agents_cfg.values():
             if not isinstance(agent, dict):
                 continue
-            model = str(agent.get("model") or "")
-            provider_id, _, key = model.partition("/")
-            route = routes.get(provider_id)
-            if route is not None and key and key not in route["models"]:
-                route["models"][key] = {"id": key, "options": {}}
+            model_seeds.append(agent.get("model"))
+    for model in model_seeds:
+        provider_id, _, key = str(model or "").partition("/")
+        route = routes.get(provider_id)
+        if route is not None and key and key not in route["models"]:
+            route["models"][key] = {"id": key, "options": {}}
     for route in routes.values():
         keys_by_wire: dict[str, list[str]] = {}
         for key, entry in route["models"].items():
@@ -667,9 +673,10 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
         if (
             not isinstance(max_wait_hours, (int, float))
             or isinstance(max_wait_hours, bool)
+            or (isinstance(max_wait_hours, float) and not math.isfinite(max_wait_hours))
             or not max_wait_hours > 0
         ):
-            raise ProviderError("`failover.wait.maxWaitHours` must be a number > 0")
+            raise ProviderError("`failover.wait.maxWaitHours` must be a finite number > 0")
         probe_seconds = wait_raw.get("probeSeconds", 3600)
         if (
             not isinstance(probe_seconds, int)
@@ -2199,11 +2206,22 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
     oc = dict(passthrough or {})
     oc_providers = dict(oc.get("provider") or {})
 
+    effective_agents = _deep_merge({"agent": _opencode_modeled_agents(new_block)}, oc).get("agent")
+
     # (1) File derived catalog entries under carrierMeta.provider — providers in
     # first-appearance order of their models' refs; authored/filed entries win.
     for key in key_order:
         ref, efforts = plans[key]
         declared_efforts = [effort for effort in EFFORT_ALPHABET if effort in efforts]
+        if ref.carrier == "variant" and isinstance(effective_agents, dict):
+            for agent in effective_agents.values():
+                if (
+                    isinstance(agent, dict)
+                    and agent.get("model") == _ref_model_value(ref)
+                    and agent.get("variant") in ref.meta["efforts"]
+                    and agent["variant"] not in declared_efforts
+                ):
+                    declared_efforts.append(agent["variant"])
         provider_id = ref.meta["provider"]
         entry = dict(oc_providers.get(provider_id) or {})
         models = dict(entry.get("models") or {})
@@ -2242,6 +2260,18 @@ def _expand_v2(config: dict, base_dir: Path | None = None, catalog_ref: str | No
             key, effort = _parse_carrier_ref(model, "`config.model`")
             ref = _resolve_carrier_ref(key, effort, "`config.model`", catalog, carrier_meta)
             new_block["model"] = _ref_model_value(ref)
+            if ref.carrier in ("reasoningEffort", "variant"):
+                default_options = new_block.get("defaultOptions")
+                if default_options is not None and not isinstance(default_options, dict):
+                    raise ExpansionError("`config.defaultOptions` must be a JSON object")
+                if "effortLevel" in new_block or "reasoningEffort" in (default_options or {}):
+                    raise ExpansionError(
+                        "`config.model` is an `@`-ref but config also authors a default effort"
+                    )
+                new_block["defaultOptions"] = {
+                    **(default_options or {}),
+                    "reasoningEffort": ref.effort,
+                }
         elif "/" not in model and model in catalog:
             raise ExpansionError(
                 f"`config.model` {model!r} is a bare catalogue key — a bare key is not a "
@@ -2363,8 +2393,8 @@ def parse_env_file(path: Path) -> dict[str, str]:
     """Parse a simple ``KEY=VALUE`` ``.env`` (no variable expansion).
 
     Honours an optional ``export `` prefix and surrounding single/double quotes; skips
-    blank lines and ``#`` comments, including a trailing `` # comment`` after an unquoted
-    value (a quoted value keeps its ``#`` verbatim). Mirrors the subset the old generated
+    blank lines and ``#`` comments, including trailing whitespace-prefixed comments after
+    unquoted or closed quoted values (quoted ``#`` stays literal). Mirrors the old generated
     wrapper relied on when it ran ``source "$env_file"``.
     """
     result: dict[str, str] = {}
@@ -2377,8 +2407,22 @@ def parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = stripped.split("=", 1)
         key, value = key.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value.startswith(("'", '"')):
+            quote = value[0]
+            closing = None
+            escaped = False
+            for index in range(1, len(value)):
+                char = value[index]
+                if char == quote and not escaped:
+                    closing = index
+                    break
+                escaped = char == "\\" and not escaped if quote == '"' else False
+            if closing is None:
+                raise ProviderError(f"unterminated quoted dotenv value for {key!r}")
+            tail = value[closing + 1 :]
+            if tail.strip() and not (tail[:1].isspace() and tail.lstrip().startswith("#")):
+                raise ProviderError(f"unsupported text after quoted dotenv value for {key!r}")
+            value = value[1:closing]
         else:
             # `KEY=val # comment` under `source` sets "val" — the comment is not part
             # of the value. Only a whitespace-preceded `#` counts; `val#ue` stays intact.
@@ -2484,6 +2528,16 @@ def build_launch(
         builder = functools.partial(builder, failover=failover)
     extra, unset, command, config_files = builder(block, secret_env, base_env)
     env.update(extra)
+    internal_switches = (
+        "AGEDUM_FOLD_SYSTEM_MESSAGES",
+        "AGEDUM_TRANSLATE_OPENAI",
+        "AGEDUM_OPENAI_PROMPT_CACHE_KEY",
+        "AGEDUM_OPENAI_THINKING",
+        "AGEDUM_CODEX_CHAT_UPSTREAM",
+    )
+    unset = list(
+        dict.fromkeys((*unset, *(name for name in internal_switches if name not in extra)))
+    )
 
     secrets = set(required)
     secrets.update(var for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY") if var in env)
@@ -3114,7 +3168,7 @@ def _kimi_data_dir(base_url: str, model: str) -> Path:
     skills / session history). Lives under ``~/.cache`` so the conception sandbox's writable
     set already covers Kimi's own session, log and update writes.
     """
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{base_url}-{model}".lower()).strip("-") or "endpoint"
+    slug = _endpoint_model_identity(base_url, model)
     return Path.home() / ".cache" / "agedum" / "kimi" / slug
 
 
@@ -3230,7 +3284,7 @@ def _cline_data_dir(base_url: str, model: str) -> Path:
     injected skills / session history). Lives under ``~/.cache`` so the conception sandbox's
     writable set already covers cline's own session/db writes.
     """
-    slug = re.sub(r"[^a-z0-9]+", "-", f"{base_url}-{model}".lower()).strip("-") or "endpoint"
+    slug = _endpoint_model_identity(base_url, model)
     return Path.home() / ".cache" / "agedum" / "cline" / slug
 
 
@@ -3874,10 +3928,12 @@ def _reasonix_agent_lines(block: dict) -> list[str]:
 def _toml_escape(value: str) -> str:
     """Escape a string for a TOML double-quoted basic string: backslash, quote, and the
     control characters a basic string may not carry raw (``\\n`` / ``\\t`` / ``\\r``;
-    anything else below 0x20 as ``\\uXXXX``) — so no input can emit invalid TOML."""
+    anything else below 0x20 and DEL as ``\\uXXXX``)."""
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-    return "".join(f"\\u{ord(char):04X}" if ord(char) < 0x20 else char for char in escaped)
+    return "".join(
+        f"\\u{ord(char):04X}" if ord(char) < 0x20 or ord(char) == 0x7F else char for char in escaped
+    )
 
 
 def _toml_scalar(value: object) -> str:
@@ -4068,6 +4124,31 @@ def _apply_provider_def(document: dict, provider_def: object, base_env: dict[str
     return merged
 
 
+def _opencode_modeled_agents(block: dict) -> dict:
+    """Build modeled agent entries before the native config's deep-merge override."""
+    agents: dict = {}
+    rows = block.get("agentOptions")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("agent") or "").strip()
+            if not name:
+                continue
+            entry: dict = {}
+            row_model = str(row.get("model") or "").strip()
+            if row_model:
+                entry["model"] = row_model
+            row_options = _clean_options(row)
+            if row_options:
+                entry["options"] = row_options
+            if row.get("primary") is True and name not in OPENCODE_BUILTINS:
+                entry["mode"] = "primary"
+            if entry:
+                agents[name] = entry
+    return agents
+
+
 def _opencode_config_doc(block: dict) -> dict:
     """Build the ``OPENCODE_CONFIG_CONTENT`` JSON document from an opencode config."""
     document: dict = {}
@@ -4095,26 +4176,7 @@ def _opencode_config_doc(block: dict) -> dict:
         provider_id, model_id = model.split("/", 1)
         document["provider"] = {provider_id: {"models": {model_id: {"options": options}}}}
 
-    agents: dict = {}
-    rows = block.get("agentOptions")
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("agent") or "").strip()
-            if not name:
-                continue
-            entry: dict = {}
-            row_model = str(row.get("model") or "").strip()
-            if row_model:
-                entry["model"] = row_model
-            row_options = _clean_options(row)
-            if row_options:
-                entry["options"] = row_options
-            if row.get("primary") is True and name not in OPENCODE_BUILTINS:
-                entry["mode"] = "primary"
-            if entry:
-                agents[name] = entry
+    agents = _opencode_modeled_agents(block)
     if agents:
         document["agent"] = agents
 
@@ -4452,23 +4514,21 @@ def _render_codex_agent(content: str) -> str:
     """Return a codex custom-agent TOML, injecting agedum's default ``sandbox_mode`` when the
     source omits it; an explicit ``sandbox_mode`` is passed through unchanged.
 
-    The check is a flat-key line scan — agent TOMLs are flat tables, so it does not parse
-    nested structure. The source must end as valid TOML (all blocks closed) for the appended
-    top-level key to stay valid.
+    Parse the root before prepending the default, preserving authored text and table scope.
     """
-    if _toml_sets_key(content, "sandbox_mode"):
+    try:
+        document = tomllib.loads(content)
+    except tomllib.TOMLDecodeError as exc:
+        raise ProviderError(f"invalid codex agent TOML: {exc}") from exc
+    if "sandbox_mode" in document:
         return content
-    body = content if content.endswith("\n") else content + "\n"
-    return f'{body}sandbox_mode = "{DEFAULT_CODEX_AGENT_SANDBOX_MODE}"\n'
+    return f'sandbox_mode = "{DEFAULT_CODEX_AGENT_SANDBOX_MODE}"\n{content}'
 
 
-def _toml_sets_key(content: str, key: str) -> bool:
-    """True when flat TOML ``content`` assigns top-level ``key`` (a ``key = ...`` line)."""
-    for line in content.splitlines():
-        stripped = line.lstrip()
-        if stripped.startswith(key) and stripped[len(key) :].lstrip().startswith("="):
-            return True
-    return False
+def _endpoint_model_identity(base_url: str, model: str) -> str:
+    """Stable state identity for an exact endpoint/model pair, never credentials."""
+    identity = json.dumps([base_url, model], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _codex_flash_agent_toml(model: str) -> str:

@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import tomllib
@@ -368,7 +370,9 @@ def _print_dry_run(
         print(f"  failover → {failover.base_url} (routes: {', '.join(failover.routes)})")
         print()
     _print_config_files(launch)
-    extra_args = _print_plan_sections(launch.harness, launch.sandbox)
+    extra_args = _print_plan_sections(
+        launch.harness, launch.sandbox, config_files=launch.config_files
+    )
     _print_command(command, extra_args, _secret_values(launch))
 
 
@@ -576,7 +580,12 @@ def _display_path(path: Path) -> str:
     return _abs_display(path)
 
 
-def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]:
+def _print_plan_sections(
+    mode: str,
+    sandbox: Sandbox | None = None,
+    *,
+    config_files: tuple[ConfigFile, ...] = (),
+) -> list[str]:
     """Compile the located sources and print the per-scope source dispositions.
 
     For each scope (project, global) every source is listed with what happens to it:
@@ -590,7 +599,7 @@ def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]
     global_ = load_global_source()
     dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-dry-"))
     try:
-        plan = _COMPILERS[mode](project, global_, dest)
+        plan = _build_plan(mode, project, global_, dest, config_files, preview=True)
         # is_dir() reflects whether a bind is a skills dir vs a file; resolve before cleanup.
         dir_targets = {target for src, target in plan.binds if src.is_dir()}
         # Resolve the writable set while the compiled sources still exist (rmtree below).
@@ -620,6 +629,21 @@ def _print_plan_sections(mode: str, sandbox: Sandbox | None = None) -> list[str]
     if sandbox_roots is not None:
         _print_sandbox(sandbox_roots)
     return plan.extra_args
+
+
+def _build_plan(
+    mode: str,
+    project,
+    global_,
+    dest: Path,
+    config_files: tuple[ConfigFile, ...] = (),
+    *,
+    preview: bool = False,
+) -> Plan:
+    """Build one harness plan for preview and runtime, including generated configs."""
+    plan = _COMPILERS[mode](project, global_, dest)
+    _inject_config_files(plan, project.root, dest, config_files, preview=preview)
+    return plan
 
 
 def _print_sandbox(roots: list[Path]) -> None:
@@ -757,8 +781,7 @@ def _run(
         )
     dest = Path(tempfile.mkdtemp(prefix=f"agedum-{mode}-"))
     try:
-        plan = _COMPILERS[mode](project, global_, dest)
-        _inject_config_files(plan, project.root, dest, config_files)
+        plan = _build_plan(mode, project, global_, dest, config_files)
         with _maybe_proxy(mode), _maybe_codex_proxy(mode, command) as run_command:
             return run_virtualfs(
                 project.root, plan, run_command, close_stdin=close_stdin, sandbox=sandbox
@@ -771,7 +794,12 @@ def _run(
 
 
 def _inject_config_files(
-    plan: Plan, project_root: Path, dest: Path, config_files: tuple[ConfigFile, ...]
+    plan: Plan,
+    project_root: Path,
+    dest: Path,
+    config_files: tuple[ConfigFile, ...],
+    *,
+    preview: bool = False,
 ) -> None:
     """Write each agedum-generated config file into ``dest`` and bind it at its target.
 
@@ -795,18 +823,9 @@ def _inject_config_files(
         spec = Path(target_spec)
         target = spec if spec.is_absolute() else project_root / target_spec
         if writable:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Clear any stale mount-point artifact a previous ro-bind left behind (a 0-byte
-            # read-only file) so the fresh write can't trip over its mode.
-            target.unlink(missing_ok=True)
-            target.write_text(content)
-            # A seeded file outlives the launch (that is the point — the harness rewrites it),
-            # and some carry a resolved API key baked in because the harness cannot read $ENV
-            # (kimi's config.toml). A ro-bound doc lived in a 0700 temp dir that was deleted
-            # after the run; this one persists in ~/.cache, so restrict it explicitly rather
-            # than inherit whatever the umask grants.
-            target.chmod(0o600)
             plan.origins[target] = f"<agedum-generated {target_spec}>"
+            if not preview:
+                _atomic_private_seed(target, content)
             continue
         staged = Path(*spec.parts[1:]) if spec.is_absolute() else Path(target_spec)
         out = dest / "config-files" / staged
@@ -814,6 +833,78 @@ def _inject_config_files(
         out.write_text(merge_json_onto_file(target, content) if merge_json else content)
         plan.binds.append((out, target))
         plan.origins[target] = f"<agedum-generated {target_spec}>"
+
+
+def _atomic_private_seed(target: Path, content: str) -> None:
+    """Atomically replace a private seed through a no-follow directory handle."""
+    absolute = target.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(absolute.anchor, flags)
+    try:
+        for component in absolute.parent.parts[1:]:
+            try:
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            component_info = os.fstat(next_fd)
+            safe_owner = component_info.st_uid in (0, os.getuid())
+            safe_permissions = not stat.S_IMODE(component_info.st_mode) & 0o022
+            sticky_shared_dir = component_info.st_uid == 0 and bool(
+                component_info.st_mode & stat.S_ISVTX
+            )
+            if not safe_owner or (not safe_permissions and not sticky_shared_dir):
+                os.close(next_fd)
+                raise LauncherError(f"refusing unsafe writable-seed parent '{component}'")
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        parent_info = os.fstat(directory_fd)
+        if parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
+            raise LauncherError(f"refusing unsafe writable-seed directory '{absolute.parent}'")
+        try:
+            existing = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            not stat.S_ISREG(existing.st_mode)
+            or existing.st_uid != os.getuid()
+            or existing.st_nlink != 1
+        ):
+            raise LauncherError(f"refusing unsafe writable-seed target '{absolute}'")
+
+        temporary = f".{absolute.name}.{secrets.token_hex(12)}.tmp"
+        file_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            with os.fdopen(file_fd, "w", encoding="utf-8") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(
+                temporary,
+                absolute.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        except BaseException:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+    except OSError as exc:
+        raise LauncherError(f"cannot safely seed writable config '{absolute}'") from exc
+    finally:
+        os.close(directory_fd)
 
 
 @contextmanager
@@ -946,10 +1037,6 @@ def _maybe_failover_proxy(config: dict, base_env: dict[str, str]) -> Iterator[Fa
     behaviour change (the rollback switch); the bwrap namespace shares host loopback, so
     the child reaches the proxy at ``127.0.0.1``.
     """
-    if config.get("harness") != "opencode" or not config.get("failover"):
-        yield None
-        return
-
     spec, warnings = failover_spec(config, base_env)
     for warning in warnings:
         _err.print(f"[yellow]agedum:[/] {warning}")
