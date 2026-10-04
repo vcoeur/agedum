@@ -46,7 +46,7 @@ agedum --wrapper codex --dry-run -- codex  # show what would be injected
 !!! note "The sandbox makes `~/.codex` writable automatically"
     codex persists session, log, and history state under `~/.codex/`. Under a
     [write-confinement](../wrapper.md#sandbox) launch that dir is made writable as the
-    *nearest existing ancestor* of the injected `~/.codex/AGENTS.md` (the same mechanism that
+    prepared *exact parent* of the injected `~/.codex/AGENTS.md` (the same mechanism that
     keeps `~/.claude` writable for Claude) — so no `sandbox.readWrite` entry is needed, as long
     as a global `AGENTS.md` (or the generated flash agent file) is injected.
 
@@ -130,6 +130,38 @@ model_providers.agedum.env_key="DEEPSEEK_API_KEY" -m deepseek-v4-pro`, where `<p
 proxy's ephemeral `127.0.0.1` address (codex, inside the bwrap namespace, shares the host
 loopback). No `wire_api` is sent — codex speaks Responses to the proxy. The proxy forwards
 codex's `Authorization: Bearer <key>` header to the upstream unchanged.
+
+Agedum also adds an `env_http_headers` override mapping `X-Agedum-Proxy-Capability` to
+the runtime-only `AGEDUM_PROXY_CAPABILITY` env var. Only that variable's name appears in
+argv, never the random capability value. Every proxy request, including `/models`, requires
+exactly one valid capability before any local response or upstream contact; the capability
+is stripped on the upstream hop and the original upstream bearer remains separate.
+Temporary environment values are restored when the launch exits. Browser `Origin` requests
+are rejected as additional defense; loopback address knowledge alone grants no authority.
+
+The Responses converter emits `response.completed` only after a successful Chat finish
+reason and `[DONE]`. EOF without a complete terminal sequence, `length`, and `content_filter`
+produce `response.incomplete` with a reason. Upstream error frames, malformed streams,
+transport failures and invalid tool arguments produce `response.failed`; incomplete/failed
+turns never finalize tool-call arguments or present them as completed calls. Partial text is
+retained in the terminal response, without echoing raw upstream error details.
+Every chunk is validated before it can mutate translated output or lifecycle state. Choices
+must be a list and deltas objects; optional `tool_calls`, tool `function` and deprecated
+`function_call` containers may also be null. Consumed text, reasoning, refusal, identity,
+function-name and argument fragments are string-or-null. Role, tool type and finish reasons
+follow their Chat enums; present indices and token counters must be non-negative integers,
+not booleans. Known chunk metadata is typed too, while unused vendor fields remain allowed.
+Missing fields, empty objects/lists of the correct type, null optional fields and empty text
+can carry metadata. An empty object/string, `false`, `null` or zero is not a choices list.
+These checks still apply after a successful finish: a later malformed frame makes the turn
+failed, never completed. A tool finish without accumulated tools also fails.
+Conflicting non-null finish reasons fail instead of letting a later `stop` erase an earlier
+length/filter termination; repeated reasons and null finish metadata preserve the prior reason.
+
+Non-empty refusal is reported as a failed turn rather than silently discarded. Deprecated
+`delta.function_call` output is explicitly unsupported and fails; the converter supports
+modern `tool_calls`, including providers using the legacy `function_call` finish reason for
+those modern calls. This does not add a new refusal or legacy-tool translation feature.
 
 !!! note "Proxy scope + watchpoints"
     The proxy covers the codex loop verified live against DeepSeek — streamed text and

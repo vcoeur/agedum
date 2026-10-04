@@ -1054,7 +1054,7 @@ def test_compile_pi_project_only_injects_skills_not_instructions(tmp_path):
     plan = compile_pi(project, None, dest)
 
     assert plan.extra_args == []
-    assert _targets(plan) == [proj / ".pi" / "skills"]
+    assert _targets(plan) == [proj / ".pi" / "skills", proj / ".pi" / "settings.json"]
 
 
 def test_compile_pi_global_agents_harness_overlay_merged(tmp_path, monkeypatch):
@@ -1084,8 +1084,7 @@ def test_pi_agent_dir_honours_env_override(tmp_path, monkeypatch):
     assert pi_agent_dir() == tmp_path / "custom-pi"
 
 
-def test_compile_pi_shadows_agents_skills_with_safe_override(tmp_path):
-    """compile_pi adds .agents/skills/ to safe_overrides so the launcher tmpfs-shadows it."""
+def test_compile_pi_excludes_raw_discovery_without_shadow(tmp_path):
     proj = tmp_path / "proj"
     sk = proj / ".agents" / "skills" / "pskill"
     sk.mkdir(parents=True)
@@ -1097,19 +1096,15 @@ def test_compile_pi_shadows_agents_skills_with_safe_override(tmp_path):
     dest.mkdir()
     plan = compile_pi(project, None, dest)
 
-    # The agent-neutral skills directory is shadowed.
-    assert (proj / ".agents" / "skills") in plan.safe_overrides
+    assert not plan.safe_overrides
+    settings = json.loads(_src_for(plan, proj / ".pi" / "settings.json").read_text())
+    assert settings["skills"] == [f"-{sk / 'SKILL.md'}"]
     # The compiled skills are still injected into .pi/skills/.
     assert (proj / ".pi" / "skills") in _targets(plan)
 
 
-def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
-    """A git-tracked .agents/skills/ source never blocks a pi launch.
-
-    The realistic shape: the agent-neutral source skills are tracked (they are the
-    repo's content), compile_pi shadows them with a tmpfs and binds the compiled
-    copies at the untracked .pi/skills/ — so the *real* compiled plan must pass
-    assert_safe even though the shadowed path is tracked."""
+def test_compile_pi_preserves_tracked_sources_and_passes_assert_safe(tmp_path):
+    """Tracked sources remain visible; only untracked compiled paths are overlaid."""
     proj = tmp_path / "proj"
     (proj / ".agents" / "skills" / "pskill").mkdir(parents=True)
     (proj / "AGENTS.md").write_text("x\n")
@@ -1128,8 +1123,7 @@ def test_compile_pi_safe_override_passes_assert_safe(tmp_path):
     dest = tmp_path / "out"
     dest.mkdir()
     plan = compile_pi(load_source(proj), None, dest)
-    assert (proj / ".agents" / "skills") in plan.safe_overrides
-    # Should not raise: the tracked path is only tmpfs-shadowed, never bound over.
+    assert not plan.safe_overrides
     assert_safe(proj, plan)
 
 

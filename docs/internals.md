@@ -96,16 +96,18 @@ repository. If agedum overlaid a git-tracked file (say a real `CLAUDE.md` you ke
 the repo), injected content could be committed by accident.
 
 `assert_safe` therefore **refuses to inject over any git-tracked path**. Targets must
-be untracked and gitignored. Targets outside the project repo (e.g. `~/.claude/...`)
-are never tracked by this repo, so they are allowed. In practice: list `CLAUDE.md`,
+be untracked; keep them gitignored as an operator prerequisite. Git ownership is queried
+from each target's actual enclosing worktree, independently of instruction-source discovery.
+This covers nested projects and global targets inside other repositories, and unexpected
+Git errors refuse the launch. In practice: list `CLAUDE.md`,
 `.claude/`, `.kimi-code/`, `.opencode/`, `.cline/`, `.reasonix/`, `.pi/`, and `.codex/` in your `.gitignore`.
 
 The check runs over the **effective, per-child** binds — the exact paths the namespace
 will mount. A tracked but unrelated sibling inside a skills target dir (say a
 hand-authored skill you deliberately version under `.claude/skills/`) does not block the
 launch, because the per-child overlay never masks it; only a path agedum would actually
-bind over must be untracked. `safe_overrides` are not subject to the check: a tmpfs
-shadow is read-only masking, never injectable content.
+bind over must be untracked. `safe_overrides` receive the same check: hiding a tracked
+file can stage a deletion in the shared index even when the shadow is read-only.
 
 ### Stub sweeping
 

@@ -32,7 +32,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,7 +60,7 @@ class Plan:
     # AGENTS.md natively). Display-only for --dry-run, so they are not invisible.
     native_reads: list[Path] = field(default_factory=list)
     # Targets the launcher should tmpfs-shadow (mask with empty) rather than bind into.
-    # Exempt from the git-tracked safety check (they are read-only shadows).
+    # Guarded like binds: hiding tracked paths can stage deletions in the shared index.
     safe_overrides: set[Path] = field(default_factory=set)
     # The harness's own state/config dir(s) — where it persists settings, sessions, auth, and
     # caches at run time. Under a sandbox launch these are mounted read-write (and created if
@@ -76,8 +75,8 @@ class Sandbox:
     """Filesystem confinement for the launched harness (write-confinement model).
 
     When ``enabled``, the launcher mounts the whole host **read-only** and makes
-    writable only the project root, the nearest existing ancestor of each injected
-    file (so bwrap can create the mount point), the harness's own state/config dir
+    writable only the launch directory, the prepared exact parent of each injected
+    target (so bwrap can create the mount point), the harness's own state/config dir
     (``Plan.writable_dirs`` — so it can persist sessions/settings/auth, e.g.
     ``~/.cline`` or ``~/.claude``), every path in ``read_write``, and a private
     ``/tmp``. Everything else is read-only, so the agent cannot modify files outside
@@ -163,24 +162,15 @@ def _transcript_hook_settings() -> dict:
 
 
 def _is_git_tracked(project_root: Path, target: Path) -> bool:
-    """True when ``target`` is git-tracked in the repo at ``project_root``.
+    """True when the target is tracked by its actual enclosing Git worktree.
 
     Mirrors the launcher's safety check (:func:`agedum.launcher.assert_safe`) so the
     transcript injection can *skip* a tracked target instead of letting the launcher
-    abort the whole run there. Returns False when ``project_root`` is not a repo or
-    ``target`` is outside it.
+    abort the whole run there. Unexpected Git inspection errors refuse the launch.
     """
-    try:
-        rel = target.relative_to(project_root)
-    except ValueError:
-        return False
-    if not (project_root / ".git").exists():
-        return False
-    result = subprocess.run(
-        ["git", "-C", str(project_root), "ls-files", "--error-unmatch", str(rel)],
-        capture_output=True,
-    )
-    return result.returncode == 0
+    from agedum.launcher import _git_tracked
+
+    return _git_tracked(project_root, str(target))
 
 
 def _inject_transcript_settings(plan: Plan, project_root: Path, proj_dest: Path) -> None:
@@ -866,6 +856,9 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
     """
     plan = Plan()
     agent_dir = pi_agent_dir()
+    launch_root = Path.cwd().resolve()
+    if not launch_root.is_relative_to(project.root):
+        launch_root = project.root
 
     # pi persists settings/models/session state under its agent dir — writable under a sandbox
     # (see Plan.writable_dirs).
@@ -889,17 +882,35 @@ def compile_pi(project: Source, global_: Source | None, dest: Path) -> Plan:
             plan.origins[target] = str(global_.agents_md)
 
     # Project skills -> ./.pi/skills.
-    if project.skills_dir is not None:
+    if project.skills_dir is not None and _discover_skills(project.skills_dir):
         out = _compile_skill_tree(project.skills_dir, dest / "project-skills", "SKILL.pi.md")
         if out is not None:
-            target = project.root / ".pi" / "skills"
+            target = launch_root / ".pi" / "skills"
             plan.binds.append((out, target))
             plan.origins[target] = str(project.skills_dir)
-        # Shadow .agents/skills/ with an empty tmpfs so pi does not discover the raw
-        # agent-neutral source skills alongside the compiled .pi/skills/ copies — that
-        # would produce a name-collision warning for every shared skill. Only when the
-        # source dir exists — shadowing a missing path would just make bwrap stub it.
-        plan.safe_overrides.add(project.root / ".agents" / "skills")
+        # Native exact exclusions avoid duplicate discovery without hiding tracked sources
+        # from the real shared Git index. Preserve all other project settings and skills.
+        target = launch_root / ".pi" / "settings.json"
+        from agedum.launcher import LauncherError
+
+        if _is_git_tracked(project.root, target):
+            raise LauncherError("Pi skill exclusions require an untracked .pi/settings.json target")
+        try:
+            settings = json.loads(target.read_text()) if target.exists() else {}
+        except (OSError, ValueError) as exc:
+            raise LauncherError("cannot safely merge Pi project settings") from exc
+        if not isinstance(settings, dict) or not isinstance(settings.get("skills", []), list):
+            raise LauncherError("Pi settings must be an object with a skills list")
+        if not all(isinstance(entry, str) for entry in settings.get("skills", [])):
+            raise LauncherError("Pi settings skills entries must be strings")
+        exclusions = [
+            f"-{skill / 'SKILL.md'}" for _, skill, _ in _discover_skills(project.skills_dir)
+        ]
+        settings["skills"] = [*settings.get("skills", []), *exclusions]
+        settings_out = dest / "project-settings.json"
+        settings_out.write_text(json.dumps(settings, indent=2) + "\n")
+        plan.binds.append((settings_out, target))
+        plan.origins[target] = "Pi native source-skill discovery exclusions"
 
     # Global skills -> ~/.pi/agent/skills.
     if global_ is not None and global_.skills_dir is not None:

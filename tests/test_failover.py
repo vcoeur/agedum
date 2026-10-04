@@ -257,13 +257,17 @@ def _spec(
     }
 
 
-def _post(base_url, path, body, headers=None):
+def _post(proxy, path, body, headers=None):
     data = json.dumps(body).encode() if isinstance(body, dict) else body
     request = urllib.request.Request(
-        base_url + path,
+        proxy.base_url + path,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={
+            "Content-Type": "application/json",
+            **(headers or {}),
+            "X-Agedum-Proxy-Capability": proxy.capability,
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -289,7 +293,7 @@ def test_walk_lands_on_first_surviving_rung():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 200
     assert json.loads(body) == {"ok": "f1"}
     # One error, not five: the walled primary saw exactly one attempt, and the walk
@@ -312,7 +316,7 @@ def test_exhaustion_returns_last_error_verbatim():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]})
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"f2 limit"
     assert headers["Retry-After"] == "13"
@@ -328,7 +332,7 @@ def test_unreachable_rung_walks_on():
         routes["f2"] = _route(dead.base_url, api_key="key-f2", models={"r2": {"id": "r2"}})
         spec = _spec(routes, {"p/m1": ["f1/r1", "f2/r2"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 200
     assert json.loads(body) == {"ok": "f1"}
     assert len(a.requests) == 1
@@ -360,7 +364,7 @@ def test_wall_classification(status, body, expected_wall):
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            got_status, _, got_body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            got_status, _, got_body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     if expected_wall:
         assert got_status == 200  # the walk served the request
         assert len(b.requests) == 1
@@ -380,7 +384,7 @@ def test_wall_text_beyond_2kb_window_ignored():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 400
     assert body == late
     assert b.requests == []
@@ -390,7 +394,7 @@ def test_unknown_route_404():
     with _StubUpstream("p") as a, _StubUpstream("f1") as b, _StubUpstream("f2") as c:
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/nope/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/nope/chat/completions", _chat_body())
     assert status == 404
     assert "no route" in body.decode()
 
@@ -423,13 +427,13 @@ def test_missing_variant_defaults_to_high_before_bare_chain():
         spec = _spec(routes, chains)
         with FailoverProxy(spec) as proxy:
             status, _, body = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(reasoningEffort="high"),
             )
             assert status == 200
             assert json.loads(body) == {"ok": "high-rung"}
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
             assert status == 200
             assert json.loads(body) == {"ok": "high-rung"}
 
@@ -455,14 +459,14 @@ def test_wire_alias_resolves_through_keys_by_wire():
         spec = _spec(routes, {"p/k3-low": ["f1/r1"]}, vision=vision)
         with FailoverProxy(spec) as proxy:
             status, _, body = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(model="k3", thinking={"type": "enabled", "effort": "low"}),
             )
             assert status == 200
             assert json.loads(body) == {"ok": "low-rung"}
             status, _, body = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(model="k3", thinking={"type": "enabled", "effort": "high"}),
             )
@@ -507,7 +511,7 @@ def test_wire_alias_prefers_the_matching_effort_chain(capsys):
         with FailoverProxy(spec) as proxy:
             assert (
                 _post(
-                    proxy.base_url,
+                    proxy,
                     "/oc/p/chat/completions",
                     _chat_body(model="k3", thinking={"type": "enabled", "effort": "low"}),
                 )[0]
@@ -515,7 +519,7 @@ def test_wire_alias_prefers_the_matching_effort_chain(capsys):
             )
             assert (
                 _post(
-                    proxy.base_url,
+                    proxy,
                     "/oc/p/chat/completions",
                     _chat_body(model="k3", reasoning_effort="high"),
                 )[0]
@@ -531,9 +535,7 @@ def test_unmapped_model_forwards_transparently():
     with _StubUpstream("p") as a, _StubUpstream("f1") as b, _StubUpstream("f2") as c:
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(
-                proxy.base_url, "/oc/p/chat/completions", _chat_body(model="other")
-            )
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body(model="other"))
     assert status == 200
     assert json.loads(body) == {"ok": "p"}
     assert b.requests == []
@@ -556,7 +558,7 @@ def test_rung_rewrite_strips_effort_and_applies_rung_options():
         spec = _spec(routes, chains)
         with FailoverProxy(spec) as proxy:
             status, _, _ = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(reasoning_effort="high"),
             )
@@ -586,7 +588,7 @@ def test_openai_primary_forwarded_verbatim_then_walk_rewrites():
         spec = _spec(routes, chains, vision={"openai/gpt-5.6-luna": True, "f1/r1": True})
         with FailoverProxy(spec) as proxy:
             status, _, body = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/openai/responses",
                 _chat_body(model="gpt-5.6-luna"),
                 headers={"Authorization": "Bearer oauth-token", "ChatGPT-Account-Id": "acc-1"},
@@ -617,7 +619,10 @@ def test_non_post_forwarded_verbatim_without_walk():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            request = urllib.request.Request(proxy.base_url + "/oc/p/models")
+            request = urllib.request.Request(
+                proxy.base_url + "/oc/p/models",
+                headers={"X-Agedum-Proxy-Capability": proxy.capability},
+            )
             try:
                 with urllib.request.urlopen(request, timeout=10) as response:
                     status = response.status
@@ -642,7 +647,11 @@ def test_options_and_head_route_per_provider():
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
             for method in ("OPTIONS", "HEAD"):
-                request = urllib.request.Request(proxy.base_url + "/oc/p/models", method=method)
+                request = urllib.request.Request(
+                    proxy.base_url + "/oc/p/models",
+                    method=method,
+                    headers={"X-Agedum-Proxy-Capability": proxy.capability},
+                )
                 try:
                     with urllib.request.urlopen(request, timeout=10) as response:
                         status = response.status
@@ -663,7 +672,7 @@ def test_variant_suffixed_rung_rewrites_to_base_model_key():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f2/r2@low"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 200
     assert json.loads(body) == {"ok": "f2"}
     _, _, headers, rung_body = c.requests[0]
@@ -704,13 +713,13 @@ def test_exact_variant_rung_options_keep_low_and_high_distinct():
         spec = _spec(routes, chains, vision, rung_options=rung_options)
         with FailoverProxy(spec) as proxy:
             status, _, _ = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(thinking={"type": "enabled", "effort": "low"}),
             )
             assert status == 200
             status, _, _ = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/p/chat/completions",
                 _chat_body(reasoningEffort="high"),
             )
@@ -738,7 +747,7 @@ def test_pin_skips_walled_primary_on_subsequent_requests():
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
             for _ in range(2):
-                status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+                status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
                 assert status == 200
                 assert json.loads(body) == {"ok": "f1"}
     assert len(a.requests) == 1  # the walled primary was never re-hit
@@ -766,16 +775,16 @@ def test_pin_is_per_vision_class():
                 ]
             )
             # Text request: walks f1 (vision false but text-eligible) and pins it.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", text_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", text_body)
             assert (status, json.loads(body)) == (200, {"ok": "f1"})
             # Image request: skips f1, lands on f2, pins the vision class separately.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", image_body)
             assert (status, json.loads(body)) == (200, {"ok": "f2"})
             # Text pin: primary never contacted again, f1 serves.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", text_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", text_body)
             assert (status, json.loads(body)) == (200, {"ok": "f1"})
             # Vision pin: neither primary nor the text-only rung contacted.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", image_body)
             assert (status, json.loads(body)) == (200, {"ok": "f2"})
     # primary hit once per request class (text, image), never on the pinned replays.
     assert len(a.requests) == 2
@@ -792,9 +801,9 @@ def test_pinned_rung_failure_continues_the_walk():
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]})
         with FailoverProxy(spec) as proxy:
-            assert _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())[0] == 200
+            assert _post(proxy, "/oc/p/chat/completions", _chat_body())[0] == 200
             # The pinned rung now walls: the walk starts there and continues onward.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
             assert status == 200
             assert json.loads(body) == {"ok": "f2"}
     assert len(a.requests) == 1  # pinned: primary not re-hit
@@ -845,10 +854,10 @@ def test_image_request_skips_text_only_rungs():
             ]
         )
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", image_body)
             assert (status, json.loads(body)) == (200, {"ok": "f2"})
             # Text request walks the full chain unchanged: the text-only rung serves.
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
             assert (status, json.loads(body)) == (200, {"ok": "f1"})
     assert b.requests  # the text-only rung served the text request
     assert all(json.loads(r[3])["messages"][0]["content"] == "hi" for r in b.requests)
@@ -865,7 +874,7 @@ def test_chain_without_vision_rung_exhausts_on_image_request():
             messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}]
         )
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            status, _, body = _post(proxy, "/oc/p/chat/completions", image_body)
     # No vision:true rung exists: the walk exhausts and the primary's error passes
     # through — the correct answer when no vision-capable fallback exists.
     assert status == 429
@@ -890,7 +899,7 @@ def test_max_walk_caps_rungs_tried():
             max_walk=1,
         )
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"f1 limit"
     assert c.requests == []  # the cap stopped the walk after one rung
@@ -905,7 +914,7 @@ def test_sse_passthrough_byte_identical():
     with _SSEUpstream() as a, _StubUpstream("f1") as b, _StubUpstream("f2") as c:
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 200
     assert "text/event-stream" in headers["Content-Type"]
     assert body == b"".join(_SSEUpstream.FRAMES)
@@ -915,7 +924,7 @@ def test_mid_stream_death_passes_through_without_walk():
     with _MidStreamDropUpstream() as a, _StubUpstream("f1") as b, _StubUpstream("f2") as c:
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     # v1 is admission-time only: the broken stream passes through, no walk.
     assert status == 200
     assert body.startswith(b'data: {"partial": true}\n\n')
@@ -1457,7 +1466,7 @@ def test_translated_rung_speaks_chat_and_client_sees_responses_sse(capsys):
         )
         with FailoverProxy(spec) as proxy:
             status, headers, body = _post(
-                proxy.base_url,
+                proxy,
                 "/oc/openai/responses",
                 _responses_body(),
                 headers={"Authorization": "Bearer oauth-token", "ChatGPT-Account-Id": "acc-1"},
@@ -1536,7 +1545,7 @@ def test_translated_rung_pin_skips_walled_primary(capsys):
         )
         with FailoverProxy(spec) as proxy:
             for _ in range(2):
-                status, _, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+                status, _, body = _post(proxy, "/oc/openai/responses", _responses_body())
                 assert status == 200
                 assert _ChatSSEUpstream.MARKER.encode() in body
     assert len(wall.requests) == 1  # pinned: the walled primary was never re-hit
@@ -1574,7 +1583,7 @@ def test_image_bearing_responses_request_walks_only_vision_rungs():
             ]
         )
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/openai/responses", image_body)
+            status, _, body = _post(proxy, "/oc/openai/responses", image_body)
     assert status == 200
     assert _ChatSSEUpstream.MARKER.encode() in body
     # The vision filter ran on the Responses shape: the text-only rung was skipped,
@@ -1600,7 +1609,7 @@ def test_translated_rung_exhaustion_returns_error_verbatim():
             vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
         )
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+            status, headers, body = _post(proxy, "/oc/openai/responses", _responses_body())
     # The translated rung's wall classified as today: the walk exhausted and the
     # last upstream error passed through verbatim.
     assert status == 402
@@ -1620,7 +1629,7 @@ def test_translated_rung_non_wall_error_passes_through_without_walk():
             vision={"openai/gpt-5.6-sol": True, "f1/r1": True},
         )
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(proxy.base_url, "/oc/openai/responses", _responses_body())
+            status, _, body = _post(proxy, "/oc/openai/responses", _responses_body())
     # Bad keys keep native semantics even on a translated hop.
     assert status == 401
     assert body == b"invalid api key"
@@ -1639,14 +1648,14 @@ def _wait(max_wait_hours=8, probe_seconds=3600):
     return wait
 
 
-def _post_retry_after_all(base_url, path, body):
+def _post_retry_after_all(proxy, path, body):
     """Like ``_post`` but returning every Retry-After header (duplicates visible)."""
     data = json.dumps(body).encode() if isinstance(body, dict) else body
     request = urllib.request.Request(
-        base_url + path,
+        proxy.base_url + path,
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Agedum-Proxy-Capability": proxy.capability},
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -1666,9 +1675,7 @@ def test_engagement_wait_only_shape_forges_on_primary_wall(capsys):
             wait=_wait(probe_seconds=90),
         )
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(
-                proxy.base_url, "/oc/p/chat/completions", _chat_body(model="mX")
-            )
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body(model="mX"))
     assert status == 429
     assert body == b"usage limit exceeded"
     assert headers["Retry-After"] == "90"  # the configured probeSeconds, ceil'd
@@ -1692,7 +1699,7 @@ def test_engagement_unmapped_model_with_wait_walks_primary_alone_and_forges(caps
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]}, wait=_wait())
         with FailoverProxy(spec) as proxy:
             status, headers, body = _post(
-                proxy.base_url, "/oc/p/chat/completions", _chat_body(model="other")
+                proxy, "/oc/p/chat/completions", _chat_body(model="other")
             )
     assert status == 429
     assert body == b"limit"
@@ -1711,9 +1718,7 @@ def test_engagement_unmapped_model_without_wait_forwards_transparently(capsys):
     with _StubUpstream("p") as a, _StubUpstream("f1") as b, _StubUpstream("f2") as c:
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]})
         with FailoverProxy(spec) as proxy:
-            status, _, body = _post(
-                proxy.base_url, "/oc/p/chat/completions", _chat_body(model="other")
-            )
+            status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body(model="other"))
     assert status == 200
     assert json.loads(body) == {"ok": "p"}
     assert b.requests == [] and c.requests == []
@@ -1729,7 +1734,7 @@ def test_n3_wait_success_side_is_byte_verbatim(capsys):
         spec = _spec({"p": _route(a.base_url, models={"m1": {"id": "m1"}})}, {}, wait=_wait())
         with FailoverProxy(spec) as proxy:
             status, headers, body = _post(
-                proxy.base_url, "/oc/p/chat/completions", sent, headers={"X-Trace": "t-1"}
+                proxy, "/oc/p/chat/completions", sent, headers={"X-Trace": "t-1"}
             )
     assert status == 200
     assert json.loads(body) == {"ok": "p"}
@@ -1754,7 +1759,7 @@ def test_wait_headerless_exhaustion_forges_probe_retry_after(capsys):
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]}, wait=_wait())
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"f2 limit"
     assert headers["Retry-After"] == "3600"
@@ -1782,7 +1787,7 @@ def test_wait_forges_402_wall_into_retryable_429():
             wait=_wait(),
         )
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"rung balance"
     assert headers["Retry-After"] == "3600"
@@ -1806,7 +1811,7 @@ def test_wait_beyond_cap_wall_passes_verbatim(capsys):
             wait=_wait(max_wait_hours=8),
         )
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"monthly quota"
     assert headers["Retry-After"] == "70000"
@@ -1835,7 +1840,7 @@ def test_wait_429_with_usable_header_passes_verbatim(capsys):
             wait=_wait(),
         )
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
             handler = proxy._server.RequestHandlerClass
     assert status == 429
     assert body == b"f1 limit"
@@ -1866,7 +1871,7 @@ def test_wait_forge_replaces_captured_retry_after_never_appends():
         )
         with FailoverProxy(spec) as proxy:
             status, retry_afters, body = _post_retry_after_all(
-                proxy.base_url, "/oc/p/chat/completions", _chat_body()
+                proxy, "/oc/p/chat/completions", _chat_body()
             )
     assert status == 429
     assert body == b"f1 limit"
@@ -1882,7 +1887,7 @@ def test_wait_cap_break_passes_verbatim_silently(capsys):
     ):
         spec = _spec(_three_routes(a, b, c), {"p/m1": ["f1/r1", "f2/r2"]}, max_walk=1, wait=_wait())
         with FailoverProxy(spec) as proxy:
-            status, headers, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            status, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert status == 429
     assert body == b"f1 limit"
     assert "Retry-After" not in headers
@@ -1903,7 +1908,7 @@ def test_wait_synthesized_502_passes_verbatim_silently(capsys):
         wait=_wait(),
     )
     with FailoverProxy(spec) as proxy:
-        status, _, body = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body(model="mX"))
+        status, _, body = _post(proxy, "/oc/p/chat/completions", _chat_body(model="mX"))
     assert status == 502
     assert body.startswith(b"agedum failover proxy: upstream error:")
     # Silently = no wait lines; the walk line for the unreachable rung is today's
@@ -1931,9 +1936,9 @@ def test_wait_cleared_after_forged_wall_pins_nothing(capsys):
         )
         with FailoverProxy(spec) as proxy:
             handler = proxy._server.RequestHandlerClass
-            first = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            first = _post(proxy, "/oc/p/chat/completions", _chat_body())
             assert list(handler._wait_forges) == ["p/m1#text"]
-            second = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body())
+            second = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert first[0] == 429
     assert second[0] == 200
     assert json.loads(second[2]) == {"ok": "p"}
@@ -1968,11 +1973,11 @@ def test_wait_chainless_engagement_ignores_a_same_named_chain_pin(capsys):
             handler = proxy._server.RequestHandlerClass
             # A mapped request (the wire id) walls at the primary and lands on the
             # rung: the pin the naive read would trip on now exists.
-            first = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body(model="mY"))
+            first = _post(proxy, "/oc/p/chat/completions", _chat_body(model="mY"))
             assert handler._pins == {"p/m1#text": 1}
             # The key-name-as-wire-model request is chainless: the engagement walks
             # the primary despite the pin, and the primary's wall forges.
-            second = _post(proxy.base_url, "/oc/p/chat/completions", _chat_body(model="m1"))
+            second = _post(proxy, "/oc/p/chat/completions", _chat_body(model="m1"))
     assert first[0] == 200
     assert json.loads(first[2]) == {"ok": "f1"}
     assert second[0] == 429
@@ -2015,9 +2020,9 @@ def test_wait_vision_filtered_exhaustion_waits_on_the_primary_wall(capsys):
         )
         with FailoverProxy(spec) as proxy:
             handler = proxy._server.RequestHandlerClass
-            first = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            first = _post(proxy, "/oc/p/chat/completions", image_body)
             assert list(handler._wait_forges) == ["p/m1#vision"]
-            second = _post(proxy.base_url, "/oc/p/chat/completions", image_body)
+            second = _post(proxy, "/oc/p/chat/completions", image_body)
     assert first[0] == 429
     assert first[1]["Retry-After"] == "3600"
     assert b.requests == []  # the non-vision rung was filtered, not tried

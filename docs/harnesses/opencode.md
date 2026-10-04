@@ -112,8 +112,10 @@ The key's **value** (not a `{env:…}` placeholder) is written into
 `provider.<id>.options.apiKey`, because opencode's `{env:…}` substitution is unreliable for
 a custom provider's `options.apiKey`. This is the same in-process token handling `claude`
 uses for `ANTHROPIC_AUTH_TOKEN`; `apiKeyEnv` is auto-added to the validated `requiredEnv`,
-and the resulting `OPENCODE_CONFIG_CONTENT` is masked in `--dry-run`. (Keys containing `"`
-or `\` would break the surrounding JSON; standard `sk-or-…` keys are fine.)
+and secret values in `OPENCODE_CONFIG_CONTENT` are masked in `--dry-run`. Redaction acts on
+parsed values before diagnostic JSON serialization, so quote/backslash/Unicode keys remain
+masked without corrupting JSON, numeric fields, or unrelated prompt text. The actual launch
+document uses normal JSON escaping and is not changed by diagnostic redaction.
 
 `providerDef` may also be a **list** when one config draws models from more than one
 provider — e.g. a Kimi primary model plus DeepSeek fast subagents, each needing its own
@@ -148,6 +150,18 @@ first 2 KB carries a `detect.messages` substring) — re-issues the request down
 `chains` with per-rung auth, model id, and effort options, so the session lands on a
 surviving rung and opencode never sees the 429 to retry.
 
+Every request requires a separate random per-launch capability in
+`X-Agedum-Proxy-Capability`, checked in constant time before upstream contact. Agedum adds
+`options.headers` entries referencing the runtime-only `AGEDUM_PROXY_CAPABILITY` env var,
+including on the built-in OpenAI route. OAuth still supplies the primary bearer/account
+headers; capability admission does not replace the upstream key or OAuth token. The proxy
+strips capability headers on every hop and removes all case-insensitive incoming
+authorization/API-key fields plus the account header before inserting the fallback's key.
+The capability is never persisted in authored config, placed in argv/URLs, or printed;
+temporary env values are restored on exit. Browser `Origin` is rejected as additional
+defense, not the authentication mechanism. Callers already able to read the child's private
+runtime environment are outside this admission boundary.
+
 **openai primaries translate onto chat-completions rungs.** The OAuth/codex route speaks
 the Responses API, so a Responses-shaped request (`input` present) keeps its verbatim
 primary forward, but a fallback rung — a `providerDef`, always Chat Completions — receives
@@ -157,7 +171,10 @@ Chat-Completions SSE stream is relayed back as Responses SSE events
 (`response.created` → reasoning/text/tool-call items → `response.completed`) through the
 same translator the codex harness uses. Non-200 responses keep the wall classification and
 error capture verbatim (substrate-independent), and a translated 200 pins the rung like
-any other. Untranslated hops (chat primaries → chat rungs) are unchanged.
+any other. The shared converter requires a successful finish reason and `[DONE]` for
+`response.completed`: EOF/length/filter become `response.incomplete`, and upstream errors,
+malformed streams or invalid tool arguments become `response.failed`. Failed/incomplete
+turns never finalize tool arguments. Untranslated hops (chat primaries → chat rungs) are unchanged.
 
 Chain exhaustion returns the last
 upstream error verbatim (native retry/death behaviour, never worse); image-bearing requests
@@ -286,6 +303,14 @@ echo, which a TUI's controlling terminal can hide. The plugin path is appended t
 `OPENCODE_CONFIG_CONTENT.plugin` (unioned
 with any `opencodeConfig.plugin`); agedum's bwrap launch binds the whole filesystem, so the
 bundled path resolves inside the namespace. Set `"emitTranscript": false` to disable.
+
+Sidecars are created as 0600 inside owned 0700 storage directories (new parents are
+also 0700). Existing foreign-owned or non-private storage, symlinks, hardlinks and
+non-regular files are rejected without chmod or content writes. Linux directory
+handles and no-follow opens anchor appends to the validated directory. A rejected
+sidecar does not interrupt the agent; terminal OSC capture remains available. The
+consumer owns retention and must provision private storage rather than relying on
+the plugin to repair an unsafe existing path.
 
 ### `opencodeConfig` — anything agedum doesn't model { #opencodeconfig }
 

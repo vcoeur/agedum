@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 
 /**
  * Claude Code hook (shipped + auto-injected by agedum): emit the session
@@ -42,6 +43,49 @@ const SIDECAR = process.env.CONDASH_TRANSCRIPT_FILE;
 
 let frameCounter = 0;
 
+// Keep directory handles open and address children through them: path replacement
+// after validation cannot redirect a private write (Linux, like agedum's launcher).
+function privateDirectory(directory) {
+  const absolute = path.resolve(directory);
+  let parent = fs.openSync("/", fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    for (const component of absolute.split(path.sep).filter(Boolean)) {
+      const child = `/proc/self/fd/${parent}/${component}`;
+      try { fs.mkdirSync(child, { mode: 0o700 }); } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      const next = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      const stat = fs.fstatSync(next);
+      if ((stat.uid !== process.getuid() && stat.uid !== 0) ||
+          ((stat.mode & 0o022) !== 0 && !(stat.uid === 0 && (stat.mode & 0o1000)))) {
+        fs.closeSync(next);
+        throw new Error("unsafe transcript ancestor");
+      }
+      fs.closeSync(parent);
+      parent = next;
+    }
+    const stat = fs.fstatSync(parent);
+    if (stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700) {
+      throw new Error("transcript storage must be private and owned");
+    }
+    return parent;
+  } catch (error) {
+    fs.closeSync(parent);
+    throw error;
+  }
+}
+
+function privateFile(directory, name, flags) {
+  const fd = fs.openSync(`/proc/self/fd/${directory}/${name}`, flags | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
+  const stat = fs.fstatSync(fd);
+  if (!stat.isFile() || stat.uid !== process.getuid() ||
+      (stat.mode & 0o777) !== 0o600 || stat.nlink !== 1) {
+    fs.closeSync(fd);
+    throw new Error("unsafe transcript file");
+  }
+  return fd;
+}
+
 function ttyWrite(str) {
   try {
     fs.writeFileSync("/dev/tty", str);
@@ -54,8 +98,11 @@ function ttyWrite(str) {
 function fileWrite(frame) {
   if (!SIDECAR) return;
   try {
-    fs.mkdirSync(path.dirname(SIDECAR), { recursive: true });
-    fs.appendFileSync(SIDECAR, JSON.stringify(frame) + "\n");
+    const directory = privateDirectory(path.dirname(SIDECAR));
+    try {
+      const fd = privateFile(directory, path.basename(SIDECAR), fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT);
+      try { fs.writeSync(fd, JSON.stringify(frame) + "\n"); } finally { fs.closeSync(fd); }
+    } finally { fs.closeSync(directory); }
   } catch {
     /* sidecar is best-effort — never disrupt the session over capture */
   }
@@ -82,25 +129,40 @@ function readStdin() {
 }
 
 /** Per-session byte checkpoint file: how far into the JSONL we've already framed. */
-function offsetPath(sid) {
-  const dir = path.join(os.tmpdir(), "agedum-claude-transcript");
-  fs.mkdirSync(dir, { recursive: true });
-  const safe = String(sid || "default").replace(/[^a-zA-Z0-9_-]/g, "_");
-  return path.join(dir, `${safe}.offset`);
+function offsetName(sid, transcript) {
+  return createHash("sha256").update(JSON.stringify([sid || "default", path.resolve(transcript)])).digest("hex") + ".offset";
 }
 
 /** Frame the new assistant + thinking content appended since the last checkpoint. */
 function emitStop(input) {
   const tp = input.transcript_path;
   if (!tp || !fs.existsSync(tp)) return;
+  const directory = privateDirectory(path.join(os.tmpdir(), `agedum-claude-transcript-${process.getuid()}`));
+  const name = offsetName(input.session_id, tp);
+  const lock = `${name}.lock`;
+  let lockFd;
+  try {
+    lockFd = privateFile(directory, lock, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL);
+    emitStopLocked(input, directory, name);
+  } finally {
+    if (lockFd !== undefined) {
+      fs.closeSync(lockFd);
+      fs.unlinkSync(`/proc/self/fd/${directory}/${lock}`);
+    }
+    fs.closeSync(directory);
+  }
+}
+
+function emitStopLocked(input, directory, name) {
+  const tp = input.transcript_path;
   const sid = input.session_id;
-  const op = offsetPath(sid);
 
   let offset = 0;
   try {
-    offset = parseInt(fs.readFileSync(op, "utf8"), 10) || 0;
-  } catch {
-    offset = 0;
+    const fd = privateFile(directory, name, fs.constants.O_RDONLY);
+    try { offset = parseInt(fs.readFileSync(fd, "utf8"), 10) || 0; } finally { fs.closeSync(fd); }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
   }
 
   const size = fs.statSync(tp).size;
@@ -142,10 +204,15 @@ function emitStop(input) {
     fs.closeSync(fd);
   }
 
+  const temporary = `${name}.${randomUUID()}.tmp`;
+  const checkpointFd = privateFile(directory, temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL);
   try {
-    fs.writeFileSync(op, String(consumed));
-  } catch {
-    /* checkpoint best-effort — a re-read at worst re-frames a turn */
+    fs.writeSync(checkpointFd, String(consumed));
+    fs.fsyncSync(checkpointFd);
+    fs.renameSync(`/proc/self/fd/${directory}/${temporary}`, `/proc/self/fd/${directory}/${name}`);
+  } finally {
+    fs.closeSync(checkpointFd);
+    try { fs.unlinkSync(`/proc/self/fd/${directory}/${temporary}`); } catch {}
   }
 }
 

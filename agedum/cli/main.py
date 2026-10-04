@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
+import tomllib
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -55,6 +57,7 @@ from agedum.provider import (
     ConfigFile,
     FailoverPlan,
     ProviderError,
+    _toml_config_value,
     build_launch,
     default_env_file,
     expand_carrier_refs,
@@ -71,6 +74,7 @@ from agedum.provider import (
     resolve_prompt_templates,
     with_prompt,
 )
+from agedum.proxy import CAPABILITY_ENV, CAPABILITY_HEADER
 from agedum.sources import Source, load_global_source, load_source
 
 _err = Console(stderr=True)
@@ -418,7 +422,7 @@ def _print_config_files(launch) -> None:
             else ""
         )
         print(f"  {target}{note}")
-        for line in _redact(content, secret_values).splitlines():
+        for line in _diagnostic_document(content, secret_values, Path(target).suffix).splitlines():
             print(f"    {line}")
     print()
 
@@ -452,10 +456,11 @@ def _print_environment(launch) -> None:
         if key == "OPENCODE_CONFIG_CONTENT":
             # The resolved opencode config — pretty-print the JSON instead of a one-liner.
             print(f"  {key}")
-            for line in _redact(_pretty_json(value), secret_values).splitlines():
+            for line in _diagnostic_document(value, secret_values, ".json").splitlines():
                 print(f"    {line}")
         else:
-            print(f"  {key.ljust(width)}   {'***' if key in launch.secrets else value}")
+            shown = "***" if key in launch.secrets else _redact_value(value, secret_values, key)
+            print(f"  {key.ljust(width)}   {shown}")
     for var in launch.unset:
         print(f"  unset {var}")
     print()
@@ -465,30 +470,91 @@ def _print_command(
     command: list[str], extra_args: list[str], secret_values: list[str] = ()
 ) -> None:
     print("command")
-    print(f"  {_redact(' '.join(command), secret_values)}")
+    print(f"  {' '.join(_diagnostic_argv(command, secret_values))}")
     if extra_args:
-        print(f"  + agedum appends: {_redact(' '.join(extra_args), secret_values)}")
+        print(f"  + agedum appends: {' '.join(_diagnostic_argv(extra_args, secret_values))}")
 
 
-def _redact(text: str, secret_values: list[str]) -> str:
-    """Replace each secret value with ``***`` (longest first, so a shorter secret that
-    is a substring of a longer one cannot leave a fragment unmasked)."""
-    for secret in secret_values:
-        text = text.replace(secret, "***")
-    return text
+def _redact_value(value, secret_values, key=""):
+    sensitive = key.lower().replace("_", "").replace("-", "") in {
+        "apikey",
+        "authorization",
+        "proxyauthorization",
+        "password",
+        "secret",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "xapikey",
+        "agedumproxycapability",
+        "xagedumproxycapability",
+        "anthropiccustomheaders",
+    }
+    reference = isinstance(value, str) and re.fullmatch(
+        r"\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)|\{env:[A-Za-z_]\w*\}", value
+    )
+    if sensitive and not (reference and value not in secret_values):
+        return "***"
+    if isinstance(value, dict):
+        return {name: _redact_value(item, secret_values, name) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item, secret_values) for item in value]
+    if isinstance(value, str):
+        if len(value) > 1 and value in secret_values:
+            return "***"
+        # Compound values can embed credentials; one-character switches are not text tokens.
+        for secret in secret_values:
+            if len(secret) > 1:
+                value = value.replace(secret, "***")
+    return value
 
 
-def _pretty_json(text: str) -> str:
-    """Re-render a compact JSON string indented; pass it through unchanged if unparseable.
-
-    Key order is preserved so a dry-run shows the order the harness will actually read —
-    an opencode permission map is evaluated in key order, so sorting the display would
-    hide the very thing a reviewer inspects a dry-run to check.
-    """
+def _diagnostic_document(content, secret_values, suffix):
     try:
-        return json.dumps(json.loads(text), indent=2)
-    except json.JSONDecodeError:
-        return text
+        if suffix == ".json":
+            return json.dumps(
+                _redact_value(json.loads(content), secret_values), indent=2, ensure_ascii=False
+            )
+        if suffix == ".toml":
+            document = _redact_value(tomllib.loads(content), secret_values)
+            return "\n".join(
+                f"{json.dumps(name, ensure_ascii=False)} = {_toml_config_value(value)}"
+                for name, value in document.items()
+            )
+    except (ValueError, TypeError):
+        pass
+    return "*** (unparseable diagnostic content)"
+
+
+def _diagnostic_argv(command, secret_values):
+    shown = []
+    previous = ""
+    for token in command:
+        if previous in ("--key", "--api-key", "--token", "--password"):
+            value = "***"
+        elif previous in ("--settings", "--mcp-config"):
+            value = _diagnostic_document(token, secret_values, ".json")
+        elif previous in ("-c", "--config") and "=" in token:
+            name, raw = token.split("=", 1)
+            try:
+                value = _redact_value(
+                    tomllib.loads("value=" + raw)["value"],
+                    secret_values,
+                    name.rsplit(".", 1)[-1].strip('"'),
+                )
+                value = name + "=" + _toml_config_value(value)
+            except ValueError:
+                value = name + '="***"'
+        elif token.startswith(("--key=", "--api-key=", "--token=", "--password=")):
+            value = token.split("=", 1)[0] + "=***"
+        elif token.startswith(("--settings=", "--mcp-config=")):
+            name, raw = token.split("=", 1)
+            value = name + "=" + _diagnostic_document(raw, secret_values, ".json")
+        else:
+            value = _redact_value(token, secret_values)
+        shown.append(value)
+        previous = token
+    return shown
 
 
 def _abs_display(path: Path) -> str:
@@ -798,11 +864,20 @@ def _maybe_proxy(mode: str) -> Iterator[None]:
         proxy = FoldProxy(upstream)
 
     with proxy:
-        os.environ["ANTHROPIC_BASE_URL"] = proxy.base_url
-        try:
+        custom_headers = os.environ.get("ANTHROPIC_CUSTOM_HEADERS", "")
+        kept = [
+            line
+            for line in custom_headers.splitlines()
+            if line.split(":", 1)[0].strip().lower() != CAPABILITY_HEADER.lower()
+        ]
+        kept.append(f"{CAPABILITY_HEADER}: {proxy.capability}")
+        with _runtime_environment(
+            {
+                "ANTHROPIC_BASE_URL": proxy.base_url,
+                "ANTHROPIC_CUSTOM_HEADERS": "\n".join(kept),
+            }
+        ):
             yield
-        finally:
-            os.environ["ANTHROPIC_BASE_URL"] = upstream
 
 
 @contextmanager
@@ -826,7 +901,27 @@ def _maybe_codex_proxy(mode: str, command: list[str]) -> Iterator[list[str]]:
     from agedum.proxy import ResponsesToChatProxy
 
     with ResponsesToChatProxy(upstream) as proxy:
-        yield _rewrite_codex_base_url(command, proxy.base_url)
+        with _runtime_environment({CAPABILITY_ENV: proxy.capability}):
+            yield [
+                *_rewrite_codex_base_url(command, proxy.base_url),
+                "-c",
+                f"model_providers.{CODEX_PROVIDER_NAME}.env_http_headers."
+                f'"{CAPABILITY_HEADER}"="{CAPABILITY_ENV}"',
+            ]
+
+
+@contextmanager
+def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
+    previous = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _rewrite_codex_base_url(command: list[str], base_url: str) -> list[str]:
@@ -865,4 +960,9 @@ def _maybe_failover_proxy(config: dict, base_env: dict[str, str]) -> Iterator[Fa
     from agedum.proxy import FailoverProxy
 
     with FailoverProxy(spec) as proxy:
-        yield FailoverPlan(base_url=proxy.base_url, routes=tuple(spec["routes"]))
+        with _runtime_environment({CAPABILITY_ENV: proxy.capability}):
+            yield FailoverPlan(
+                base_url=proxy.base_url,
+                routes=tuple(spec["routes"]),
+                capability_env=CAPABILITY_ENV,
+            )

@@ -21,6 +21,7 @@ The two-goal contract asserted here:
 """
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -99,6 +100,7 @@ class _SSEFallbackUpstream:
     MARKER = b"FALLBACK-STUB-OK"
     FRAMES = [
         b'data: {"id":"fb","choices":[{"delta":{"content":"FALLBACK-STUB-OK"}}]}\n\n',
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
         b"data: [DONE]\n\n",
     ]
 
@@ -210,7 +212,11 @@ def _opencode_post(launch, provider_id, body):
         f"{base_url}/chat/completions",
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer sk-kimi"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer sk-kimi",
+            **_runtime_headers(document["provider"][provider_id]["options"]["headers"]),
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -221,6 +227,13 @@ def _opencode_post(launch, provider_id, body):
 
 def _chat_body():
     return {"model": "k3", "messages": [{"role": "user", "content": "hi"}]}
+
+
+def _runtime_headers(headers):
+    return {
+        name: os.environ[value[5:-1]] if value.startswith("{env:") else value
+        for name, value in headers.items()
+    }
 
 
 def _kimi_glm_defs(wall_url, rung_url):
@@ -444,7 +457,11 @@ def _opencode_responses_post(launch, provider_id, body):
         f"{base_url}/responses",
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json", "Authorization": "Bearer oauth-token"},
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer oauth-token",
+            **_runtime_headers(document["provider"][provider_id]["options"]["headers"]),
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:

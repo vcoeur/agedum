@@ -68,6 +68,23 @@ Two consequences of the read-only bind, both by design:
 The overlay files are typically shipped by [agentsconf](https://github.com/vcoeur/agentsconf);
 agedum only consumes whatever has landed under `~/.config/agents/claude/`.
 
+## Transcript storage
+
+Automatic project transcript hooks remain enabled. Sidecars named by
+`CONDASH_TRANSCRIPT_FILE` are created as 0600 in owned 0700 storage; existing storage
+with broader permissions, foreign ownership, symlinks, non-regular files or hardlinks
+is refused without modifying it. New parent directories are 0700. Linux directory
+handles and no-follow opens anchor writes to the validated storage. Capture remains
+best-effort and does not interrupt the harness; terminal OSC capture is unchanged.
+
+Byte checkpoints use owned 0700 `agedum-claude-transcript-<uid>` storage under TMPDIR,
+with names hashed from session id and transcript path. Exclusive per-checkpoint locks
+serialize stop hooks, and 0600 temporary files are atomically renamed after fsync.
+Unsafe pre-existing checkpoints are refused, never truncated. A crash can leave a
+lock: the owner must remove it after confirming no stop hook is running; agedum never
+guesses that another process's lock is stale. Checkpoint storage is ephemeral, not a
+retention policy for the consumer's conversation sidecars.
+
 ## Provider config { #provider-config }
 
 A [provider](../provider.md) config repoints Claude Code at a custom endpoint, model, and
@@ -221,6 +238,16 @@ request bodies are de-chunked before forwarding, and a hung upstream is bounded 
 generous per-socket-op timeout (300 s — far above the API's streaming ping cadence, so it
 only ever fires on a genuinely dead peer). The proxy lives only for the duration of the
 wrapped command, and is a no-op for other harnesses and when the flag is unset.
+
+Both Claude proxies require a random per-launch capability in
+`X-Agedum-Proxy-Capability`. Agedum adds it to the child's runtime-only
+`ANTHROPIC_CUSTOM_HEADERS`, preserving unrelated custom headers and the separate upstream
+key/bearer token; the temporary environment is restored on exit. The proxy checks exactly
+one capability header in constant time before local token-count responses or upstream
+contact and strips it before forwarding. Browser `Origin` requests are rejected in addition
+to capability authentication. No capability is written to provider files, argv, URLs or
+dry-run output. This protects admission from callers that only know the loopback address,
+not from a process already able to read the child's private runtime credentials.
 
 ## OpenAI-only upstream — translation proxy { #translate-proxy }
 

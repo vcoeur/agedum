@@ -428,6 +428,37 @@ Completions for chat-only providers), `cli/main.py` (parse + `_COMPILERS` dispat
 `ANTHROPIC_BASE_URL`, `_maybe_codex_proxy` interposes the codex proxy by rewriting the `base_url`
 override).
 
+## Proxy admission and diagnostic safety
+
+- Every local proxy requires its own random 256-bit launch capability in
+  `X-Agedum-Proxy-Capability`, checked in constant time before reading a body, answering a
+  local probe, or contacting any upstream. Loopback is not authorization; browser `Origin`
+  is rejected as additional defense. Duplicate/missing/wrong capability headers fail closed.
+- Keep provider keys and OAuth authentication separate from admission. Claude adds the
+  capability to runtime-only `ANTHROPIC_CUSTOM_HEADERS`; Codex uses an `env_http_headers`
+  override naming `AGEDUM_PROXY_CAPABILITY` (never its value in argv); OpenCode routed
+  `options.headers` reference that runtime env var. Restore the temporary env on exit.
+  Never persist, print or log the capability. Strip it before forwarding; remove all
+  case-insensitive authorization/API-key fields before installing a fallback rung's key.
+- Responses translation requires both a successful finish reason and `[DONE]` before
+  emitting `response.completed` or finalizing tool arguments. EOF/length/filter produce
+  `response.incomplete`; upstream errors, malformed streams and invalid tool arguments
+  produce `response.failed`. Apply the same converter to Codex and OpenCode translated rungs.
+  Validate every chunk at one typed boundary before mutating output/lifecycle: choices and
+  deltas, nullable text/refusal/identity/name/argument fragments, optional role/tool-type/finish
+  enums, integer indices and usage counters. Missing fields and protocol-valid null/empty
+  metadata remain accepted; optional tool containers may be null, never coerced from other
+  falsy types. Unused vendor metadata stays unrestricted. Non-empty refusal or unsupported
+  legacy function-call output fails explicitly rather than becoming an empty successful turn.
+  A non-null finish reason cannot later change; repeated/null finish metadata remains valid.
+  A prior successful finish never makes a later malformed frame acceptable.
+- Diagnostic JSON/TOML/structured argv are parsed, redacted as typed values, then serialized.
+  Preserve numeric/boolean types, env references and unrelated Unicode prompt text; required
+  switch values such as `1` must not be replaced inside serialized JSON or arbitrary words.
+  Unparseable generated content is withheld, never printed as a raw fallback. Diagnostics
+  must not mutate the actual launch documents. Regression/runtime fixtures use fake keys and
+  localhost only; `tests/test_proxy_trust.py` covers these boundaries.
+
 ## Virtual-FS safety rules (validated empirically — don't regress)
 
 - The namespace shares the **real `.git`**, so an in-namespace `git add`/`commit`
@@ -442,8 +473,8 @@ override).
   pre-existing dir; injected content never leaks (leftovers are 0-byte / empty).
 - **Write-confinement** (`--sandbox` / a provider `sandbox` block) replaces the default
   `--dev-bind / /` (full read-write host) with `--ro-bind / /` + `--dev /dev` + `--proc /proc`
-  + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (project root + the nearest existing
-  ancestor of every injection target + **each harness's own state/config dir** (`Plan.writable_dirs`,
+  + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (launch directory + the prepared exact
+  parent of every injection target + **each harness's own state/config dir** (`Plan.writable_dirs`,
   e.g. `~/.cline`, `~/.claude` — `run_virtualfs` `mkdir`s any that are missing so the bind lands)
   + the declared `read_write` paths, each glob-expanded — `*`/`?`/`[` resolves to every existing
   match, so `~/src/*` binds each child of `~/src`). Each harness declares its state dir in its
@@ -453,3 +484,18 @@ override).
   be writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its
   path is tmpfs-shadowed in the namespace (so agedum's compiled files under `/tmp` still bind
   with `--tmpfs /tmp` active). Off by default — every existing launch is unchanged.
+
+- Git ownership is queried from each target's actual worktree, including nested source
+  roots and global targets in another repository. Unexpected Git errors refuse launch.
+  Shadows receive the same guard: even read-only masking can stage tracked-file deletions.
+- Pi never shadows source skills. It merges native exact `-<source SKILL.md path>`
+  exclusions into untracked project `.pi/settings.json` for only the skills it compiles.
+  Manual/global/package skills and unrelated settings remain enabled. Tracked or invalid
+  project settings refuse launch; an owner decision is required to use an untracked layer.
+- Automatic transcript capture remains enabled. Claude/OpenCode sidecars require an owned
+  0700 storage directory and an owned regular, single-link 0600 file; unsafe existing paths
+  are rejected without chmod or writes. Linux directory handles anchor no-follow writes.
+  Claude checkpoints live in owned 0700 `agedum-claude-transcript-<uid>` storage under TMPDIR,
+  keyed by session and transcript path, with exclusive locks and atomic 0600 replacement.
+  A stale lock suppresses checkpoint capture until the owner removes it; harness execution
+  remains best-effort and unchanged. Tests use fake hook/plugin events, never real logs.
