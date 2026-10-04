@@ -1,5 +1,7 @@
 """Regression versions of the credential/stream audit's localhost reproductions."""
 
+import contextlib
+import gzip
 import http.client
 import io
 import json
@@ -84,7 +86,8 @@ def request(url, body=None, headers=(), method="POST"):
     connection = http.client.HTTPConnection(address.hostname, address.port, timeout=5)
     raw = json.dumps(body).encode() if body is not None else b""
     try:
-        connection.putrequest(method, address.path or "/")
+        target = (address.path or "/") + ("?" + address.query if "?" in url else "")
+        connection.putrequest(method, target)
         connection.putheader("Content-Length", str(len(raw)))
         for name, value in headers:
             connection.putheader(name, value)
@@ -242,6 +245,643 @@ def events(raw):
 def sse(*frames, done=True):
     raw = b"".join(b"data: " + json.dumps(frame).encode() + b"\n\n" for frame in frames)
     return raw + (b"data: [DONE]\n\n" if done else b"")
+
+
+class StreamUpstream:
+    """Flush a first SSE frame and optionally hold the terminal frame behind a gate."""
+
+    def __init__(
+        self,
+        first,
+        tail=b"",
+        *,
+        framing="close",
+        pause=False,
+        encoding=None,
+        negotiate=False,
+        truncate_chunked=False,
+    ):
+        self.requests = []
+        self.flushed = threading.Event()
+        self.release = threading.Event()
+        self.ended = threading.Event()
+        if not pause:
+            self.release.set()
+        state = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                state.requests.append((self.path, list(self.headers.items()), raw))
+                wire_first, wire_tail = first, tail
+                wire_encoding = encoding
+                if negotiate and "identity" in self.headers.get_all("Accept-Encoding", []):
+                    wire_encoding = None
+                if wire_encoding == "gzip" and negotiate:
+                    wire_first, wire_tail = gzip.compress(first + tail), b""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                if wire_encoding:
+                    self.send_header("Content-Encoding", wire_encoding)
+                if framing == "length":
+                    self.send_header("Content-Length", str(len(wire_first + wire_tail)))
+                elif framing == "chunked":
+                    self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.close_connection = True
+                self.end_headers()
+
+                def write(payload):
+                    if not payload:
+                        return
+                    if framing == "chunked":
+                        self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n")
+                    else:
+                        self.wfile.write(payload)
+                    self.wfile.flush()
+
+                try:
+                    write(wire_first)
+                    state.flushed.set()
+                    if not state.release.wait(10):
+                        return
+                    write(wire_tail)
+                    if framing == "chunked" and not truncate_chunked:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    state.ended.set()
+
+            do_GET = do_POST
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+
+    @property
+    def url(self):
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+@contextlib.contextmanager
+def streaming_proxy(kind, upstream):
+    if kind == "fold":
+        with proxy.FoldProxy(upstream) as server:
+            yield server, "/v1/messages", {"model": "m", "messages": []}
+    elif kind == "responses":
+        with proxy.ResponsesToChatProxy(upstream) as server:
+            yield server, "/responses", {"model": "m", "input": "hello"}
+    elif kind == "anthropic":
+        with proxy.TranslateProxy(upstream, api_key="FAKE-PRIVATE") as server:
+            yield server, "/v1/messages", {"model": "m", "messages": [], "stream": True}
+    elif kind == "translated-failover":
+        with Upstream(429, b"quota") as primary:
+            config = spec(primary.url, upstream)
+            config["routes"]["p"]["openai"] = True
+            with proxy.FailoverProxy(config) as server:
+                yield server, "/oc/p/responses", {"model": "m", "input": "hello"}
+    else:
+        with proxy.FailoverProxy(spec(upstream, upstream)) as server:
+            yield server, "/oc/p/chat/completions", {"model": "m", "messages": []}
+
+
+@pytest.mark.parametrize(
+    "kind", ["fold", "failover", "responses", "translated-failover", "anthropic"]
+)
+@pytest.mark.parametrize("framing", ["close", "length", "chunked"])
+def test_flushed_payload_arrives_before_upstream_eof(kind, framing):
+    first = sse({"choices": [{"delta": {"content": "early-text"}}]}, done=False)
+    tail = sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    with StreamUpstream(first, tail, framing=framing, pause=True) as upstream:
+        with streaming_proxy(kind, upstream.url) as (server, local_path, body):
+            address = urlsplit(server.base_url)
+            connection = http.client.HTTPConnection(address.hostname, address.port, timeout=2)
+            try:
+                connection.request(
+                    "POST",
+                    local_path,
+                    json.dumps(body),
+                    headers={
+                        proxy.CAPABILITY_HEADER: server.capability,
+                        "Authorization": "Bearer FAKE-PRIMARY",
+                    },
+                )
+                response = connection.getresponse()
+                assert response.status == 200
+                assert upstream.flushed.wait(2)
+                # response.created is synthetic; require the actual upstream text delta.
+                while True:
+                    line = response.readline()
+                    assert line, "stream ended before delivering its first payload"
+                    if b"early-text" in line:
+                        break
+                assert not upstream.release.is_set()
+                assert not upstream.ended.is_set()
+                upstream.release.set()
+                remainder = response.read()
+                if kind in ("responses", "translated-failover"):
+                    assert events(remainder)[-1]["type"] == "response.completed"
+                elif kind == "anthropic":
+                    assert events(remainder)[-1]["type"] == "message_stop"
+            finally:
+                upstream.release.set()
+                connection.close()
+
+
+@pytest.mark.parametrize("kind", ["responses", "translated-failover"])
+def test_responses_negotiate_identity_with_gzip_capable_upstream(kind):
+    raw = sse({"choices": [{"delta": {"content": "not lost"}, "finish_reason": "stop"}]})
+    with StreamUpstream(raw, encoding="gzip", negotiate=True) as upstream:
+        with streaming_proxy(kind, upstream.url) as (server, local_path, body):
+            status, headers, output = request(
+                server.base_url + local_path,
+                body,
+                [
+                    (proxy.CAPABILITY_HEADER, server.capability),
+                    ("accept-encoding", "gzip"),
+                    ("aCcEpT-EnCoDiNg", "br, gzip"),
+                ],
+            )
+    assert status == 200
+    encodings = [
+        value for name, value in upstream.requests[0][1] if name.lower() == "accept-encoding"
+    ]
+    assert encodings == ["identity"]
+    terminal = events(output)[-1]
+    assert terminal["type"] == "response.completed"
+    assert terminal["response"]["output"][0]["content"][0]["text"] == "not lost"
+    assert not any(name.lower() == "content-encoding" for name, _ in headers)
+
+
+@pytest.mark.parametrize("kind", ["responses", "translated-failover"])
+@pytest.mark.parametrize(
+    "encoding,payload",
+    [
+        ("gzip", gzip.compress(sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}))),
+        ("gzip", b"not a gzip stream"),
+        ("br", b"unsupported"),
+    ],
+)
+def test_responses_reject_unsolicited_encoding_without_false_success(kind, encoding, payload):
+    with StreamUpstream(payload, encoding=encoding) as upstream:
+        with streaming_proxy(kind, upstream.url) as (server, local_path, body):
+            status, _, raw = request(
+                server.base_url + local_path,
+                body,
+                [
+                    (proxy.CAPABILITY_HEADER, server.capability),
+                ],
+            )
+    assert status == 502
+    assert (
+        json.loads(raw)["error"]["message"] == "agedum proxy: unsupported upstream Content-Encoding"
+    )
+    assert b"response.completed" not in raw
+
+
+@pytest.mark.parametrize(
+    "method,body",
+    [("GET", None), ("POST", {"model": "unmapped"}), ("POST", {"model": "m", "messages": []})],
+)
+@pytest.mark.parametrize("suffix", ["?version=2&tag=a&tag=b%2Fc&next=%3F%26", "?"])
+def test_failover_preserves_transparent_query(method, body, suffix):
+    with (
+        Upstream() as upstream,
+        proxy.FailoverProxy(spec(upstream.url + "/v1", upstream.url)) as server,
+    ):
+        status, _, _ = request(
+            server.base_url + "/oc/p/custom" + suffix,
+            body,
+            [
+                (proxy.CAPABILITY_HEADER, server.capability),
+            ],
+            method=method,
+        )
+    assert status == 200
+    assert upstream.requests[0][0] == "/v1/custom" + suffix
+
+
+@pytest.mark.parametrize("translated", [False, True])
+def test_fallback_preserves_queries_except_deliberate_responses_translation(translated):
+    terminal = sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    with (
+        Upstream(429, b"quota") as primary,
+        Upstream(200, terminal, "text/event-stream") as fallback,
+    ):
+        config = spec(primary.url + "/v1", fallback.url + "/v2")
+        config["routes"]["p"]["openai"] = translated
+        body = {"model": "m", "input": "hello"} if translated else {"model": "m", "messages": []}
+        with proxy.FailoverProxy(config) as server:
+            status, _, _ = request(
+                server.base_url + "/oc/p/custom?version=2",
+                body,
+                [
+                    (proxy.CAPABILITY_HEADER, server.capability),
+                ],
+            )
+    assert status == 200
+    assert primary.requests[0][0] == "/v1/custom?version=2"
+    assert fallback.requests[0][0] == (
+        "/v2/chat/completions" if translated else "/v2/custom?version=2"
+    )
+
+
+def interleaved_tool_chunks():
+    # Genuine 0,1,0,1 interleaving; arguments precede one call's identity and repeat
+    # the other call's identity without duplicating its name or dropping late arguments.
+    calls = [
+        {"index": 0, "function": {"arguments": '{"city":'}},
+        {"index": 1, "id": "call_b", "function": {"name": "lookup", "arguments": '{"n":'}},
+        {"index": 0, "id": "call_a", "function": {"name": "weather", "arguments": '"Paris"}'}},
+        {"index": 1, "id": "call_b", "function": {"name": "lookup", "arguments": "2}"}},
+    ]
+    return [
+        *[{"choices": [{"delta": {"tool_calls": [call]}}]} for call in calls],
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+
+def assert_tool_lifecycles(output):
+    open_index = None
+    blocks = []
+    fragments = []
+    for event in output:
+        if event["type"] == "content_block_start":
+            assert open_index is None
+            open_index = event["index"]
+            blocks.append(event["content_block"])
+            fragments = []
+        elif event["type"] == "content_block_delta":
+            assert event["index"] == open_index
+            fragments.append(event["delta"]["partial_json"])
+        elif event["type"] == "content_block_stop":
+            assert event["index"] == open_index
+            blocks[-1]["input"] = json.loads("".join(fragments))
+            open_index = None
+        elif event["type"] in ("message_delta", "message_stop"):
+            assert open_index is None
+    assert open_index is None
+    assert blocks == [
+        {"type": "tool_use", "id": "call_a", "name": "weather", "input": {"city": "Paris"}},
+        {"type": "tool_use", "id": "call_b", "name": "lookup", "input": {"n": 2}},
+    ]
+
+
+def test_anthropic_interleaved_tools_are_buffered_then_serialized():
+    stream = proxy.OpenAIToAnthropicStream("m")
+    chunks = interleaved_tool_chunks()
+    early = b"".join(frame for chunk in chunks for frame in stream.feed(chunk))
+    assert all(event["type"] == "message_start" for event in events(early))
+    proxy._feed_sse_line(stream, b"data: [DONE]\n")
+    assert_tool_lifecycles(events(early + b"".join(stream.finish())))
+    assert stream.finish() == []
+
+
+def test_anthropic_interleaved_tools_over_real_localhost_stream():
+    with StreamUpstream(sse(*interleaved_tool_chunks())) as upstream:
+        with proxy.TranslateProxy(upstream.url, api_key="FAKE-PRIVATE") as server:
+            status, _, raw = request(
+                server.base_url + "/v1/messages",
+                {"model": "m", "messages": [], "stream": True},
+                [
+                    (proxy.CAPABILITY_HEADER, server.capability),
+                ],
+            )
+    assert status == 200
+    assert_tool_lifecycles(events(raw))
+
+
+def anthropic_tool_chunk(arguments='{"x":1}', *, tool_id="call_a", name="lookup"):
+    return {
+        "choices": [
+            {
+                "delta": {
+                    "content": "partial text",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": tool_id,
+                            "function": {"name": name, "arguments": arguments},
+                        }
+                    ],
+                }
+            }
+        ],
+    }
+
+
+def anthropic_tool_wire(arguments='{"x":1}', *, finish="tool_calls", done=True):
+    chunks = [anthropic_tool_chunk(arguments)]
+    if finish is not None:
+        chunks.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+    return sse(*chunks, done=done)
+
+
+_ANTHROPIC_TOOL_CASES = [
+    pytest.param(
+        anthropic_tool_wire('{"x":', finish=None, done=False), "upstream_eof", id="partial-eof"
+    ),
+    pytest.param(
+        anthropic_tool_wire(finish=None, done=False), "upstream_eof", id="complete-arguments-eof"
+    ),
+    pytest.param(
+        anthropic_tool_wire('{"x":', done=False), "upstream_eof", id="partial-finish-without-done"
+    ),
+    pytest.param(anthropic_tool_wire(done=False), "upstream_eof", id="finish-without-done"),
+    pytest.param(anthropic_tool_wire(finish=None), "upstream_eof", id="done-without-finish"),
+    pytest.param(
+        sse(anthropic_tool_chunk('{"x":'), {"error": {"message": "FAKE-SECRET upstream failed"}}),
+        "upstream_error",
+        id="error-partial-arguments",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + sse({"error": {"message": "FAKE-SECRET"}}),
+        "upstream_error",
+        id="error-after-successful-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire('{"x":', finish="length"), "max_output_tokens", id="length-partial"
+    ),
+    pytest.param(
+        anthropic_tool_wire(finish="length"), "max_output_tokens", id="length-complete-arguments"
+    ),
+    pytest.param(
+        anthropic_tool_wire(finish="content_filter"),
+        "unsupported_finish_reason",
+        id="content-filter",
+    ),
+    pytest.param(anthropic_tool_wire('{"x":'), "invalid_tool_arguments", id="unfinished-json"),
+    pytest.param(anthropic_tool_wire("not-json"), "invalid_tool_arguments", id="malformed-json"),
+    *[
+        pytest.param(anthropic_tool_wire(value), "invalid_tool_arguments", id="non-object-" + value)
+        for value in ("[]", "null", "1", '"string"')
+    ],
+    pytest.param(
+        anthropic_tool_wire('{"x":NaN}'), "invalid_tool_arguments", id="non-json-constant"
+    ),
+    pytest.param(
+        sse(
+            anthropic_tool_chunk(tool_id=None),
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ),
+        "invalid_tool_arguments",
+        id="missing-id",
+    ),
+    pytest.param(
+        sse(
+            anthropic_tool_chunk(name=""),
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ),
+        "invalid_tool_arguments",
+        id="missing-name",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + b"data: not-json\n\ndata: [DONE]\n\n",
+        "invalid_upstream_stream",
+        id="malformed-after-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False)
+        + sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        "invalid_upstream_stream",
+        id="conflicting-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + sse({"choices": [{"delta": {"tool_calls": False}}]}),
+        "invalid_upstream_stream",
+        id="invalid-tool-container-after-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + b'data: {"choices":',
+        "invalid_upstream_stream",
+        id="truncated-sse-json",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + b'data: {"id":"\xff"}\n\n',
+        "invalid_upstream_stream",
+        id="invalid-utf8",
+    ),
+    pytest.param(
+        sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        "invalid_tool_arguments",
+        id="tool-finish-without-tools",
+    ),
+    pytest.param(
+        anthropic_tool_wire(finish="unknown"), "invalid_upstream_stream", id="unknown-finish"
+    ),
+    pytest.param(
+        anthropic_tool_wire(finish="function_call"), "unsupported_finish_reason", id="legacy-finish"
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False) + sse({"choices": [{"delta": {"refusal": "refused"}}]}),
+        "upstream_refusal",
+        id="refusal-after-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False)
+        + sse({"choices": [{"delta": {"function_call": {"name": "legacy"}}}]}),
+        "unsupported_function_call",
+        id="legacy-output-after-finish",
+    ),
+    pytest.param(
+        anthropic_tool_wire(done=False)
+        + sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call_b",
+                                    "function": {"name": "second", "arguments": '{"y":'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+        "invalid_tool_arguments",
+        id="one-invalid-call-withholds-all-tools",
+    ),
+    pytest.param(anthropic_tool_wire(), None, id="intact-tool-finish"),
+    pytest.param(anthropic_tool_wire(finish="stop"), None, id="intact-stop-finish"),
+    pytest.param(
+        anthropic_tool_wire(done=False)
+        + sse(
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            {"choices": [{"delta": {}, "finish_reason": None}]},
+            {"choices": [], "usage": None},
+        ),
+        None,
+        id="repeated-finish-null-metadata",
+    ),
+]
+
+
+def assert_anthropic_terminal(output, failure):
+    if failure:
+        assert output[-1] == {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "agedum translate-proxy: " + failure,
+            },
+        }
+        assert not any(event["type"] in ("message_delta", "message_stop") for event in output)
+        # No buffered tool becomes visible, so even eager clients cannot execute it.
+        assert not any(event.get("content_block", {}).get("type") == "tool_use" for event in output)
+        assert not any(event.get("delta", {}).get("type") == "input_json_delta" for event in output)
+        open_blocks = {
+            event["index"]: event["content_block"]["type"]
+            for event in output
+            if event["type"] == "content_block_start"
+        }
+        assert all(
+            open_blocks[event["index"]] == "text"
+            for event in output
+            if event["type"] == "content_block_stop"
+        )
+        assert "FAKE-SECRET" not in json.dumps(output)
+    else:
+        assert output[-1]["type"] == "message_stop"
+        assert output[-2]["delta"]["stop_reason"] == "tool_use"
+        assert not any(event["type"] == "error" for event in output)
+        fragments = [
+            event["delta"]["partial_json"]
+            for event in output
+            if event.get("delta", {}).get("type") == "input_json_delta"
+        ]
+        assert json.loads("".join(fragments)) == {"x": 1}
+
+
+@pytest.mark.parametrize("raw,failure", _ANTHROPIC_TOOL_CASES)
+def test_anthropic_buffered_tools_terminal_matrix(raw, failure):
+    stream = proxy.OpenAIToAnthropicStream("m")
+    output = []
+    for line in raw.splitlines(keepends=True):
+        output.extend(proxy._feed_sse_line(stream, line))
+    output.extend(stream.finish())
+    assert_anthropic_terminal(events(b"".join(output)), failure)
+    assert stream.finish() == []
+    assert stream.feed(anthropic_tool_chunk()) == []
+
+
+@pytest.mark.parametrize("raw,failure", _ANTHROPIC_TOOL_CASES)
+def test_anthropic_buffered_tools_terminal_matrix_over_localhost(raw, failure):
+    with StreamUpstream(raw) as upstream:
+        with proxy.TranslateProxy(upstream.url, api_key="FAKE-PRIVATE") as server:
+            status, headers, output = request(
+                server.base_url + "/v1/messages?beta=true",
+                {
+                    "model": "m",
+                    "messages": [{"role": "user", "content": "lookup"}],
+                    "stream": True,
+                },
+                [(proxy.CAPABILITY_HEADER, server.capability)],
+            )
+    assert status == 200
+    assert ("Content-Type", "text/event-stream") in headers
+    assert_anthropic_terminal(events(output), failure)
+    if failure:
+        assert b"event: error\n" in output
+    assert upstream.requests[0][0] == "/v1/chat/completions"
+    assert json.loads(upstream.requests[0][2])["stream"] is True
+    assert not any(
+        name.lower() == proxy.CAPABILITY_HEADER.lower() for name, _ in upstream.requests[0][1]
+    )
+
+
+def test_anthropic_exact_review_error_and_eof_do_not_stop_partial_tools():
+    chunk = anthropic_tool_chunk('{"x":')
+    chunk["choices"][0]["delta"].pop("content")
+    for error in (False, True):
+        stream = proxy.OpenAIToAnthropicStream("m")
+        output = stream.feed(chunk)
+        if error:
+            output += proxy._feed_sse_line(
+                stream, b'data: {"error":{"message":"upstream failed"}}\n'
+            )
+        output += stream.finish()
+        assert stream.tool_blocks[0]["arguments"] == ['{"x":']
+        assert_anthropic_terminal(
+            events(b"".join(output)), "upstream_error" if error else "upstream_eof"
+        )
+        assert not any(event["type"] == "content_block_stop" for event in events(b"".join(output)))
+
+
+def test_anthropic_chunked_disconnect_does_not_finalize_buffered_tools():
+    raw = sse(anthropic_tool_chunk('{"x":'), done=False)
+    with StreamUpstream(raw, framing="chunked", truncate_chunked=True) as upstream:
+        with proxy.TranslateProxy(upstream.url, api_key="FAKE-PRIVATE") as server:
+            status, _, output = request(
+                server.base_url + "/v1/messages",
+                {
+                    "model": "m",
+                    "messages": [],
+                    "stream": True,
+                },
+                [(proxy.CAPABILITY_HEADER, server.capability)],
+            )
+    assert status == 200
+    assert_anthropic_terminal(events(output), "upstream_disconnect")
+
+
+@pytest.mark.parametrize(
+    "finish,done,failure,stop",
+    [
+        ("stop", True, None, "end_turn"),
+        ("length", True, None, "max_tokens"),
+        ("length", False, "upstream_eof", None),
+        (None, False, "upstream_eof", None),
+        ("content_filter", True, "unsupported_finish_reason", None),
+    ],
+)
+def test_anthropic_text_only_truncation_contract_over_localhost(finish, done, failure, stop):
+    raw = sse(
+        {"choices": [{"delta": {"content": "partial text"}, "finish_reason": finish}]}, done=done
+    )
+    with StreamUpstream(raw) as upstream, proxy.TranslateProxy(upstream.url) as server:
+        status, _, output = request(
+            server.base_url + "/v1/messages",
+            {
+                "model": "m",
+                "messages": [],
+                "stream": True,
+            },
+            [(proxy.CAPABILITY_HEADER, server.capability)],
+        )
+    assert status == 200
+    parsed = events(output)
+    assert [
+        event["delta"]["text"]
+        for event in parsed
+        if event.get("delta", {}).get("type") == "text_delta"
+    ] == ["partial text"]
+    if failure:
+        assert_anthropic_terminal(parsed, failure)
+    else:
+        assert parsed[-1]["type"] == "message_stop"
+        assert parsed[-2]["delta"]["stop_reason"] == stop
 
 
 @pytest.mark.parametrize(

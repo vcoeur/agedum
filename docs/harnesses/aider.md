@@ -26,14 +26,16 @@ differs from agedum's other harnesses in two ways that shape how agedum drives i
 | global `~/.config/agents/AGENTS.md` (+ optional `AGENTS.aider.md` overlay) | `--read <compiled path>` (appended arg) |
 | global `~/.config/agents/skills/` | *(not injected — aider has no skills mechanism)* |
 
-- **Instructions** — agedum compiles each scope's `AGENTS.md` to a file under the throwaway
-  launch dir and appends `--read <path>` (project first, then global). The global one is the
-  base merged with an optional `AGENTS.aider.md`
-  [overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope). Because the
-  bwrap launch binds the whole real filesystem (`--dev-bind / /`), those paths resolve inside
-  the namespace **without a dedicated bind** — `Plan.binds` stays empty, like kimi's agent
-  file.
+- **Instructions** — agedum compiles each scope's `AGENTS.md` under the throwaway launch dir,
+  read-only binds it to a content-addressed path under `~/.cache/agedum/aider-instructions/`,
+  then appends `--read <bound path>` (project first, then global). The global one is the base
+  merged with an optional `AGENTS.aider.md`
+  [overlay](../source-shape.md#agentsharnessmd-per-harness-overlay-user-scope). The explicit
+  bind keeps the context visible when write-confinement masks `/tmp` with a private tmpfs.
 - `extra_args`: the `--read` flags above (one per scope that has an `AGENTS.md`).
+- `Plan.binds`: each compiled instruction file is read-only bound at its corresponding
+  content-addressed cache path; the cache path is a mount target, not a persistent instruction
+  copy.
 
 ```bash
 agedum --wrapper aider -- aider                # drive aider with the same source

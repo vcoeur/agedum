@@ -28,6 +28,7 @@ carries no front-matter, so the merge is a plain body concatenation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -329,19 +330,24 @@ def _compile_skill(src: Path, out: Path, overlay_name: str, force_name: str | No
         merged = _set_skill_name(merged, force_name)
     (out / "SKILL.md").write_text(merged)
 
-    # Copy task files / scripts / other assets; skip SKILL.md and any SKILL.<h>.md overlay.
-    # A subdirectory that itself holds a SKILL.md is a separate (nested) skill, compiled on
-    # its own — skip it here so it isn't also copied in as this skill's asset.
+    _copy_skill_assets(src, out)
+
+
+def _copy_skill_assets(src: Path, out: Path, *, skill_root: bool = True) -> None:
+    """Copy ordinary skill assets while excluding only actual nested skill roots."""
     for item in src.iterdir():
-        if item.name == "SKILL.md" or (item.name.startswith("SKILL.") and item.suffix == ".md"):
+        if item.name == "SKILL.md" or (
+            skill_root and item.name.startswith("SKILL.") and item.suffix == ".md"
+        ):
             continue
-        if item.is_dir() and any(item.rglob("SKILL.md")):
-            continue
-        dst = out / item.name
         if item.is_dir():
-            shutil.copytree(item, dst, dirs_exist_ok=True)
+            if (item / "SKILL.md").is_file():
+                continue
+            target = out / item.name
+            target.mkdir(exist_ok=True)
+            _copy_skill_assets(item, target, skill_root=False)
         else:
-            shutil.copy2(item, dst)
+            shutil.copy2(item, out / item.name)
 
 
 def _discover_skills(skills_dir: Path) -> list[tuple[str, Path, bool]]:
@@ -784,9 +790,8 @@ def compile_aider(project: Source, global_: Source | None, dest: Path) -> Plan:
     * **global instructions** — ``~/.config/agents/AGENTS.md`` (base merged with an optional
       ``AGENTS.aider.md`` overlay) → a second ``--read <compiled path>``.
 
-    The compiled files live under the throwaway ``dest`` directory; the bwrap launch binds
-    the whole real filesystem (``--dev-bind / /``), so those absolute paths resolve inside the
-    namespace without a dedicated bind — ``Plan.binds`` stays empty (like kimi's agent file).
+    The compiled files live under a content-addressed private cache path and are explicitly
+    bound there, because write-confinement masks ``/tmp`` with a private tmpfs.
 
     **Skills are not injected.** aider has no skills system, so there is nothing to render
     them into (and no ``SKILL.aider.md`` overlay); a project ``.agents/skills/`` shows up in
@@ -796,14 +801,18 @@ def compile_aider(project: Source, global_: Source | None, dest: Path) -> Plan:
 
     # Project then global, each appended as its own --read. Project scope takes no overlay
     # (user scope only); global merges an optional AGENTS.aider.md.
-    _aider_read(plan, _instructions(project, None), dest / "project", project.agents_md)
+    _aider_read(plan, _instructions(project, None), dest / "project", project.agents_md, "project")
     if global_ is not None:
-        _aider_read(plan, _instructions(global_, "aider"), dest / "global", global_.agents_md)
+        _aider_read(
+            plan, _instructions(global_, "aider"), dest / "global", global_.agents_md, "global"
+        )
 
     return plan
 
 
-def _aider_read(plan: Plan, instructions: str | None, dest: Path, source: Path | None) -> None:
+def _aider_read(
+    plan: Plan, instructions: str | None, dest: Path, source: Path | None, scope: str
+) -> None:
     """Write one scope's ``AGENTS.md`` under ``dest`` and append it as an aider ``--read`` arg.
 
     A no-op when the scope has no ``AGENTS.md``. The compiled path is recorded in
@@ -814,9 +823,12 @@ def _aider_read(plan: Plan, instructions: str | None, dest: Path, source: Path |
     out = dest / "AGENTS.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(instructions)
-    plan.extra_args += ["--read", str(out)]
+    digest = hashlib.sha256(instructions.encode()).hexdigest()
+    target = Path.home() / ".cache" / "agedum" / "aider-instructions" / f"{scope}-{digest}.md"
+    plan.binds.append((out, target))
+    plan.extra_args += ["--read", str(target)]
     if source is not None:
-        plan.origins[out] = str(source)
+        plan.origins[target] = str(source)
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from agedum.harness import (
     reasonix_home_skills_dir,
     reasonix_user_config_dir,
 )
-from agedum.launcher import assert_safe, build_bwrap_argv
+from agedum.launcher import Sandbox, assert_safe, build_bwrap_argv
 from agedum.sources import Source, load_source
 
 
@@ -144,6 +144,15 @@ def test_compile_claude_skill_nested_inside_skill_not_double_copied(tmp_path):
     child = parent / "inner"
     child.mkdir()
     (child / "SKILL.md").write_text("---\nname: inner\ndescription: child\n---\n")
+    assets = parent / "assets"
+    (assets / "nested").mkdir(parents=True)
+    (assets / "important.txt").write_text("keep this asset\n")
+    (assets / "SKILL.example.md").write_text("ordinary asset, not an overlay here\n")
+    (assets / "nested" / "child.txt").write_text("also keep\n")
+    (assets / "nested" / "subskill").mkdir()
+    (assets / "nested" / "subskill" / "SKILL.md").write_text(
+        "---\nname: subskill\ndescription: separate\n---\n"
+    )
 
     plan = compile_claude(load_source(tmp_path), None, tmp_path / "out")
     skills_src = _src_for(plan, tmp_path / ".claude" / "skills")
@@ -154,6 +163,12 @@ def test_compile_claude_skill_nested_inside_skill_not_double_copied(tmp_path):
     # The child subtree is not duplicated inside the parent; plain assets still copy.
     assert not (skills_src / "outer" / "inner").exists()
     assert (skills_src / "outer" / "notes.md").exists()
+    assert (skills_src / "outer" / "assets" / "important.txt").read_text() == "keep this asset\n"
+    assert (
+        skills_src / "outer" / "assets" / "SKILL.example.md"
+    ).read_text() == "ordinary asset, not an overlay here\n"
+    assert (skills_src / "outer" / "assets" / "nested" / "child.txt").read_text() == "also keep\n"
+    assert not (skills_src / "outer" / "assets" / "nested" / "subskill").exists()
 
 
 def test_compile_kimi_discovers_nested_skills(tmp_path, monkeypatch):
@@ -894,7 +909,8 @@ def _aider_reads(plan):
     return [plan.extra_args[i + 1] for i, token in enumerate(plan.extra_args) if token == "--read"]
 
 
-def test_compile_aider(tmp_path):
+def test_compile_aider(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     proj = tmp_path / "proj"
     sk = proj / ".agents" / "skills" / "pskill"
     sk.mkdir(parents=True)
@@ -918,11 +934,15 @@ def test_compile_aider(tmp_path):
     # (project first, then global), since aider reads no AGENTS.md natively.
     reads = _aider_reads(plan)
     assert len(reads) == 2
-    assert Path(reads[0]).read_text() == "PROJECT-INSTR\n"
-    assert Path(reads[1]).read_text() == "GLOBAL-INSTR\n"
+    assert plan.binds[0][0].read_text() == "PROJECT-INSTR\n"
+    assert plan.binds[1][0].read_text() == "GLOBAL-INSTR\n"
 
-    # No binds: the compiled files are read at their real dest path via --dev-bind / /.
-    assert plan.binds == []
+    assert [target for _, target in plan.binds] == [
+        Path(reads[0]),
+        Path(reads[1]),
+    ]
+    cache_dir = tmp_path / "home" / ".cache" / "agedum" / "aider-instructions"
+    assert all(target.parent == cache_dir for _, target in plan.binds)
 
     # Skills are NOT injected — aider has no skills mechanism, so neither scope's skills
     # appear anywhere in the plan.
@@ -933,8 +953,9 @@ def test_compile_aider(tmp_path):
     assert plan.origins[Path(reads[1])] == str(gconf / "AGENTS.md")
 
 
-def test_compile_aider_project_only(tmp_path):
-    # A project with its own AGENTS.md but no global scope: one --read, no binds.
+def test_compile_aider_project_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    # A project with its own AGENTS.md but no global scope: one read-only bound --read file.
     proj = tmp_path / "proj"
     proj.mkdir()
     (proj / "AGENTS.md").write_text("PROJECT-INSTR\n")
@@ -946,8 +967,14 @@ def test_compile_aider_project_only(tmp_path):
 
     reads = _aider_reads(plan)
     assert len(reads) == 1
-    assert Path(reads[0]).read_text() == "PROJECT-INSTR\n"
-    assert plan.binds == []
+    assert plan.binds[0][0].read_text() == "PROJECT-INSTR\n"
+    assert len(plan.binds) == 1
+    assert plan.binds[0][1] == Path(reads[0])
+    argv = build_bwrap_argv(plan, ["aider", *plan.extra_args], sandbox=Sandbox(enabled=True))
+    assert "--tmpfs" in argv
+    assert "--ro-bind" in argv
+    assert plan.binds[0][1].as_posix() in argv
+    assert reads[0] in argv
 
 
 def test_compile_aider_skills_only_is_empty(tmp_path):
@@ -983,7 +1010,7 @@ def test_compile_aider_global_agents_harness_overlay_merged(tmp_path):
 
     reads = _aider_reads(plan)
     assert len(reads) == 1
-    merged = Path(reads[0]).read_text()
+    merged = plan.binds[0][0].read_text()
     assert "GLOBAL-BASE" in merged
     assert "AIDER-EXTRA" in merged
     assert "OPENCODE-EXTRA" not in merged  # wrong-harness overlay ignored

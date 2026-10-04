@@ -484,7 +484,13 @@ def test_claude_native_runs_bare():
         base_env={},
     )
     assert launch.env == {}  # no requiredEnv, no provider overrides
-    assert launch.unset == []
+    assert set(launch.unset) == {
+        "AGEDUM_FOLD_SYSTEM_MESSAGES",
+        "AGEDUM_TRANSLATE_OPENAI",
+        "AGEDUM_OPENAI_PROMPT_CACHE_KEY",
+        "AGEDUM_OPENAI_THINKING",
+        "AGEDUM_CODEX_CHAT_UPSTREAM",
+    }
     assert launch.command == ["claude"]
 
 
@@ -2168,7 +2174,7 @@ def test_cline_base_url_generates_isolated_providers_config():
         },
         base_env={"KIMI_API_KEY": "sk-kimi-xyz"},
     )
-    slug = "https-api-kimi-com-coding-v1-kimi-for-coding"
+    slug = "c0441fbf2a32c946372df6de03dfae3af939e8f3d0a76b2873b1790564aeaed9"
     data_dir = str(Path.home() / ".cache" / "agedum" / "cline" / slug)
     assert launch.env["CLINE_DATA_DIR"] == data_dir
     # No --provider/--model on the command; the key is the only secret and rides --key.
@@ -5000,7 +5006,11 @@ def test_kimi_yaml_kimi_code_home_slug(tmp_path):
         load_merged_config(child, tmp_path), fleet.LAUNCHER_ENV["kimi/kimi"], label="kimi/kimi"
     )
     assert launch.env["KIMI_CODE_HOME"] == str(
-        Path.home() / ".cache" / "agedum" / "kimi" / "https-api-kimi-com-coding-v1-k3"
+        Path.home()
+        / ".cache"
+        / "agedum"
+        / "kimi"
+        / "7393236320e82d4fbad7dc332e118634e05bd7931b98b6cf889898d2d1d0c9f4"
     )
 
 
@@ -5214,7 +5224,11 @@ def test_cline_yaml_context_window_and_max_tokens_models_array(tmp_path):
         label="cline/kimi-code-auto",
     )
     assert launch.env["CLINE_DATA_DIR"] == str(
-        Path.home() / ".cache" / "agedum" / "cline" / "https-api-kimi-com-coding-v1-kimi-for-coding"
+        Path.home()
+        / ".cache"
+        / "agedum"
+        / "cline"
+        / "c0441fbf2a32c946372df6de03dfae3af939e8f3d0a76b2873b1790564aeaed9"
     )
     target, content, merge_json, writable = launch.config_files[0]
     assert target == f"{launch.env['CLINE_DATA_DIR']}/settings/providers.json"

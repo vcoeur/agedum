@@ -486,13 +486,15 @@ class OpenAIToAnthropicStream:
         self.started = False
         self.finished = False
         self.next_index = 0
-        # Anthropic requires content blocks to be opened and closed strictly in sequence —
-        # one open at a time. Track the single currently-open block; a new block closes it.
+        # Serialize blocks; tool fragments wait until finish so interleaved calls cannot
+        # send a late delta to a block already closed for another call.
         self.current_index: int | None = None
         self.current_kind: str | None = None  # "text" | "tool"
-        # OpenAI tool_calls[].index -> {anthropic_index, started, id, name, buffer}
+        # OpenAI tool_calls[].index -> {id, name, arguments}
         self.tool_blocks: dict[int, dict] = {}
         self.finish_reason: str | None = None
+        self.terminal_seen = False
+        self.failure_code: str | None = None
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_read = 0
@@ -535,10 +537,11 @@ class OpenAIToAnthropicStream:
             return
         self.input_tokens = usage.get("prompt_tokens") or self.input_tokens
         self.output_tokens = usage.get("completion_tokens") or self.output_tokens
-        details = usage.get("prompt_tokens_details") or {}
-        self.cache_read = (
-            details.get("cached_tokens") or usage.get("cached_tokens") or self.cache_read
-        )
+        details = usage.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
+        cached = cached if _chat_index(cached) else usage.get("cached_tokens")
+        if _chat_index(cached):
+            self.cache_read = cached
 
     def _close_current(self) -> list[bytes]:
         """Stop the currently-open content block, if any (enforces one-open-at-a-time)."""
@@ -563,13 +566,12 @@ class OpenAIToAnthropicStream:
         )
 
     def _feed_tool_call(self, tool_call: dict) -> list[bytes]:
-        events: list[bytes] = []
         # `index` keys the tool call across delta fragments; it is always present in the
         # OpenAI streaming schema. Use .get(..., 0) (not `or 0`) so a real index 0 is kept.
         openai_index = tool_call.get("index", 0)
         block = self.tool_blocks.setdefault(
             openai_index,
-            {"anthropic_index": None, "started": False, "id": None, "name": None, "buffer": ""},
+            {"id": None, "name": None, "arguments": []},
         )
         if tool_call.get("id"):
             block["id"] = tool_call["id"]
@@ -577,23 +579,23 @@ class OpenAIToAnthropicStream:
         if function.get("name"):
             block["name"] = function["name"]
         arguments = function.get("arguments") or ""
+        if arguments:
+            block["arguments"].append(arguments)
+        return []
 
-        if not block["started"] and block["id"] and block["name"]:
-            # Close whatever block is open (text, or a prior tool) before opening this one —
-            # the target backends stream each tool call's arguments contiguously, so the
-            # previous block's deltas have all arrived by now.
-            events.extend(self._close_current())
-            block["anthropic_index"] = self.next_index
+    def _emit_tools(self) -> list[bytes]:
+        events: list[bytes] = []
+        for block in self.tool_blocks.values():
+            if not block["id"] or not block["name"]:
+                continue
+            index = self.next_index
             self.next_index += 1
-            block["started"] = True
-            self.current_index = block["anthropic_index"]
-            self.current_kind = "tool"
             events.append(
                 self._event(
                     "content_block_start",
                     {
                         "type": "content_block_start",
-                        "index": block["anthropic_index"],
+                        "index": index,
                         "content_block": {
                             "type": "tool_use",
                             "id": block["id"],
@@ -603,36 +605,55 @@ class OpenAIToAnthropicStream:
                     },
                 )
             )
-            if block["buffer"]:
-                events.append(self._input_json_delta(block["anthropic_index"], block["buffer"]))
-                self._output_chars += len(block["buffer"])
-                block["buffer"] = ""
-
-        if arguments:
-            if block["started"]:
-                events.append(self._input_json_delta(block["anthropic_index"], arguments))
+            for arguments in block["arguments"]:
+                events.append(self._input_json_delta(index, arguments))
                 self._output_chars += len(arguments)
-            else:
-                # Arguments can arrive before id/name; hold them until the block is open.
-                block["buffer"] += arguments
+            events.append(self._content_block_stop(index))
         return events
 
-    def feed(self, chunk: dict) -> list[bytes]:
-        """Translate one OpenAI chunk; returns the Anthropic SSE events it produces."""
+    def feed(self, chunk: object) -> list[bytes]:
+        """Translate a validated Chat chunk or record an explicit SSE terminal/failure signal."""
+        if self.finished or self.failure_code or self.terminal_seen:
+            return []
+        if chunk is _CHAT_DONE:
+            self.terminal_seen = True
+            return []
+        if chunk is _CHAT_BROKEN:
+            self.failure_code = "upstream_disconnect"
+            return []
+        if chunk is _CHAT_INVALID or not _chat_chunk_valid(chunk):
+            self.failure_code = "invalid_upstream_stream"
+            return []
+        if "error" in chunk:
+            self.failure_code = "upstream_error"
+            return []
+        choices = chunk.get("choices", [])
+        next_finish = choices[0].get("finish_reason") if choices else None
+        if (
+            self.finish_reason is not None
+            and next_finish is not None
+            and next_finish != self.finish_reason
+        ):
+            self.failure_code = "invalid_upstream_stream"
+            return []
+        delta = choices[0].get("delta", {}) if choices else {}
+        if delta.get("refusal"):
+            self.failure_code = "upstream_refusal"
+            return []
+        legacy_call = delta.get("function_call")
+        if legacy_call and (legacy_call.get("name") or legacy_call.get("arguments")):
+            self.failure_code = "unsupported_function_call"
+            return []
         events = self._ensure_started(chunk)
-        choices = chunk.get("choices") or []
         if not choices:
             # A trailing usage-only chunk (``stream_options.include_usage``).
             self._absorb_usage(chunk.get("usage"))
             return events
-        choice = choices[0] or {}
-        delta = choice.get("delta") or {}
 
         content = delta.get("content")
         if isinstance(content, str) and content:
             if self.current_kind != "text":
-                # Open a fresh text block (closing any open tool block first), so text that
-                # resumes after a tool call lands in its own block rather than a stopped one.
+                # Tools are emitted after streamed text, once all their fragments are known.
                 events.extend(self._close_current())
                 self.current_index = self.next_index
                 self.next_index += 1
@@ -662,18 +683,57 @@ class OpenAIToAnthropicStream:
         for tool_call in delta.get("tool_calls") or []:
             events.extend(self._feed_tool_call(tool_call))
 
-        if choice.get("finish_reason"):
-            self.finish_reason = choice["finish_reason"]
+        if next_finish is not None:
+            self.finish_reason = next_finish
         self._absorb_usage(chunk.get("usage"))
         return events
 
+    def _tools_valid(self) -> bool:
+        def reject_constant(value):
+            raise ValueError("non-JSON constant")
+
+        for block in self.tool_blocks.values():
+            try:
+                arguments = json.loads("".join(block["arguments"]), parse_constant=reject_constant)
+            except ValueError:
+                return False
+            if not block["id"] or not block["name"] or not isinstance(arguments, dict):
+                return False
+        return True
+
     def finish(self) -> list[bytes]:
-        """Emit the closing events (block stops, ``message_delta``, ``message_stop``)."""
+        """Complete only intact turns; otherwise emit an error without exposing buffered tools."""
         if self.finished:
             return []
         self.finished = True
         events = self._ensure_started()
         events.extend(self._close_current())
+        if not self.failure_code:
+            if not self.terminal_seen or self.finish_reason is None:
+                self.failure_code = "upstream_eof"
+            elif self.finish_reason not in ("stop", "tool_calls", "length"):
+                self.failure_code = "unsupported_finish_reason"
+            elif self.tool_blocks and self.finish_reason == "length":
+                self.failure_code = "max_output_tokens"
+            elif (
+                self.finish_reason == "tool_calls" and not self.tool_blocks
+            ) or not self._tools_valid():
+                self.failure_code = "invalid_tool_arguments"
+        if self.failure_code:
+            events.append(
+                self._event(
+                    "error",
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": f"agedum translate-proxy: {self.failure_code}",
+                        },
+                    },
+                )
+            )
+            return events
+        events.extend(self._emit_tools())
         output_tokens = self.output_tokens or max(1, self._output_chars // 4)
         usage: dict = {"output_tokens": output_tokens}
         if self.input_tokens:
@@ -686,7 +746,9 @@ class OpenAIToAnthropicStream:
                 {
                     "type": "message_delta",
                     "delta": {
-                        "stop_reason": _stop_reason(self.finish_reason),
+                        "stop_reason": "tool_use"
+                        if self.tool_blocks
+                        else _stop_reason(self.finish_reason),
                         "stop_sequence": None,
                     },
                     "usage": usage,
@@ -913,10 +975,28 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         while True:
-            chunk = response.read(8192)
+            chunk = response.read1(8192)
             if not chunk:
                 break
             self.wfile.write(chunk)
+            self.wfile.flush()
+
+    def _relay_responses(self, response: http.client.HTTPResponse, *, model: str) -> None:
+        """Translate identity-encoded Chat SSE without buffering flushed upstream frames."""
+        encodings = [
+            value.strip().lower()
+            for name, value in response.getheaders()
+            if name.lower() == "content-encoding"
+        ]
+        if any(value not in ("", "identity") for value in encodings):
+            self._send_error(502, "agedum proxy: unsupported upstream Content-Encoding")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        for frame in translate_chat_stream(response.read1, model=model):
+            self.wfile.write(frame)
             self.wfile.flush()
 
     def _send_json(self, status: int, obj: dict) -> None:
@@ -1091,33 +1171,31 @@ class _TranslateHandler(_BaseProxyHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         stream = OpenAIToAnthropicStream(self.model or "")
-        while True:
-            line = response.readline()
-            if not line:
-                break
-            events = _feed_sse_line(stream, line)
+        for chunk in _iter_chat_sse(response.read1):
+            events = stream.feed(chunk)
             for event in events:
                 self.wfile.write(event)
             if events:
                 self.wfile.flush()
+            if stream.failure_code or stream.terminal_seen:
+                break
         for event in stream.finish():
             self.wfile.write(event)
         self.wfile.flush()
 
 
 def _feed_sse_line(stream: OpenAIToAnthropicStream, line: bytes) -> list[bytes]:
-    """Parse one OpenAI SSE ``data:`` line and feed it to ``stream`` (blank/``[DONE]`` skipped)."""
-    text = line.decode("utf-8", "replace").strip()
-    if not text.startswith("data:"):
+    """Feed one data line, including explicit terminal markers and malformed-frame failures."""
+    line = line.strip()
+    if not line.startswith(b"data:"):
         return []
-    payload = text[len("data:") :].strip()
-    if not payload or payload == "[DONE]":
-        return []
+    payload = line[len(b"data:") :].strip()
+    if payload == b"[DONE]":
+        return stream.feed(_CHAT_DONE)
     try:
         chunk = json.loads(payload)
     except ValueError:
-        # A malformed line: skip it rather than crash the relay.
-        return []
+        return stream.feed(_CHAT_INVALID)
     return stream.feed(chunk)
 
 
@@ -1380,7 +1458,8 @@ _CHAT_BROKEN = object()
 def _iter_chat_sse(read) -> object:
     """Yield each upstream Chat Completions SSE ``data:`` payload as a parsed dict.
 
-    ``read`` is a ``response.read``-style callable. Lines are reassembled across chunk
+    ``read`` is an available-data reader (``HTTPResponse.read1`` for live traffic).
+    Lines are reassembled across chunk
     boundaries; terminal markers and malformed/failed reads are explicit signals.
     """
     buffer = b""
@@ -1521,7 +1600,7 @@ def _chat_chunk_valid(value: object) -> bool:
 
 def translate_chat_stream(read, *, model: str) -> object:
     """Yield Responses-API SSE frames (bytes) translated from an upstream Chat Completions
-    SSE stream read via ``read`` (a ``response.read``-style callable).
+    SSE stream read via ``read`` (an available-data reader for live traffic).
 
     A Chat ``delta.reasoning_content`` (Moonshot/Kimi thinking models stream the chain-of-thought
     on this field) becomes a Responses ``reasoning`` output item at index 0, streamed as
@@ -1950,8 +2029,11 @@ class _ResponsesToChatHandler(_BaseProxyHandler):
         req = _parse_json_dict(raw) or {}
         self._model = str(req.get("model") or "")
         body = json.dumps(responses_to_chat_request(req), separators=(",", ":")).encode()
-        headers = dict(headers)
+        headers = {
+            name: value for name, value in headers.items() if name.lower() != "accept-encoding"
+        }
         headers["Accept"] = "text/event-stream"
+        headers["Accept-Encoding"] = "identity"
         return body, "/chat/completions", headers
 
     def relay_response(self, response: http.client.HTTPResponse) -> None:
@@ -1959,13 +2041,7 @@ class _ResponsesToChatHandler(_BaseProxyHandler):
             # Surface the upstream error body verbatim so codex shows the real cause.
             self._relay_passthrough(response)
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        for frame in translate_chat_stream(response.read, model=self._model):
-            self.wfile.write(frame)
-            self.wfile.flush()
+        self._relay_responses(response, model=self._model)
 
 
 class ResponsesToChatProxy(_LocalProxy):
@@ -2140,11 +2216,12 @@ class _FailoverHandler(_BaseProxyHandler):
     # --- routing -----------------------------------------------------------
 
     def _split_route(self) -> tuple[str, str]:
-        """``/oc/<provider-id>/<rest>`` → ``(provider_id, rest)``; query dropped."""
-        parts = self.path.split("?", 1)[0].lstrip("/").split("/", 2)
+        """Route on the path alone; retain the original query in the forwarded rest."""
+        path, separator, query = self.path.partition("?")
+        parts = path.lstrip("/").split("/", 2)
         if len(parts) < 3 or parts[0] != _FAILOVER_PREFIX.lstrip("/"):
             return "", ""
-        return parts[1], parts[2]
+        return parts[1], parts[2] + separator + query
 
     def _failover(self, *, walk: bool) -> None:
         self.close_connection = True
@@ -2366,7 +2443,7 @@ class _FailoverHandler(_BaseProxyHandler):
         if translate:
             self._translated_model = str(body["model"])
             headers["Accept"] = "text/event-stream"
-            path = "/chat/completions"
+            path = "chat/completions"
         else:
             path = rest
         for name in [name for name in headers if name.lower() == "chatgpt-account-id"]:
@@ -2385,7 +2462,8 @@ class _FailoverHandler(_BaseProxyHandler):
         return {
             key: value
             for key, value in self._client_headers().items()
-            if key.lower() not in _HOP_BY_HOP and key.lower() not in ("host", "content-length")
+            if key.lower() not in _HOP_BY_HOP
+            and key.lower() not in ("host", "content-length", "accept-encoding")
         }
 
     def _open(
@@ -2394,7 +2472,8 @@ class _FailoverHandler(_BaseProxyHandler):
         sent = {
             key: value
             for key, value in headers.items()
-            if key.lower() not in _HOP_BY_HOP and key.lower() not in ("host", "content-length")
+            if key.lower() not in _HOP_BY_HOP
+            and key.lower() not in ("host", "content-length", "accept-encoding")
         }
         sent["Content-Length"] = str(len(body))
         # Identity encoding on every hop: the wall text rule reads 4xx bodies, and a
@@ -2581,7 +2660,7 @@ class _FailoverHandler(_BaseProxyHandler):
         self.end_headers()
         self.wfile.write(head)
         while True:
-            chunk = response.read(8192)
+            chunk = response.read1(8192)
             if not chunk:
                 break
             self.wfile.write(chunk)
@@ -2595,13 +2674,7 @@ class _FailoverHandler(_BaseProxyHandler):
         the same surface codex's ``ResponsesToChatProxy`` relays through, so the
         Responses-shaped client sees the event sequence it expects.
         """
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        for frame in translate_chat_stream(response.read, model=self._translated_model):
-            self.wfile.write(frame)
-            self.wfile.flush()
+        self._relay_responses(response, model=self._translated_model)
 
     # --- rung pin (D6) ------------------------------------------------------
 

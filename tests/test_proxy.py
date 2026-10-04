@@ -14,6 +14,7 @@ from agedum.proxy import (
     OpenAIToAnthropicStream,
     ResponsesToChatProxy,
     TranslateProxy,
+    _feed_sse_line,
     _FoldHandler,
     _QuietThreadingHTTPServer,
     anthropic_to_openai_request,
@@ -768,6 +769,7 @@ def _drive(chunks):
     raw: list[bytes] = []
     for chunk in chunks:
         raw += stream.feed(chunk)
+    raw += _feed_sse_line(stream, b"data: [DONE]\n")
     raw += stream.finish()
     return _parse_events(raw)
 
@@ -904,7 +906,7 @@ def test_stream_single_tool_call_streams_fragments():
         "name": "get_weather",
         "input": {},
     }
-    # arguments arrive as streamed fragments, not one buffered dump
+    # Buffered arguments retain their fragment boundaries when the tool block is emitted.
     assert events[2][1]["delta"] == {"type": "input_json_delta", "partial_json": '{"city":'}
     assert events[3][1]["delta"] == {"type": "input_json_delta", "partial_json": '"Paris"}'}
     assert events[5][1]["delta"]["stop_reason"] == "tool_use"
@@ -1025,9 +1027,8 @@ def test_stream_parallel_tool_calls_distinct_indices():
     ]
 
 
-def test_stream_text_resumes_in_new_block_after_tool():
-    # text -> tool -> text: the resumed text must open a fresh block, never a delta against
-    # the already-stopped first text block.
+def test_stream_text_continues_while_tools_are_buffered():
+    # Upstream text -> tool -> text becomes streamed text followed by buffered tools.
     events = _drive(
         [
             {"id": "c", "model": "kimi", "choices": [{"index": 0, "delta": {"content": "before"}}]},
@@ -1061,18 +1062,15 @@ def test_stream_text_resumes_in_new_block_after_tool():
     lifecycle = [
         (t, d["index"]) for t, d in events if t in ("content_block_start", "content_block_stop")
     ]
-    # three blocks: text(0), tool(1), text(2) — each closed before the next opens
+    # Text remains open while tool fragments accumulate; tool blocks are serialized last.
     assert lifecycle == [
         ("content_block_start", 0),
         ("content_block_stop", 0),
         ("content_block_start", 1),
         ("content_block_stop", 1),
-        ("content_block_start", 2),
-        ("content_block_stop", 2),
     ]
-    # the resumed text delta targets the new block (index 2), not the stopped one (index 0)
-    after = [d for t, d in events if t == "content_block_delta" and d["index"] == 2]
-    assert after[0]["delta"] == {"type": "text_delta", "text": "after"}
+    text = [d for t, d in events if t == "content_block_delta" and d["index"] == 0]
+    assert [data["delta"]["text"] for data in text] == ["before", "after"]
 
 
 def test_stream_fabricates_output_tokens_when_usage_missing():

@@ -92,13 +92,15 @@ match); top-level skills keep their declared name.
   OpenAI default). So agedum **generates a single-provider `providers.json`** (Cline's generic
   `openai-compatible` provider, `baseUrl` + `model`, `lastUsedProvider`; the key is *not*
   written — it rides `--key`) and injects it via `Launch.config_files` under an isolated
-  **`CLINE_DATA_DIR`** (`~/.cache/agedum/cline/<endpoint-slug>`, one per endpoint+model so
+  **`CLINE_DATA_DIR`** (`~/.cache/agedum/cline/<endpoint-model-sha256>`, one per endpoint+model so
   there's no Cline account to fall back to), then launches with **no** `--provider`/`--model`
   so Cline selects the stored provider (base URL intact) via `lastUsedProvider`. That
   `providers.json` is **seeded writable** straight into `CLINE_DATA_DIR` (the 4th
   `config_files` field; **not** read-only bound), because Cline rewrites it to persist its
-  provider selection and a ro-bind makes that write fail with `EROFS` — agedum re-seeds the
-  correct endpoint config on every launch. `baseUrl` and a named `provider` are mutually
+  provider selection and a ro-bind makes that write fail with `EROFS` — agedum atomically
+  re-seeds the correct endpoint config on every launch, creating mode 0600 before any secret
+  bytes and refusing unsafe symlinked parents, hardlinks or non-private seed directories.
+  `baseUrl` and a named `provider` are mutually
   exclusive. On the `baseUrl` path **`contextWindow`** /
   **`maxTokens`** become a one-entry `models` array in that `providers.json` — the generic
   `openai-compatible` provider has no model catalogue, so this is how Cline learns the window
@@ -131,9 +133,9 @@ match); top-level skills keep their declared name.
 - **aider** — the odd one out. aider has **no native instruction discovery** (it reads neither
   `AGENTS.md` nor `CONVENTIONS.md` itself) and **no skills mechanism**, so `compile_aider`
   injects each scope's `AGENTS.md` via aider's `--read` read-only-context flag (project then
-  global; the instructions analogue of kimi's `--agent-file`, so `Plan.binds` stays empty and
-  the compiled files are read at their real `dest` path through `--dev-bind / /`), and injects
-  **no skills** (no `SKILL.aider.md`). There is an `AGENTS.aider.md` instruction overlay
+  global), read-only bound to content-addressed `~/.cache/agedum/aider-instructions/` paths
+  so context remains visible when sandbox `/tmp` is masked. It injects **no skills** (no
+  `SKILL.aider.md`). There is an `AGENTS.aider.md` instruction overlay
   (user scope). **Provider mode** (`_aider_env`) maps the config to aider CLI flags — `model`
   → `--model`, `weakModel`/`editorModel` → `--weak-model`/`--editor-model`, `reasoningEffort`
   → `--reasoning-effort`, `yesAlways` → `--yes-always` — and a `baseUrl` sets `OPENAI_API_BASE`
@@ -430,6 +432,22 @@ override).
 
 ## Proxy admission and diagnostic safety
 
+- Provider launches clear inherited agedum-owned proxy control switches before installing
+  their current protocol settings; do not scrub unrelated user/auth environment variables.
+- A v2 default-model effort becomes model-level `options.reasoningEffort` for DeepSeek,
+  GLM and GPT; explicit agent options/variants still override it. Variant preservation uses
+  effective modeled/native agent selections: modeled rows first, native deep-merge last,
+  exactly as the runtime builder does. Kimi keeps alias routing.
+- Codex custom-agent TOML is structurally parsed; only an absent root `sandbox_mode` receives
+  a prepended default. Generated TOML strings escape C0 controls and DEL.
+- Kimi/Cline state uses a SHA-256 identity of the exact endpoint/model pair, preserving case
+  and punctuation. The same pair intentionally shares state even with different credentials,
+  MCP settings or effort. Old slug directories are not migrated automatically.
+- Failover validates every non-null declaration, including empty/falsy malformed values and
+  wrong-harness declarations. Built-in OpenAI routing seeds include the effective default and
+  modeled/native agent selections. Wait caps must be finite positive numbers; no total elapsed
+  deadline or new numeric ceiling is imposed. Dotenv quoting/comments are parsed without shell
+  evaluation; malformed quoted suffixes fail without exposing the value.
 - Every local proxy requires its own random 256-bit launch capability in
   `X-Agedum-Proxy-Capability`, checked in constant time before reading a body, answering a
   local probe, or contacting any upstream. Loopback is not authorization; browser `Origin`
@@ -452,6 +470,22 @@ override).
   legacy function-call output fails explicitly rather than becoming an empty successful turn.
   A non-null finish reason cannot later change; repeated/null finish metadata remains valid.
   A prior successful finish never makes a later malformed frame acceptable.
+- Passthrough and Responses SSE use `HTTPResponse.read1` so a flushed upstream payload
+  reaches the client before EOF, including Content-Length and chunked framing. Responses
+  translation negotiates exactly one case-insensitive `Accept-Encoding: identity`; a
+  non-identity upstream `Content-Encoding` is an explicit 502, never parsed as SSE.
+- Anthropic translation buffers tool fragments per upstream index, then emits each complete
+  block lifecycle sequentially after streamed text. Parallel `0,1,0` deltas must retain every
+  argument fragment without targeting a stopped block. Tool display waits until stream end.
+  Before exposing any buffered tool, require `stop`/`tool_calls`, `[DONE]`, non-empty id/name
+  and complete JSON-object arguments for every call. SSE errors, malformed frames, transport
+  failure, missing terminals and length/filter termination with tools emit an Anthropic
+  `error` event, never tool blocks or normal `message_delta`/`message_stop`. Keep already
+  streamed text; a text-only `length` plus `[DONE]` may finish with `max_tokens`. Reuse the
+  typed Chat boundary and available-data SSE parser without weakening Responses validation.
+- Failover selects a provider on the URL path alone and preserves the original query on
+  primary and untranslated fallback hops. Responses-to-Chat translation deliberately replaces
+  the route with `/chat/completions` without the source protocol's query.
 - Diagnostic JSON/TOML/structured argv are parsed, redacted as typed values, then serialized.
   Preserve numeric/boolean types, env references and unrelated Unicode prompt text; required
   switch values such as `1` must not be replaced inside serialized JSON or arbitrary words.

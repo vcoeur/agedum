@@ -76,7 +76,10 @@ set rebuilds the provider from flags (dropping any stored base URL and posting t
 default). So for a custom OpenAI-compatible endpoint (a Kimi coding subscription, OpenCode-Go,
 …) agedum **generates a single-provider `providers.json`** — the generic `openai-compatible`
 provider with `lastUsedProvider` set so Cline selects it with no flag — under an isolated
-`CLINE_DATA_DIR` (`~/.cache/agedum/cline/<endpoint-slug>`), and passes the key via `--key`.
+`CLINE_DATA_DIR` (`~/.cache/agedum/cline/<endpoint-model-sha256>`), and passes the key via `--key`.
+The identity hashes only the exact endpoint/model pair, retaining case and punctuation.
+The same pair intentionally shares persistent state even when credentials or other settings
+differ; distinct pairs do not. Old slug-based directories are not migrated automatically.
 Set `model` (the upstream id served there) and `secretEnv`; optional `contextWindow` /
 `maxTokens` become a one-entry `models` array so Cline learns the window (its `X/N` meter +
 compaction trigger) and output cap. The API key is **never** written to disk. That

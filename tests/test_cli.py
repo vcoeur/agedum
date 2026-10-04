@@ -1547,10 +1547,9 @@ def test_dry_run_output_unchanged_by_include_composition(monkeypatch, tmp_path, 
     assert composed_out == plain_out
 
 
-def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
-    """A `writable` config file is seeded into its real (writable) target — no read-only bind —
-    so a tool that rewrites it (cline's providers.json) doesn't hit EROFS. A stale read-only
-    mount-point artifact from a prior ro-bind is cleared first."""
+def test_inject_config_files_writable_seed_is_private_and_atomic(tmp_path, monkeypatch):
+    """Writable harness state is atomically replaced by an owner-only seed."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     plan = cli.Plan()
     project_root = tmp_path / "proj"
     project_root.mkdir()
@@ -1558,13 +1557,35 @@ def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
     dest.mkdir()
     target = tmp_path / "cache" / "cline" / "slug" / "settings" / "providers.json"
     # Simulate the 0-byte read-only file a previous ro-bind mount point left behind.
-    target.parent.mkdir(parents=True)
+    directories = [
+        tmp_path / "cache",
+        tmp_path / "cache" / "cline",
+        tmp_path / "cache" / "cline" / "slug",
+        target.parent,
+    ]
+    for directory in directories:
+        directory.mkdir(exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
     target.write_text("")
     target.chmod(0o444)
 
-    cli._inject_config_files(
-        plan, project_root, dest, ((str(target), '{"version": 1}\n', False, True),)
-    )
+    observed_creation = {}
+    original_fdopen = os.fdopen
+
+    def inspect_opened_seed(file_descriptor, *args, **kwargs):
+        info = os.fstat(file_descriptor)
+        observed_creation["mode"] = stat.S_IMODE(info.st_mode)
+        observed_creation["size"] = info.st_size
+        return original_fdopen(file_descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", inspect_opened_seed)
+    previous_umask = os.umask(0o022)
+    try:
+        cli._inject_config_files(
+            plan, project_root, dest, ((str(target), '{"version": 1}\n', False, True),)
+        )
+    finally:
+        os.umask(previous_umask)
 
     # Written to the real target, writable, with the seed content — and not bound.
     assert target.read_text() == '{"version": 1}\n'
@@ -1574,6 +1595,65 @@ def test_inject_config_files_writable_seed_writes_real_target_no_bind(tmp_path):
     # A seed outlives the launch and may carry a baked API key (kimi's config.toml), so it is
     # owner-only rather than whatever the umask would have granted.
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert observed_creation == {"mode": 0o600, "size": 0}
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_writable_seed_refuses_symlink_parent_and_hardlink_target(tmp_path):
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    link_parent = tmp_path / "linked"
+    link_parent.symlink_to(private, target_is_directory=True)
+    with pytest.raises(cli.LauncherError):
+        cli._inject_config_files(
+            cli.Plan(), project_root, dest, ((str(link_parent / "seed"), "secret", False, True),)
+        )
+
+    target = private / "seed"
+    target.write_text("old\n")
+    os.link(target, private / "other")
+    with pytest.raises(cli.LauncherError):
+        cli._inject_config_files(
+            cli.Plan(), project_root, dest, ((str(target), "secret", False, True),)
+        )
+
+
+def test_writable_seed_parallel_first_creation_is_atomic(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    target = tmp_path / "home" / ".cache" / "agedum" / "private" / "seed"
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    contents = ["secret-a-" + "a" * 10000, "secret-b-" + "b" * 10000]
+    mkdir_barrier = Barrier(2)
+    original_mkdir = os.mkdir
+
+    def synchronize_first_parent_creation(path, *args, **kwargs):
+        if path == "home":
+            mkdir_barrier.wait(timeout=5)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", synchronize_first_parent_creation)
+
+    def seed(content):
+        cli._inject_config_files(
+            cli.Plan(), project_root, dest, ((str(target), content, False, True),)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(seed, contents))
+
+    assert target.read_text() in contents
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert all(path.name == "seed" for path in target.parent.iterdir())
 
 
 def test_inject_config_files_readonly_entry_still_binds(tmp_path):
@@ -1593,6 +1673,48 @@ def test_inject_config_files_readonly_entry_still_binds(tmp_path):
     staged, bound_target = plan.binds[0]
     assert bound_target == target
     assert staged.read_text() == "content"
+
+
+@pytest.mark.parametrize("mode", ["kimi", "cline", "pi", "codex", "reasonix"])
+def test_dry_run_plan_matches_runtime_injections_and_grants(tmp_path, monkeypatch, capsys, mode):
+    from agedum.launcher import _effective_binds, writable_roots
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
+    monkeypatch.chdir(tmp_path)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "AGENTS.md").write_text("Project instructions\n")
+    project = cli.Source(project_root, project_root / "AGENTS.md", None)
+    global_ = cli.Source(tmp_path / "global", None, None)
+    monkeypatch.setattr(cli, "load_source", lambda: project)
+    monkeypatch.setattr(cli, "load_global_source", lambda: global_)
+    state_parent = tmp_path / "home" / ".cache" / "agedum" / "test" / "settings"
+    seed_target = state_parent / "providers.json"
+    config_files = (
+        (str(project_root / "generated.toml"), "model = 'test'\n", False),
+        (str(tmp_path / "home" / ".config" / "test" / "merged.json"), '{"agedum": true}', True),
+        (str(seed_target), '{"provider": "test"}\n', False, True),
+    )
+    sandbox = cli.Sandbox(enabled=True, read_write=(str(tmp_path / "declared"),))
+
+    cli._print_plan_sections(mode, sandbox, config_files=config_files)
+    capsys.readouterr()
+    preview_dest = tmp_path / "preview"
+    preview_dest.mkdir()
+    preview_plan = cli._build_plan(mode, project, global_, preview_dest, config_files, preview=True)
+    preview_roots = writable_roots(preview_plan, sandbox)
+
+    assert not seed_target.exists()
+    runtime_dest = tmp_path / "runtime"
+    runtime_dest.mkdir()
+    runtime_plan = cli._build_plan(mode, project, global_, runtime_dest, config_files)
+    assert writable_roots(runtime_plan, sandbox) == preview_roots
+    assert [(str(target), src.read_text()) for src, target in _effective_binds(runtime_plan)] == [
+        (str(target), src.read_text()) for src, target in _effective_binds(preview_plan)
+    ]
+    assert seed_target.is_file()
 
 
 # --- YAML fleet parity: kimi / pi / cline through the CLI (child 4) ---
