@@ -1103,8 +1103,12 @@ def test_provider_reasonix_custom_endpoint_dry_run_shows_toml(monkeypatch, tmp_p
     out = capsys.readouterr().out
     assert "generated config files" in out
     assert "reasonix.toml" in out
-    assert 'base_url = "https://my.host/v1"' in out
-    assert 'api_key_env = "MY_KEY"' in out
+    config_lines = [line[4:] for line in out.splitlines() if line.startswith("    ")]
+    import tomllib
+
+    diagnostic = tomllib.loads("\n".join(config_lines))
+    assert diagnostic["providers"][0]["base_url"] == "https://my.host/v1"
+    assert diagnostic["providers"][0]["api_key_env"] == "MY_KEY"
     assert "--model agedum" in out
     assert "sk-secret-zzz" not in out  # the key value is never written or printed
 

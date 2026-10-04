@@ -105,7 +105,7 @@ command can write only to
   (e.g. `~/.claude` for Claude Code, `~/.cline` for Cline, `~/.codex` for Codex); agedum knows
   each harness's dir and grants it write access (creating it if missing), whether or not the
   harness injects anything under it;
-- the nearest existing ancestor of every file agedum injects (so bwrap can create the mount point);
+- the exact parent of every injection target, prepared before mounting (never an arbitrary existing ancestor);
 - a private **`/tmp`** (a fresh tmpfs, discarded on exit);
 - any directory you add with **`--rw-dir DIR`** (repeatable; passing it implies `--sandbox`).
   A `DIR` holding a shell glob (`*`, `?`, `[…]`) is expanded to each existing match, so

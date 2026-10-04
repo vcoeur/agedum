@@ -495,6 +495,7 @@ class FailoverPlan(NamedTuple):
 
     base_url: str
     routes: tuple[str, ...]
+    capability_env: str | None = None
 
 
 def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
@@ -773,6 +774,16 @@ def _apply_failover_routes(document: dict, failover: FailoverPlan) -> dict:
         entry = dict(providers.get(provider_id) or {})
         options = dict(entry.get("options") or {})
         options["baseURL"] = f"{failover.base_url}{failover_route_base(provider_id)}"
+        if failover.capability_env:
+            from agedum.proxy import CAPABILITY_HEADER
+
+            headers = {
+                name: value
+                for name, value in (options.get("headers") or {}).items()
+                if name.lower() != CAPABILITY_HEADER.lower()
+            }
+            headers[CAPABILITY_HEADER] = "{env:" + failover.capability_env + "}"
+            options["headers"] = headers
         entry["options"] = options
         providers[provider_id] = entry
     merged = dict(document)
@@ -2476,8 +2487,7 @@ def build_launch(
 
     secrets = set(required)
     secrets.update(var for var in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY") if var in env)
-    # An opencode providerDef bakes the API key value into OPENCODE_CONFIG_CONTENT, so
-    # mask the whole document in --dry-run.
+    # The diagnostic view parses this document and masks secret values before re-encoding.
     if _provider_defs(block.get("providerDef")) and "OPENCODE_CONFIG_CONTENT" in env:
         secrets.add("OPENCODE_CONFIG_CONTENT")
     # pi's requireExtensions gate: warn (or fail-loud, when strict) about pi extensions the

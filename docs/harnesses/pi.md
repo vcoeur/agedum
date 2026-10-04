@@ -34,6 +34,16 @@ is a bind.
 - **Skills** — pi auto-discovers `SKILL.md` folders from `./.pi/skills/` (project) and
   `~/.pi/agent/skills/` (global). Each skill carries `name`/`description` frontmatter — the
   neutral source shape — compiled with the `SKILL.pi.md` overlay and bound to those two dirs.
+  Agedum preserves the raw `.agents/skills/` tree in the filesystem and shared Git index.
+  It merges exact `-<absolute source SKILL.md path>` entries into an untracked project
+  `.pi/settings.json`, using Pi's native force-exclusion settings. Only compiled source
+  skills are excluded from discovery; unrelated settings, manual skills, and package
+  skills remain available. A tracked settings target or invalid existing settings refuses
+  launch rather than hiding tracked sources or overwriting tracked configuration. Use an
+  untracked settings layer only after an owner decision. No blanket `--no-skills` is applied.
+  When launching below the source root, project compiled skills and settings land in the
+  launch directory's `.pi/` because Pi reads its project settings there, while the exact
+  exclusions still identify the ancestor source skills.
 - `extra_args`: **none** — pi discovers everything from disk, like Claude, opencode, Cline,
   and reasonix.
 

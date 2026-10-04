@@ -111,6 +111,11 @@ def test_multiple_system_messages_preserve_order():
 # ---------------------------------------------------------------------------
 
 
+def _proxy_request(proxy, url, **kwargs):
+    headers = {**kwargs.pop("headers", {}), "X-Agedum-Proxy-Capability": proxy.capability}
+    return urllib.request.Request(url, headers=headers, **kwargs)
+
+
 class _FakeUpstream:
     """Records the last request body and replies with a fixed payload."""
 
@@ -173,7 +178,8 @@ def test_proxy_folds_before_forwarding():
         ],
     }
     with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps(request_body).encode(),
             headers={"Content-Type": "application/json"},
@@ -191,7 +197,8 @@ def test_proxy_folds_before_forwarding():
 
 def test_proxy_passes_non_message_bodies_through():
     with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={"Content-Type": "application/json"},
@@ -221,7 +228,10 @@ def test_proxy_reads_chunked_request_body():
                 "POST",
                 "/v1/messages",
                 body=iter([payload[:7], payload[7:]]),  # no len() -> chunked encoding
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Agedum-Proxy-Capability": proxy.capability,
+                },
                 encode_chunked=True,
             )
             response = connection.getresponse()
@@ -238,7 +248,8 @@ def test_proxy_forwards_put_requests():
     # The Anthropic-compat surface is POST/GET/DELETE today, but the proxy is a generic
     # forwarder — other verbs must pass through rather than 501 at the proxy itself.
     with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/thing",
             data=json.dumps({"messages": []}).encode(),
             headers={"Content-Type": "application/json"},
@@ -289,7 +300,8 @@ class _DisconnectingUpstream:
 def test_proxy_returns_502_when_upstream_disconnects():
     # A dropped upstream socket must surface as a clean 502, not a crashed handler thread.
     with _DisconnectingUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={"Content-Type": "application/json"},
@@ -354,7 +366,8 @@ def test_proxy_survives_client_reset_before_request():
         resetting.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         resetting.close()
 
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={"Content-Type": "application/json"},
@@ -368,7 +381,8 @@ def test_proxy_relays_close_delimited_not_chunked():
     # Tier 2: the response is delimited by connection close — no chunked re-framing, no
     # Content-Length — so the client keeps no idle socket to reset afterwards.
     with _FakeUpstream() as upstream, FoldProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={"Content-Type": "application/json"},
@@ -447,7 +461,8 @@ def test_proxy_survives_upstream_drop_mid_stream():
         proxy._server.handle_error = lambda request, client_address: handler_errors.append(
             client_address
         )
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={"Content-Type": "application/json"},
@@ -1154,7 +1169,8 @@ def _make_openai_handler(state):
 
 
 def _anthropic_request(proxy, body, path="/v1/messages"):
-    return urllib.request.Request(
+    return _proxy_request(
+        proxy,
         proxy.base_url + path,
         data=json.dumps(body).encode(),
         headers={
@@ -1359,7 +1375,8 @@ def test_translate_proxy_config_key_overrides_stale_client_auth():
         _FakeOpenAI(state) as upstream,
         TranslateProxy(upstream.base_url, api_key="sk-config") as proxy,
     ):
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={
@@ -1378,7 +1395,8 @@ def test_translate_proxy_falls_back_to_client_key_without_config_key():
     # With no configured key, relay the client's x-api-key (and never the stale Authorization).
     state = _ok_json_state()
     with _FakeOpenAI(state) as upstream, TranslateProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/v1/messages",
             data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
             headers={
@@ -1729,7 +1747,8 @@ def test_responses_proxy_translates_text_end_to_end():
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
     ]
     with _FakeChatUpstream(chunks) as upstream, ResponsesToChatProxy(upstream.base_url) as proxy:
-        request = urllib.request.Request(
+        request = _proxy_request(
+            proxy,
             proxy.base_url + "/responses",
             data=json.dumps(
                 {"model": "deepseek-v4-pro", "instructions": "sys", "input": "ping", "stream": True}
@@ -1758,8 +1777,8 @@ def test_responses_proxy_get_models_returns_empty_without_upstream():
     # codex's GET /models metadata probe is answered locally with a valid empty list — never
     # forwarded — so an unreachable upstream is irrelevant and codex gets a clean response.
     with ResponsesToChatProxy("http://127.0.0.1:1/v1") as proxy:
-        request = urllib.request.Request(
-            proxy.base_url + "/models?client_version=0.141.0", method="GET"
+        request = _proxy_request(
+            proxy, proxy.base_url + "/models?client_version=0.141.0", method="GET"
         )
         with urllib.request.urlopen(request) as response:
             assert response.status == 200

@@ -745,7 +745,13 @@ injected, `read in place` when the harness reads it natively, or an explicit not
 scope contributes nothing. Project-scope
 paths display relative to the cwd; global-scope stays `~`-absolute. The resolved config (env
 vars; opencode's `OPENCODE_CONFIG_CONTENT` pretty-printed; secrets masked) and the final
-command are shown too. For a kimi provider run from a project root:
+command are shown too. Diagnostic JSON, generated TOML and structured argv values are parsed,
+redacted before serialization, and rendered without changing the real launch data. TOML
+diagnostics may use equivalent inline tables rather than the original file layout. Numeric
+and boolean fields stay typed, env references remain visible, and required switches such as
+`1` do not rewrite digits inside unrelated prompts or JSON. Unparseable generated content is
+withheld instead of printed raw. Local-proxy capabilities are runtime-only and never printed.
+For a kimi provider run from a project root:
 
 ```text
 provider   Kimi

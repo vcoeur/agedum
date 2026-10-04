@@ -72,10 +72,7 @@ def _resolve_rw(raw: str, project_root: Path) -> list[Path]:
 
 
 def _nearest_existing_dir(path: Path) -> Path:
-    """The deepest existing ancestor of ``path`` (or ``path`` itself if it exists).
-
-    bwrap cannot create a mount point on a read-only parent, so an injected file's nearest
-    existing ancestor is what must be made writable for the bind to land."""
+    """Find an existing directory from which Git can inspect a not-yet-created target."""
     current = path
     while not current.exists() and current != current.parent:
         current = current.parent
@@ -89,8 +86,8 @@ def writable_roots(plan: Plan, sandbox: Sandbox) -> list[Path]:
     already makes them writable):
 
     * the **launch directory** — the harness's working tree, where the agent works;
-    * the **nearest existing ancestor of every injected file** — so bwrap can create the
-      mount point (it cannot on a read-only parent);
+    * the **exact parent of every injected target** — prepared before mounting, so no
+      arbitrary existing ancestor becomes writable on a fresh installation;
     * the **harness's own state/config dir(s)** (``plan.writable_dirs``) — so it can persist
       sessions/settings/auth (e.g. ``~/.cline`` for Cline, ``~/.claude`` for Claude Code)
       whether or not an injection happens to land under it (:func:`run_virtualfs` creates any
@@ -111,7 +108,9 @@ def writable_roots(plan: Plan, sandbox: Sandbox) -> list[Path]:
     cwd = Path.cwd().resolve()
     roots: list[Path] = [cwd]
     for _, target in _effective_binds(plan):
-        roots.append(_nearest_existing_dir(target.parent))
+        if target.parent.resolve() != target.parent.absolute():
+            raise LauncherError(f"refusing symlinked injection parent '{target.parent}'")
+        roots.append(target.parent)
     roots += plan.writable_dirs
     for raw in sandbox.read_write:
         roots += _resolve_rw(raw, cwd)
@@ -166,36 +165,57 @@ def build_bwrap_argv(
 
 
 def _git_tracked(project_root: Path, target: str) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(project_root), "ls-files", "--error-unmatch", target],
+    """Inspect the target's actual worktree, independent of instruction-source roots."""
+    absolute = (project_root / target).absolute()
+    directory = _nearest_existing_dir(absolute.parent).resolve()
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment["LC_ALL"] = "C"
+    ownership = subprocess.run(
+        ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
         capture_output=True,
+        env=environment,
     )
-    return result.returncode == 0
+    if ownership.returncode != 0:
+        if ownership.stderr.startswith(
+            (
+                b"fatal: not a git repository (or any of the parent directories):",
+                b"fatal: not a git repository (or any parent up to mount point ",
+            )
+        ):
+            return False
+        raise LauncherError(f"cannot inspect Git ownership of '{absolute}'")
+    root = Path(os.fsdecode(ownership.stdout).strip())
+    resolved_target = absolute.parent.resolve() / absolute.name
+    try:
+        relative = resolved_target.relative_to(root)
+    except ValueError as exc:
+        raise LauncherError(f"unexpected Git ownership for '{absolute}'") from exc
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", f":(literal){relative}"],
+        capture_output=True,
+        env=environment,
+    )
+    if result.returncode != 0:
+        raise LauncherError(f"cannot inspect Git index for '{absolute}'")
+    return bool(result.stdout)
 
 
 def assert_safe(project_root: Path, plan: Plan) -> None:
-    """Refuse to overlay a git-tracked path. Only in-project targets can be tracked;
-    targets outside the project (e.g. ``~/.claude``) are not in this repo.
+    """Refuse to overlay a path tracked by its actual worktree, including global targets.
 
     The check runs over the *effective* (per-child) binds, not the raw dir-level ones:
     a skills dir is overlaid per-child (see :func:`_effective_binds`), so a tracked but
     unrelated sibling (e.g. a hand-authored skill versioned in the repo) is never masked
     and must not block the launch — only a target agedum would actually bind over does.
-    ``safe_overrides`` are not checked: they are read-only tmpfs shadows, never content
-    injections, and never appear in ``plan.binds``."""
-    if not (project_root / ".git").exists():
-        return
-    for _, target in _effective_binds(plan):
-        try:
-            rel = target.relative_to(project_root)
-        except ValueError:
-            continue  # outside the project repo
-        if _git_tracked(project_root, str(rel)):
+    Shadows are checked too: hiding tracked files can stage deletions in the shared index.
+    Unexpected Git inspection failures refuse the launch."""
+    for target in [*(target for _, target in _effective_binds(plan)), *plan.safe_overrides]:
+        if _git_tracked(project_root, str(target)):
             raise LauncherError(
-                f"refusing to inject over git-tracked path '{rel}': it must be "
+                f"refusing to inject over git-tracked path '{target}': it must be "
                 f"untracked and gitignored (the namespace shares the real .git, so "
                 f"injected content over a tracked file could be committed). Untrack it "
-                f"first — `git rm --cached '{rel}'` — and add it to .gitignore."
+                f"first — `git rm --cached '{target}'` — and add it to .gitignore."
             )
 
 
@@ -226,15 +246,18 @@ def _cleanup_candidates(plan: Plan) -> set[Path]:
 
 
 def _ensure_writable_dirs(plan: Plan) -> None:
-    """Create each harness state/config dir so its read-write bind can land.
+    """Prepare exact injection parents and harness state directories before mounting.
 
     bwrap cannot ``--bind`` a path that does not exist, so a harness whose state dir has never
-    been created (a fresh machine) would fail to mount it writable. The harness would create
-    its own config dir on first run anyway, so pre-creating it is benign. Only called on the
+    been created (a fresh machine) would fail to mount it writable. Only called on the
     real-run path under an enabled sandbox — never from :func:`writable_roots`, so ``--dry-run``
     stays side-effect-free."""
-    for path in plan.writable_dirs:
-        path.mkdir(parents=True, exist_ok=True)
+    parents = [target.parent for _, target in _effective_binds(plan)]
+    for parent in parents:
+        if parent.resolve() != parent.absolute():
+            raise LauncherError(f"refusing symlinked injection parent '{parent}'")
+    for path in [*plan.writable_dirs, *parents]:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
 def run_virtualfs(

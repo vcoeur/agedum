@@ -33,9 +33,11 @@ single exception family makes upstream failures uniform to handle.
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import json
 import math
+import secrets
 import sys
 import threading
 import time
@@ -60,6 +62,14 @@ _HOP_BY_HOP = frozenset(
         "upgrade",
     }
 )
+
+CAPABILITY_HEADER = "X-Agedum-Proxy-Capability"
+CAPABILITY_ENV = "AGEDUM_PROXY_CAPABILITY"
+_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key"})
+
+
+def _without_auth(headers: dict[str, str]) -> dict[str, str]:
+    return {name: value for name, value in headers.items() if name.lower() not in _AUTH_HEADERS}
 
 
 def _normalize_system(system: object) -> list:
@@ -744,6 +754,7 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
     """
 
     upstream = ""
+    capability = ""
     protocol_version = "HTTP/1.1"
 
     def do_POST(self) -> None:  # noqa: N802 (http.server naming)
@@ -788,6 +799,8 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
     def _proxy(self) -> None:
         # One request per connection: the client then keeps no idle socket to reset later.
         self.close_connection = True
+        if not self._admit():
+            return
 
         raw = self._read_body()
         local = self.short_circuit(self.path, raw)
@@ -795,7 +808,7 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
             self._send_json(200, local)
             return
 
-        body, path, headers = self.transform_request(raw, self.path, dict(self.headers.items()))
+        body, path, headers = self.transform_request(raw, self.path, self._client_headers())
         headers = {
             key: value
             for key, value in headers.items()
@@ -823,6 +836,7 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
             # single clause covers what urllib split across URLError and bare
             # ConnectionError. A live client still gets a clean 502 body.
             connection.close()
+
             self._send_error(502, f"agedum proxy: upstream error: {exc}")
             return
         try:
@@ -837,6 +851,28 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             connection.close()
+
+    def _admit(self) -> bool:
+        values = self.headers.get_all(CAPABILITY_HEADER, [])
+        valid = (
+            bool(self.capability)
+            and len(values) == 1
+            and hmac.compare_digest(values[0].encode("utf-8"), self.capability.encode("ascii"))
+        )
+        if not valid:
+            self._send_error(401, "agedum proxy: invalid launch capability")
+            return False
+        if self.headers.get_all("Origin", []):
+            self._send_error(403, "agedum proxy: browser-origin requests are not permitted")
+            return False
+        return True
+
+    def _client_headers(self) -> dict[str, str]:
+        return {
+            name: value
+            for name, value in self.headers.items()
+            if name.lower() != CAPABILITY_HEADER.lower()
+        }
 
     def _read_body(self) -> bytes:
         """Read the request body — ``Content-Length``-framed or ``chunked``.
@@ -1094,6 +1130,8 @@ class _LocalProxy:
     """A localhost proxy server bound to an ephemeral port, run as a context manager."""
 
     def __init__(self, handler_cls: type[_BaseProxyHandler]) -> None:
+        self.capability = secrets.token_urlsafe(32)
+        handler_cls.capability = self.capability
         self._server = _QuietThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -1334,15 +1372,24 @@ def _sse_frame(event_type: str, data: dict) -> bytes:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
 
 
+_CHAT_DONE = object()
+_CHAT_INVALID = object()
+_CHAT_BROKEN = object()
+
+
 def _iter_chat_sse(read) -> object:
     """Yield each upstream Chat Completions SSE ``data:`` payload as a parsed dict.
 
     ``read`` is a ``response.read``-style callable. Lines are reassembled across chunk
-    boundaries; ``data: [DONE]`` ends the stream; unparseable payloads are skipped.
+    boundaries; terminal markers and malformed/failed reads are explicit signals.
     """
     buffer = b""
     while True:
-        chunk = read(4096)
+        try:
+            chunk = read(4096)
+        except (OSError, http.client.HTTPException):
+            yield _CHAT_BROKEN
+            return
         if not chunk:
             break
         buffer += chunk
@@ -1353,11 +1400,123 @@ def _iter_chat_sse(read) -> object:
                 continue
             payload = line[5:].strip()
             if payload == b"[DONE]":
+                yield _CHAT_DONE
                 return
             try:
                 yield json.loads(payload)
             except ValueError:
-                continue
+                yield _CHAT_INVALID
+                return
+    if buffer.strip():
+        yield _CHAT_INVALID
+
+
+def _nullable_chat_string(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _chat_index(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _chat_fields_valid(document: dict, fields: dict) -> bool:
+    return all(validate(document[name]) for name, validate in fields.items() if name in document)
+
+
+def _chat_function_valid(value: object) -> bool:
+    return value is None or (
+        isinstance(value, dict)
+        and _chat_fields_valid(
+            value,
+            {
+                "name": _nullable_chat_string,
+                "arguments": _nullable_chat_string,
+            },
+        )
+    )
+
+
+def _chat_tool_valid(value: object) -> bool:
+    return isinstance(value, dict) and _chat_fields_valid(
+        value,
+        {
+            "index": _chat_index,
+            "id": _nullable_chat_string,
+            "type": lambda item: item is None or item == "function",
+            "function": _chat_function_valid,
+        },
+    )
+
+
+def _chat_delta_valid(value: object) -> bool:
+    return isinstance(value, dict) and _chat_fields_valid(
+        value,
+        {
+            "content": _nullable_chat_string,
+            "reasoning_content": _nullable_chat_string,
+            "refusal": _nullable_chat_string,
+            "role": lambda item: (
+                item is None
+                or (
+                    isinstance(item, str)
+                    and item in ("developer", "system", "user", "assistant", "tool")
+                )
+            ),
+            "tool_calls": lambda item: (
+                item is None
+                or (isinstance(item, list) and all(_chat_tool_valid(call) for call in item))
+            ),
+            "function_call": _chat_function_valid,
+        },
+    )
+
+
+def _chat_choice_valid(value: object) -> bool:
+    return isinstance(value, dict) and _chat_fields_valid(
+        value,
+        {
+            "index": _chat_index,
+            "finish_reason": lambda item: (
+                item is None
+                or (
+                    isinstance(item, str)
+                    and item in ("stop", "length", "tool_calls", "content_filter", "function_call")
+                )
+            ),
+            "delta": _chat_delta_valid,
+        },
+    )
+
+
+def _chat_usage_valid(value: object) -> bool:
+    return value is None or (
+        isinstance(value, dict)
+        and _chat_fields_valid(
+            value,
+            {
+                "prompt_tokens": _chat_index,
+                "completion_tokens": _chat_index,
+                "total_tokens": _chat_index,
+            },
+        )
+    )
+
+
+def _chat_chunk_valid(value: object) -> bool:
+    """Validate known wire fields before they can mutate translated output or lifecycle state."""
+    return isinstance(value, dict) and _chat_fields_valid(
+        value,
+        {
+            "id": lambda item: isinstance(item, str),
+            "model": lambda item: isinstance(item, str),
+            "created": _chat_index,
+            "object": lambda item: item == "chat.completion.chunk",
+            "choices": lambda item: (
+                isinstance(item, list) and all(_chat_choice_valid(choice) for choice in item)
+            ),
+            "usage": _chat_usage_valid,
+        },
+    )
 
 
 def translate_chat_stream(read, *, model: str) -> object:
@@ -1404,6 +1563,9 @@ def translate_chat_stream(read, *, model: str) -> object:
     tool_calls: dict[int, dict] = {}
     usage: dict | None = None
     output: list[dict] = []
+    finish_reason = None
+    terminal_seen = False
+    failure_code = None
 
     def _open_reasoning():
         # The reasoning item is always the first output item (index 0).
@@ -1475,14 +1637,44 @@ def translate_chat_stream(read, *, model: str) -> object:
         output.append(reasoning_item)
 
     for data in _iter_chat_sse(read):
+        if data is _CHAT_DONE:
+            terminal_seen = True
+            break
+        if data is _CHAT_INVALID or data is _CHAT_BROKEN:
+            failure_code = (
+                "invalid_upstream_stream" if data is _CHAT_INVALID else "upstream_disconnect"
+            )
+            break
         if not isinstance(data, dict):
-            continue
+            failure_code = "invalid_upstream_stream"
+            break
+        if "error" in data:
+            failure_code = "upstream_error"
+            break
+        if not _chat_chunk_valid(data):
+            failure_code = "invalid_upstream_stream"
+            break
+        choices = data.get("choices", [])
+        next_finish = choices[0].get("finish_reason") if choices else None
+        if finish_reason is not None and next_finish is not None and next_finish != finish_reason:
+            failure_code = "invalid_upstream_stream"
+            break
         if isinstance(data.get("usage"), dict):
             usage = data["usage"]
-        choices = data.get("choices") or []
         if not choices:
             continue
-        delta = choices[0].get("delta") or {}
+        choice = choices[0]
+        if next_finish is not None:
+            finish_reason = next_finish
+        delta = choice.get("delta", {})
+        calls = [] if delta.get("tool_calls") is None else delta["tool_calls"]
+        if delta.get("refusal"):
+            failure_code = "upstream_refusal"
+            break
+        legacy_call = delta.get("function_call")
+        if legacy_call and (legacy_call.get("name") or legacy_call.get("arguments")):
+            failure_code = "unsupported_function_call"
+            break
         reasoning = delta.get("reasoning_content")
         # Reasoning precedes the message; ignore any stray reasoning once real output has begun.
         if isinstance(reasoning, str) and reasoning and not message_started and not tool_calls:
@@ -1535,18 +1727,89 @@ def translate_chat_stream(read, *, model: str) -> object:
                     "delta": content,
                 },
             )
-        for tool_call in delta.get("tool_calls") or []:
+        for tool_call in calls:
             index = tool_call.get("index", 0)
             accumulator = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
             if tool_call.get("id"):
                 accumulator["id"] = tool_call["id"]
-            function = tool_call.get("function") or {}
+            function = {} if tool_call.get("function") is None else tool_call["function"]
             if function.get("name"):
                 accumulator["name"] = function["name"]
             if function.get("arguments"):
                 accumulator["arguments"] += function["arguments"]
 
-    # A reasoning-only turn (thinking but no assistant text) still needs its item closed.
+    if not failure_code and finish_reason in ("stop", "tool_calls", "function_call"):
+        for accumulator in tool_calls.values():
+            try:
+                arguments = json.loads(accumulator["arguments"])
+            except (ValueError, TypeError):
+                failure_code = "invalid_tool_arguments"
+                break
+            if not accumulator["id"] or not accumulator["name"] or not isinstance(arguments, dict):
+                failure_code = "invalid_tool_arguments"
+                break
+    if not failure_code and finish_reason in ("tool_calls", "function_call") and not tool_calls:
+        failure_code = "invalid_tool_arguments"
+    incomplete_reason = (
+        "max_output_tokens"
+        if finish_reason == "length"
+        else "content_filter"
+        if finish_reason == "content_filter"
+        else "upstream_eof"
+        if not terminal_seen or finish_reason is None
+        else None
+    )
+    if failure_code or incomplete_reason:
+        status = "failed" if failure_code else "incomplete"
+        partial_output = []
+        if reasoning_started:
+            partial_output.append(
+                {
+                    "id": reasoning_item_id,
+                    "type": "reasoning",
+                    "status": status,
+                    "summary": [{"type": "summary_text", "text": "".join(reasoning_parts)}],
+                }
+            )
+        if message_started:
+            partial_output.append(
+                {
+                    "id": msg_item_id,
+                    "type": "message",
+                    "status": status,
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "".join(text_parts)}],
+                }
+            )
+        result = {
+            "id": response_id,
+            "object": "response",
+            "status": status,
+            "model": model,
+            "output": partial_output,
+        }
+        if usage:
+            result["usage"] = {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
+        if failure_code:
+            result["error"] = {"code": failure_code, "message": "Upstream generation failed"}
+        else:
+            result["incomplete_details"] = {"reason": incomplete_reason}
+        event_type = f"response.{status}"
+        yield _sse_frame(
+            event_type,
+            {
+                "type": event_type,
+                "sequence_number": next(seq),
+                "response": result,
+            },
+        )
+        return
+
+    # Only a verified successful terminal state may finalize output or tool arguments.
     if reasoning_started and not reasoning_closed:
         reasoning_closed = True
         yield from _close_reasoning()
@@ -1885,6 +2148,8 @@ class _FailoverHandler(_BaseProxyHandler):
 
     def _failover(self, *, walk: bool) -> None:
         self.close_connection = True
+        if not self._admit():
+            return
         provider_id, rest = self._split_route()
         route = self.routes.get(provider_id)
         if route is None:
@@ -2095,7 +2360,7 @@ class _FailoverHandler(_BaseProxyHandler):
         options = self.rung_options[rung] if rung in self.rung_options else entry.get("options")
         for key, value in (options or {}).items():
             body[key] = value
-        headers = self._inbound_headers()
+        headers = _without_auth(self._inbound_headers())
         headers["Authorization"] = f"Bearer {rung_route['api_key']}"
         headers["Content-Type"] = "application/json"
         if translate:
@@ -2119,7 +2384,7 @@ class _FailoverHandler(_BaseProxyHandler):
     def _inbound_headers(self) -> dict[str, str]:
         return {
             key: value
-            for key, value in self.headers.items()
+            for key, value in self._client_headers().items()
             if key.lower() not in _HOP_BY_HOP and key.lower() not in ("host", "content-length")
         }
 
