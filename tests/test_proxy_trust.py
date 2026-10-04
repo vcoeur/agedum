@@ -1621,10 +1621,10 @@ def test_equals_json_argv_is_redacted_before_encoding():
     assert json.loads(argv[1].split("=", 1)[1]) == {"apiKey": "***", "prompt": "Unicode 你好 1"}
 
 
-def test_required_switch_is_not_a_prompt_or_numeric_secret():
+def test_exact_short_secret_is_masked_without_changing_numeric_types():
     document = {"prompt": "1", "count": 1, "enabled": True, "apiKey": "1"}
     rendered = main._diagnostic_document(json.dumps(document), ["1"], ".json")
-    assert json.loads(rendered) == {"prompt": "1", "count": 1, "enabled": True, "apiKey": "***"}
+    assert json.loads(rendered) == {"prompt": "***", "count": 1, "enabled": True, "apiKey": "***"}
 
 
 @pytest.mark.parametrize("token", ['FAKE-QUOTE"SLASH\\TAIL', "FAKE-秘密-é", "1"])
