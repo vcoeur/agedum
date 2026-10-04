@@ -570,6 +570,74 @@ def test_provider_dry_run_redacts_key_in_opencode_config(monkeypatch, tmp_path, 
     assert "openrouter/moonshotai/kimi-k2.6" in out
 
 
+@pytest.mark.parametrize("token", ["1", "7", "12", 'FAKE-秘密-"\\-KEY'])
+def test_real_opencode_dry_run_json_safe_redaction(tmp_path, token):
+    import os
+    import subprocess
+    import sys
+
+    prompt = 'Worker — 你好 café model-1 1000 tokens "quoted" \\path'
+    config_path = tmp_path / "provider.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "harness": "opencode",
+                "requiredEnv": ["TOKEN", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"],
+                "config": {
+                    "providerDef": {
+                        "id": "local",
+                        "npm": "@ai-sdk/openai-compatible",
+                        "baseUrl": "http://127.0.0.1:9",
+                        "apiKeyEnv": "TOKEN",
+                    },
+                    "opencodeConfig": {
+                        "agent": {"worker": {"prompt": prompt}},
+                        "label": token,
+                        "count": 1000,
+                        "enabled": True,
+                    },
+                },
+            }
+        )
+    )
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
+    environment = os.environ.copy()
+    environment.update(
+        HOME=str(tmp_path),
+        XDG_CONFIG_HOME=str(tmp_path / "config"),
+        TOKEN=token,
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
+    )
+    result = subprocess.run(
+        [
+            str(Path(sys.executable).with_name("agedum")),
+            str(config_path),
+            "--env",
+            str(env_file),
+            "--dry-run",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    block = result.stdout.split("  OPENCODE_CONFIG_CONTENT\n", 1)[1]
+    document = json.loads(
+        "\n".join(line[4:] for line in block.splitlines() if line.startswith("    "))
+    )
+    assert document["provider"]["local"]["options"]["apiKey"] == "***"
+    assert document["label"] == "***"
+    assert document["agent"]["worker"]["prompt"] == prompt
+    assert document["count"] == 1000
+    assert document["enabled"] is True
+    if len(token) > 1:
+        assert token not in result.stdout
+        assert json.dumps(token)[1:-1] not in result.stdout
+
+
 def test_provider_dry_run_with_explicit_env_flag(monkeypatch, tmp_path, capsys):
     providers = tmp_path / "providers"
     providers.mkdir()

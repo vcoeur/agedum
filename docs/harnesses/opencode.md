@@ -116,6 +116,9 @@ and secret values in `OPENCODE_CONFIG_CONTENT` are masked in `--dry-run`. Redact
 parsed values before diagnostic JSON serialization, so quote/backslash/Unicode keys remain
 masked without corrupting JSON, numeric fields, or unrelated prompt text. The actual launch
 document uses normal JSON escaping and is not changed by diagnostic redaction.
+Exact string-valued secrets, including single digits, are masked. A one-character required
+environment value is not substituted inside unrelated text (such as a prompt or model id);
+credential fields are masked regardless of the credential's length.
 
 `providerDef` may also be a **list** when one config draws models from more than one
 provider — e.g. a Kimi primary model plus DeepSeek fast subagents, each needing its own

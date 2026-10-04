@@ -504,7 +504,7 @@ def _redact_value(value, secret_values, key=""):
     if isinstance(value, list):
         return [_redact_value(item, secret_values) for item in value]
     if isinstance(value, str):
-        if len(value) > 1 and value in secret_values:
+        if value and value in secret_values:
             return "***"
         # Compound values can embed credentials; one-character switches are not text tokens.
         for secret in secret_values:

@@ -490,8 +490,10 @@ override).
   Preserve numeric/boolean types, env references and unrelated Unicode prompt text; required
   switch values such as `1` must not be replaced inside serialized JSON or arbitrary words.
   Unparseable generated content is withheld, never printed as a raw fallback. Diagnostics
-  must not mutate the actual launch documents. Regression/runtime fixtures use fake keys and
-  localhost only; `tests/test_proxy_trust.py` covers these boundaries.
+   must not mutate the actual launch documents. Regression/runtime fixtures use fake keys and
+   localhost only; `tests/test_proxy_trust.py` covers these boundaries.
+   Exact string matches are masked even for one-character secrets; embedded one-character
+   values are masked only in credential fields, not globally across unrelated text.
 
 ## Virtual-FS safety rules (validated empirically — don't regress)
 
