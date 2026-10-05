@@ -50,8 +50,8 @@ command. Every harness disposes of each source in one of three ways:
 | Disposition | Meaning |
 |---|---|
 | **injected** (`→ <dest>`) | agedum writes a compiled copy and binds it at the path the harness reads (e.g. Claude's `CLAUDE.md`, every harness's skills dir). |
-| **read in place** | the harness reads the file natively at its source location, so agedum injects nothing — and *cannot*, since the root `AGENTS.md` is git-tracked. kimi, opencode, cline, reasonix, and pi all read the **project** `AGENTS.md` this way. |
-| **appended flag** | the context is passed as an extra argument, not a bind — aider's `--read` for *both* scopes' instructions (aider reads no `AGENTS.md` natively). |
+| **read in place** | the harness reads the file natively at its source location, so agedum injects nothing over it. kimi, opencode, cline, reasonix, pi, and codex read the **project** `AGENTS.md` this way. |
+| **appended flag** | aider's `--read` points to each scope's read-only bound cache path (aider reads no `AGENTS.md` natively). |
 
 Two rules hold for every harness:
 
@@ -101,18 +101,18 @@ command can write only to
 - the **launch directory** — the current dir it was launched in (the walked-up project root
   still locates sources and injection targets, but is never the writable grant, so launching
   from a dir under `$HOME` with no closer project cannot mount the whole home writable);
-- the **harness's own state/config dir** — so it can persist sessions, settings, and auth
+- the **harness's own state/config dir** — for sessions, writable settings, and auth
   (e.g. `~/.claude` for Claude Code, `~/.cline` for Cline, `~/.codex` for Codex); agedum knows
   each harness's dir and grants it write access (creating it if missing), whether or not the
-  harness injects anything under it;
+  harness injects anything under it; individual injected files remain read-only;
 - the exact parent of every injection target, prepared before mounting (never an arbitrary existing ancestor);
 - a private **`/tmp`** (a fresh tmpfs, discarded on exit);
 - any directory you add with **`--rw-dir DIR`** (repeatable; passing it implies `--sandbox`).
   A `DIR` holding a shell glob (`*`, `?`, `[…]`) is expanded to each existing match, so
   `--rw-dir '~/src/*'` makes every immediate subdirectory of `~/src` writable.
 
-Everything else on the host stays readable but cannot be modified, so an autonomous agent
-cannot alter or delete files outside its working set.
+Other host paths are mounted read-only. This is not a confidentiality, network, process,
+credential, or API-access boundary; it does not authorize production access.
 
 ```bash
 agedum --wrapper claude --sandbox -- claude -p "…"            # confine writes to the launch dir
@@ -126,11 +126,16 @@ that already lives inside the launch directory is folded in — a parent bind co
 This confines the **filesystem** only: the network is untouched, so the harness still reaches
 its model endpoint. Like all of wrapper mode it is Linux-only and relies on `bwrap`.
 
-## No footprint
+## Temporary context and host writes
 
-Nothing is written to your real tree or `$HOME`: the compiled files live only inside the
-launched process's [mount namespace](internals.md), and agedum refuses to overlay a
-git-tracked path. Wrapper mode is **Linux-only** and needs `bwrap`
+Read-only compiled content is staged temporarily and exposed at its target only inside the
+launched process's [mount namespace](internals.md). This is **not** a no-writes guarantee:
+`bwrap` can create empty mountpoint stubs, which agedum sweeps only when newly created and
+still empty. Sandbox preparation creates exact injection parents and harness state directories
+that can remain; the harness can write state and transcript files in its writable set.
+Provider mode can additionally persist writable Kimi/Cline config seeds. agedum refuses to
+overlay a git-tracked path; keep targets gitignored as an operator prerequisite, not an
+enforced gate. Wrapper mode is **Linux-only** and needs `bwrap`
 ([bubblewrap](https://github.com/containers/bubblewrap)) on `PATH`.
 
 ## Behaviour when no source is found

@@ -89,9 +89,9 @@ be referenced by name the way pi's `models.json` does), and there is **no `--con
 flag. To run Kimi Code against an arbitrary OpenAI-/Anthropic-compatible endpoint, set
 `baseUrl`: agedum then **generates a `config.toml`** with one provider (named `agedum`) and one
 model, bakes the resolved key into it (masked in `--dry-run`, like opencode's
-`OPENCODE_CONFIG_CONTENT`), and binds it over `~/.kimi-code/config.toml` — the file Kimi reads
-from its data dir. Because the bind replaces that file inside the namespace, the generated doc
-is self-sufficient; Kimi fills every other setting from its own defaults.
+`OPENCODE_CONFIG_CONTENT`), and **seeds it as a writable host file** under the isolated
+`KIMI_CODE_HOME` described below — not a read-only bind over the user's own config.
+The generated doc is self-sufficient; Kimi fills every other setting from its own defaults.
 
 ```json
 {
@@ -236,8 +236,9 @@ Kimi Code's own check at switch time. The subagent tier is checked separately, t
 ## MCP servers { #mcp }
 
 Kimi Code reads MCP servers from **`mcp.json`, never `config.toml`**, so `mcpServers` becomes a
-second generated doc bound at `~/.kimi-code/mcp.json`. It is bound read-only rather than merged,
-so the launcher declares its own server set instead of inheriting the host's:
+second generated doc in the Kimi home. Without `baseUrl`, it is bound read-only at
+`~/.kimi-code/mcp.json` (or `KIMI_CODE_HOME/mcp.json`); with `baseUrl`, it is a writable seed
+in the isolated cache home. It is not merged with the host's server set:
 
 ```json
 {
@@ -255,9 +256,10 @@ Entries use Kimi's MCP shape: stdio takes `command` (+ `args`, `env`, `cwd`); HT
 `baseUrl` — a launcher can inject MCP without generating a `config.toml`. Kimi also reads a
 project-root `.mcp.json` (Claude-compatible) on its own; agedum does not touch that file.
 
-**kimi is not part of the [canonical translation](../provider.md#mcp).** claude and opencode
-have their `mcpServers` block rewritten into their own dialects, including respelling
-`${VAR}` placeholders; kimi keeps the verbatim passthrough above. Kimi Code is not known to
+**kimi is not part of the [canonical translation](../provider.md#mcp).** claude, opencode,
+and codex have their `mcpServers` block rewritten into their own dialects; only claude and
+opencode support `${VAR}` placeholders (codex rejects them). kimi keeps the verbatim
+passthrough above. Kimi Code is not known to
 expand `${VAR}` in `mcp.json`, so rather than hand a server the literal string `${TOKEN}`,
 a placeholder in a kimi entry is a **fail-loud error** — use `bearerTokenEnvVar` for a
 remote token, or write the value literally. This is what stops a shared MCP base, extended

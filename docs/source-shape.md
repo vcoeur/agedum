@@ -211,14 +211,16 @@ the global one to `~/.kimi-code/AGENTS.md`; opencode, cline, reasonix, pi, and c
 scope natively and injects both via `--read`. See the
 [harness pages](harnesses/index.md) for each harness's full mapping.
 
-### Only the two scope paths are touched
+### Source overlays and other configuration
 
 For the global scope, agedum overlays the harness's instruction file and skills directory
 under the user config dir — for Claude, `~/.claude/CLAUDE.md` and `~/.claude/skills/`. Claude
 alone may also overlay a read-only `settings.json` + hook `scripts/`, but only when a `claude/`
 corner exists in the source root (see the [Claude overlay](harnesses/claude.md#claude-overlay)).
-Everything else in `~/.claude` is left exactly as it is: your `~/.claude.json` auth, history,
-and any other state are never shadowed. The overlay is scoped as tightly as possible.
+Those global source overlays do not mask `~/.claude.json` auth or history. Project
+transcript hooks may also bind `.claude/settings.local.json` read-only; provider mode can
+generate additional [config binds or writable seeds](internals.md#the-launch-pipeline).
+Directory preparation and harness state writes are separate from these temporary overlays.
 
 The skills overlay is tighter still: agedum binds each skill folder it ships individually
 (`~/.claude/skills/<name>`), so a hand-authored skill you keep in that dir but agedum does

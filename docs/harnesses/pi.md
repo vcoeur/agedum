@@ -249,8 +249,8 @@ extension, or pi-core keys, that agedum doesn't model:
   "harness": "pi",
   "slug": "pi-deepseek-tuned",
   "secretEnv": "DEEPSEEK_API_KEY",
-  "requireExtensions": ["pi-subagents"],
   "config": {
+    "requireExtensions": ["pi-subagents"],
     "baseUrl": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",
     "subagentModel": "deepseek-v4-flash",
@@ -265,12 +265,13 @@ extension, or pi-core keys, that agedum doesn't model:
   built-in → one model); `piSettings` is deep-merged on top, so it **wins on conflict** — use
   it to override one agent (above, `scout` keeps the flash model but gains `thinking: high`) or
   add `subagents.disableBuiltins`. A single `settings.json` is generated and merged onto yours.
-- **`requireExtensions`** (a string or list) names extensions the provider depends on.
+- **`config.requireExtensions`** (a string or list, inside the `config` block, not the
+  provider envelope) names extensions the provider depends on.
   `pi-subagents` is **implicitly required** whenever `subagentModel` or a `piSettings.subagents`
   block is present. At launch (and in `--dry-run`) agedum checks the host's installed packages
   (`settings.json` `packages` + `~/.pi/agent/npm/node_modules`) and **warns** for any missing
   one — because pi silently ignores config for an absent extension, so without the warning a
-  multi-agent provider would quietly run as a single agent. Set **`strict: true`** to make a
+  multi-agent provider would quietly run as a single agent. Set **`config.strict: true`** to make a
   missing extension a hard error instead (for tasks / CI). agedum never installs — that is a
   host action (`pi install npm:<name>`).
 
@@ -284,8 +285,8 @@ map of *relative path under `~/.pi/agent`* → JSON object, each deep-merged ont
   "harness": "pi",
   "slug": "pi-deepseek-parallel",
   "secretEnv": "DEEPSEEK_API_KEY",
-  "requireExtensions": ["pi-subagents"],
   "config": {
+    "requireExtensions": ["pi-subagents"],
     "baseUrl": "https://api.deepseek.com",
     "model": "deepseek-v4-pro",
     "subagentModel": "deepseek-v4-flash",

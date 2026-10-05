@@ -1,9 +1,9 @@
 """``agedum`` CLI entrypoint — two modes.
 
 **provider** (the primary form): ``agedum <name|path> [harness args…]``. Reads a
-condash-style provider config (a name resolved under
-``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`` or a ``/``/config-extension
-path; JSON, or YAML declaring ``schema: agedum-provider/v1``),
+condash-style provider config (all relative refs resolved under
+``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}``, absolute paths as-is;
+JSON, or YAML declaring ``schema: agedum-provider/v1`` or ``/v2``),
 resolves its env from ``${AGENTS_ENV_FILE:-~/.config/agents/.env}`` (or ``--env``),
 sets the provider/model/auth environment, and launches the harness named in the config
 inside the virtual-file context. ``--dry-run`` prints the resolved env (secrets masked),
@@ -102,12 +102,13 @@ USAGE = (
 HELP = f"""{USAGE}
 
 Provider mode (the normal way to launch) — run a harness from a provider config (JSON,
-or YAML declaring `schema: agedum-provider/v1`), with the provider's env resolved from
+or YAML declaring `schema: agedum-provider/v1` or `/v2`), with the provider's env resolved from
 the env file and the agent-neutral source injected as virtual files:
 
   <provider-name>       resolve <name>.json (or <name>.yaml/.yml) under $AGENTS_PROVIDERS_DIR
                         (default ~/.config/agents/providers)
-  <config-path>         a config path (contains / or a config extension; CWD-relative)
+  <config-path>         absolute paths as-is; all relative refs use the providers root,
+                        including ./ and nested paths — no CWD fallback
   --env <file>          override the env file ($AGENTS_ENV_FILE, default
                         ~/.config/agents/.env)
   --dry-run             print the resolved env (secrets masked), the virtual files that
@@ -118,6 +119,7 @@ the env file and the agent-neutral source injected as virtual files:
                         modelRef filing, and v2 intent expansion exactly as the launch
                         would see them (accepted before or after the provider)
   --prompt TEXT         seed the harness with an initial prompt, then stay interactive
+                        (unsupported for kimi, reasonix, and aider; use --run instead)
   --run TEXT            run the prompt non-interactively, then exit (no interactive UI);
                         --prompt and --run are mutually exclusive
   harness args          any token after the provider that isn't an agedum flag is passed
@@ -130,7 +132,8 @@ virtual-file context, with no provider env:
                         cline | reasonix | aider | pi | codex) then run the command after --
                         inside the namespace
   --sandbox             write-confinement: mount the host read-only so the command can only
-                        write the project root, agedum's injection dirs, /tmp, and any
+                        write the launch directory, exact injection parents, harness
+                        state/config dirs, /tmp, and any
                         --rw-dir paths (default: full read-write host access)
   --rw-dir DIR          add DIR to the writable set (repeatable); implies --sandbox
   --dry-run             print the virtual files that would be injected, don't run

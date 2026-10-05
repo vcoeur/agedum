@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,39 @@ def test_help_when_no_args(monkeypatch, capsys):
     assert "--wrapper" in out
     assert "provider" in out.lower()
     assert "--build-script" not in out
+
+
+def test_help_documents_current_launch_contract(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["agedum", "--help"])
+    cli.app()
+    out = capsys.readouterr().out
+    assert "all relative refs use the providers root" in out
+    assert "no CWD fallback" in out
+    assert "CWD-relative" not in out
+    assert "unsupported for kimi, reasonix, and aider" in out
+    assert "launch directory, exact injection parents" in out
+    assert "state/config dirs" in out
+
+
+@pytest.mark.parametrize("arguments", ["--version", "--print-config claude/conf.yaml"])
+def test_make_run_forwards_explicit_args(tmp_path, arguments):
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@"\n')
+    fake_uv.chmod(0o700)
+    makefile = Path(__file__).resolve().parents[1] / "Makefile"
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-f", str(makefile), "run", f"ARGS={arguments}"],
+        cwd=tmp_path,
+        env={"PATH": f"{tmp_path}:{os.defpath}"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines()[1:] == [
+        "<run>",
+        "<agedum>",
+        *(f"<{argument}>" for argument in arguments.split()),
+    ]
 
 
 # --- wrapper mode ---
