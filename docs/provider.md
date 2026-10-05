@@ -19,7 +19,8 @@ There is no generated launcher script: the config is read at run time.
 ```bash
 agedum claude-deepseek-auto                   # resolve the named provider, launch claude
 agedum claude-deepseek-auto -p "review this"  # extra args go to the harness
-agedum ./providers/my-claude.json             # a path instead of a name
+agedum claude/my-claude.json                  # relative to the providers root, not CWD
+agedum /absolute/path/my-claude.yaml          # absolute config path
 agedum claude-deepseek-auto --dry-run         # print the resolved env + argv, don't launch
 agedum claude-deepseek-auto --print-config    # print the effective config as YAML, exit
 ```
@@ -109,7 +110,7 @@ The config is the condash-style agent envelope:
 | `promptTemplates` | Optional OpenCode-only mapping of template names to prompt strings; included abstract fragments may supply it. Agents select one through `prompt._template`, optionally overriding `config.promptVars` with `prompt._vars`. See [OpenCode prompt templates](harnesses/opencode.md#prompt-templates). |
 | `permissionTemplates` | Optional OpenCode-only mapping of names to shared permission objects without `task`; agents opt in explicitly and may attach literal task rules. See [OpenCode permission templates](harnesses/opencode.md#permission-templates). |
 | `abstract` | `true` marks a **base-only** config: excluded from `--providers` and not launchable on its own. |
-| `sandbox` | Optional **write-confinement** — mount the host read-only and let the harness write only to the project root, its own state/config dir (e.g. `~/.cline`), `/tmp`, and the paths in `sandbox.readWrite`. See [Filesystem sandbox](#sandbox). |
+| `sandbox` | Optional **write-confinement** — writable mounts cover the launch directory, exact injection parents, harness state/config dirs, `/tmp`, and `sandbox.readWrite`; individual injected files stay read-only. See [Filesystem sandbox](#sandbox). |
 
 A config's **identity and label are its path** under the providers root — there is no `name`
 field. Save the config at the path you want to launch it by (e.g.
@@ -616,8 +617,9 @@ For OpenCode agents, it prints the rendered **base** `prompt` and a separate
 
 `config.mcpServers` declares MCP servers in **one canonical vocabulary** that agedum
 translates into each harness's own dialect, so a server is written once and extended onto
-every launcher that should carry it. Supported by **claude**, **opencode**, and **kimi**
-(kimi with the caveat below); other harnesses ignore the key.
+every launcher that should carry it. Canonical translation is supported by **claude**,
+**opencode**, and **codex**; **kimi** keeps a verbatim passthrough (with the caveat below).
+Other harnesses ignore the key.
 
 An entry is either **stdio** or **remote** — never both:
 
@@ -630,18 +632,21 @@ An entry is either **stdio** or **remote** — never both:
 }
 ```
 
-| Canonical | claude | opencode |
-|---|---|---|
-| stdio `{command, args, env, cwd}` | passed through as-is (claude's dialect *is* the canonical one) | `{type:"local", command:[command, …args], environment, cwd, enabled:true}` |
-| remote `{url, headers, transport}` | `{type: transport\|"http", url, headers}` | `{type:"remote", url, headers, enabled:true}` |
-| delivery | `--mcp-config '<json>'` appended to argv | merged into `OPENCODE_CONFIG_CONTENT` |
+| Canonical | claude | opencode | codex |
+|---|---|---|---|
+| stdio `{command, args, env, cwd}` | passed through as-is | `{type:"local", command:[command, …args], environment, cwd, enabled:true}` | dotted `mcp_servers.<name>.command`, `.args`, `.env.<key>`, `.cwd` |
+| remote `{url, headers, transport}` | `{type: transport\|"http", url, headers}` | `{type:"remote", url, headers, enabled:true}` | dotted `.url` / `.headers`; no transport override |
+| delivery | `--mcp-config '<json>'` appended to argv | merged into `OPENCODE_CONFIG_CONTENT` | repeatable `-c key=<toml>` argv overrides |
 
 ### `${VAR}` placeholders
 
-Any value may carry a `${VAR}` placeholder. **agedum respells it, it never resolves it** —
+For **claude and opencode**, values may carry a `${VAR}` placeholder.
+**agedum respells it, it never resolves it** —
 resolving would bake the secret into argv (claude) or into an env var (opencode), where the
 process list and `--dry-run` would expose it. Instead each harness expands it itself:
 claude reads `${VAR}` natively, and opencode's spelling `{env:VAR}` is written for it.
+**Codex and kimi reject `${VAR}` placeholders**, rather than pass an unexpanded token.
+Do not reuse this placeholder-bearing example unchanged for those harnesses.
 
 The variable still has to *reach* the harness, which means naming it in **`requiredEnv`** —
 that is what copies it out of `~/.config/agents/.env` into the child environment. Declaring
@@ -666,6 +671,10 @@ requirement come along.
   `opencodeConfig.mcp` entry still overrides one server without abandoning the shared base.
   Note opencode resolves an unset `{env:VAR}` to the empty string, which is a second reason
   to declare the var in `requiredEnv`.
+- **codex** — canonical stdio and remote entries become `-c mcp_servers.<name>…` TOML
+  overrides, layered over its own config. `${VAR}` placeholders are rejected. Literal
+  env/header values go into argv, so do not put secrets there; see
+  [Codex MCP](harnesses/codex.md#mcp-servers) for a non-secret recipe.
 - **kimi** — keeps the older verbatim passthrough into `mcp.json` ([kimi § MCP](harnesses/kimi.md#mcp)),
   and its remote form is `{url, bearerTokenEnvVar}` rather than `headers`. Kimi Code is not
   known to expand `${VAR}` there, so a placeholder in a kimi `mcpServers` entry is a
@@ -681,8 +690,9 @@ the working tree it was launched in; the walked-up project root is used for *fin
 and injection targets, never as the writable grant, so a launch from a home subdir cannot
 mount the whole home writable), its own **state/config dir** (agedum knows each harness's dir —
 `~/.claude`, `~/.cline`, `~/.codex`, … — and always
-makes it writable so the harness can persist sessions/settings/auth), a private `/tmp`, and each
-path in **`readWrite`**:
+makes it writable for state), the **prepared exact parent of each injection target**
+(never a nearest-existing ancestor), a private `/tmp`, and each path in **`readWrite`**.
+Read-only file overlays stay read-only inside otherwise writable directories:
 
 ```json
 {
@@ -811,5 +821,9 @@ global scope
 
 This is the same view [wrapper mode](wrapper.md#dry-run) shows — how
 agedum renders the agent-neutral [source](source-shape.md) for the harness — plus the
-resolved provider environment. Nothing is written to your real tree: the listed
-destinations exist only inside the launched process's [mount namespace](internals.md).
+resolved provider environment. **Dry-run** uses temporary compilation and does not seed
+provider files or prepare host mount/state directories. On an **actual launch**, read-only
+injected content is exposed at the listed destinations only inside the process's
+[mount namespace](internals.md), but writable Kimi/Cline seeds persist on the host.
+Prepared directories and harness state/transcripts can also remain; empty mountpoint stubs
+are swept only when newly created and still empty.

@@ -22,19 +22,21 @@ agedum <provider-name|config.json|.yaml> [--env <file>] [--dry-run] [harness arg
 ```
 
 Launch a harness from a condash-style **provider config** — JSON, or YAML declaring
-`schema: agedum-provider/v1`. agedum resolves the
+`schema: agedum-provider/v1` or `/v2`. agedum resolves the
 provider's env from the env file, sets the provider/model/auth environment, and launches
 the harness named in the config — inside the virtual-file context. The single positional
 is a provider **name** (resolved under `$AGENTS_PROVIDERS_DIR`, default
-`~/.config/agents/providers`) or a **path** (it contains `/` or a config extension). Full
-reference: [Provider mode](provider.md).
+`~/.config/agents/providers`) or a **path**. Every relative reference, including `./`
+and nested paths, is providers-root-relative; only a path starting with `/` is absolute.
+There is no CWD fallback. Full reference: [Provider mode](provider.md#resolving-the-provider).
 
 | Form | Effect |
 |---|---|
 | `agedum claude-deepseek-auto` | Resolve the named provider and launch its harness. |
-| `agedum ./conf.json -p "hi"` | Launch from a config path; pass `-p "hi"` to the harness. |
+| `agedum claude/conf.json -p "hi"` | Resolve `<providers-root>/claude/conf.json`; pass `-p "hi"` to the harness. |
+| `agedum /absolute/path/conf.yaml --dry-run` | Inspect an absolute config path without launching. |
 | `agedum <provider> --env <file>` | Read secrets from `<file>` instead of the default env file. |
-| `agedum <provider> --prompt "<text>"` | Seed the harness with an initial prompt, then stay interactive. |
+| `agedum <provider> --prompt "<text>"` | Seed a supported harness and stay interactive; unsupported for kimi, reasonix, and aider. |
 | `agedum <provider> --run "<text>"` | Run the prompt non-interactively, then exit (no interactive UI). |
 | `agedum <provider> --dry-run` | Print the resolved env (secrets masked), the injected virtual files, and the argv; don't launch. |
 | `agedum <provider> --print-config` | Print the effective merged+expanded config as YAML and exit 0 — no launch, no env resolution. |
@@ -66,9 +68,13 @@ agedum translates the flag to each harness's native invocation (verify it with `
 | Harness | `--prompt "<text>"` (interactive) | `--run "<text>"` (non-interactive) |
 |---|---|---|
 | claude | `claude "<text>"` | `claude --print "<text>"` |
-| kimi | `kimi --prompt "<text>"` | `kimi --prompt "<text>" --print` |
+| kimi | *(unsupported — fail-loud)* | `kimi --prompt "<text>"` (no `--print`; drops interactive `--yolo`/`--auto`/`--plan`) |
 | opencode | `opencode --prompt "<text>"` | `opencode run "<text>"` |
 | cline | `cline --tui "<text>"` | `cline "<text>"` |
+| reasonix | *(unsupported — fail-loud)* | `reasonix run "<text>"` |
+| aider | *(unsupported — fail-loud)* | `aider --message "<text>"` |
+| pi | `pi "<text>"` | `pi --print "<text>"` |
+| codex | `codex "<text>"` | `codex exec "<text>"` |
 
 If a harness has no known prompt-seeding convention, agedum **fails loudly** with a clear
 error rather than launching the wrong way. Any harness passthrough args you add are kept,

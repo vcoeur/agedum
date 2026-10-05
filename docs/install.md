@@ -61,7 +61,7 @@ cd agedum
 make dev-install   # uv sync --all-groups
 make test          # uv run pytest
 make lint          # ruff check + ruff format --check
-make run -- --version
+make run ARGS="--version"
 ```
 
 agedum is a [uv](https://docs.astral.sh/uv/)-managed project (Python ≥ 3.12). The

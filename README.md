@@ -13,17 +13,21 @@ you run.
 agedum has two modes:
 
 - **`agedum <provider-name|config.json|.yaml> [harness args]`** — the primary form. Read a
-  provider config — JSON, or YAML declaring `schema: agedum-provider/v1` — (a name resolved
-  under `~/.config/agents/providers`, or a path),
+  provider config — JSON, or YAML declaring `schema: agedum-provider/v1` or `/v2` —
+  (all relative refs resolved under `${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}`;
+  absolute paths are used as-is, with no CWD fallback),
   resolve its secrets from a `.env`, set the provider/model/auth environment, and launch
   the harness named in the config — inside the virtual-file context below. `--prompt
   "<text>"` seeds an initial prompt and stays interactive; `--run "<text>"` runs it
-  non-interactively and exits. `--dry-run` prints the resolved env (secrets masked) + argv
+  non-interactively and exits. Interactive `--prompt` is unsupported for kimi, reasonix,
+  and aider. `--dry-run` prints the resolved env (secrets masked) + argv
   without launching.
 - **`agedum --wrapper <harness> -- <command>`** — compile the source to the harness's
   native layout in a throwaway dir, then run your command inside a **private mount
   namespace** (bubblewrap) where the compiled files appear at their expected paths —
-  visible only to that process, never written into your real tree or `$HOME`. For Claude:
+  visible only to that process and its children. The injected content is temporary, not
+  a no-writes guarantee: mountpoint stubs, prepared state/injection directories, writable
+  provider seeds, and harness state can touch the host. For Claude:
   `AGENTS.md` → `CLAUDE.md` and `.agents/skills/<name>/` → `.claude/skills/<name>/` (the
   base `SKILL.md` merged with an optional `SKILL.claude.md` overlay). Provider mode runs
   this same launch after setting the environment.
@@ -32,14 +36,18 @@ agedum has two modes:
 > lands at its *own* Claude location — project → `./CLAUDE.md` + `./.claude/skills/`,
 > global (`~/.config/agents/AGENTS.md` + `~/.config/agents/skills/`) → `~/.claude/CLAUDE.md`
 > + `~/.claude/skills/` (honours `$CLAUDE_CONFIG_DIR`). They're never merged; Claude
-> reads both. Only those two `~/.claude` paths are overlaid for the child — your
-> `~/.claude.json` auth and other settings are untouched.
+> reads both. An optional global Claude overlay also binds `settings.json` + hook
+> `scripts/` read-only; automatic project transcript hooks bind
+> `.claude/settings.local.json` read-only when untracked. Do not rely on permission
+> saves to that overlaid file. Your `~/.claude.json` auth is not overlaid.
 >
 > **kimi** (`--wrapper kimi`) is also supported. kimi reads the project `AGENTS.md`
-> natively, so agedum leaves it in place; it has no user-scope `AGENTS.md`, so the global
-> `AGENTS.md` is injected via a transient `--agent-file` YAML (no `--agent-file` is
-> added when there's no global scope). Skills are binds: global → `~/.kimi/skills/`,
-> project → `./.kimi/skills/` (both auto-read by kimi).
+> natively, so agedum leaves it in place; global `AGENTS.md` binds to
+> `~/.kimi-code/AGENTS.md`. Skills are binds: global → `~/.kimi-code/skills/`,
+> project → `./.kimi-code/skills/` (both auto-read). Global targets honour
+> `KIMI_CODE_HOME`; no instruction flags are appended. `--run` maps to
+> `kimi --prompt "<text>"` (no `--print`), dropping interactive permission/plan flags;
+> agedum's interactive `--prompt` is unsupported.
 >
 > **opencode** (`--wrapper opencode`) is supported too — pure path-discovery, like
 > Claude. The project `AGENTS.md` is read natively (`./AGENTS.md`); the global
@@ -69,8 +77,8 @@ agedum has two modes:
 >
 > **aider** (`--wrapper aider`) is supported as well — but it differs from the others.
 > aider has **no native instruction discovery** and **no skills mechanism**, so agedum
-> injects each scope's `AGENTS.md` via aider's `--read` read-only-context flag (the
-> instructions analogue of kimi's `--agent-file`; no binds), and does not inject skills. In
+> injects each scope's `AGENTS.md` at a read-only bound cache path named by aider's
+> `--read` flag, and does not inject skills. In
 > **provider mode** the config maps to aider's CLI flags (`--model` / `--weak-model` /
 > `--editor-model` / `--reasoning-effort`), the key rides the environment (litellm), and a
 > `baseUrl` sets `OPENAI_API_BASE`. **Git integration is disabled by default** (`--no-git`),
@@ -115,7 +123,8 @@ agedum claude-deepseek-auto                       # resolve the named provider, 
 agedum claude-deepseek-auto -p "review this"      # extra args go to the harness
 agedum claude-deepseek-auto --prompt "review this"  # seed an initial prompt, stay interactive
 agedum claude-deepseek-auto --run "review this"     # run the prompt non-interactively, then exit
-agedum ./providers/my-claude.json                 # a config path instead of a name
+agedum claude/my-claude.json                      # relative to the providers root, not CWD
+agedum /absolute/path/my-claude.yaml              # absolute config path
 agedum claude-deepseek-auto --dry-run             # print resolved env, virtual files + argv
 
 # Wrapper mode (low-level; provider mode builds on it) — virtual files, no provider env:
@@ -138,8 +147,9 @@ agedum --version
 `agedum <name>` is the normal way to launch. Wrapper mode is the lower-level entry it
 uses: everything after `--` is the command, run verbatim, and `--wrapper <harness>`
 chooses the format; `--dry-run` prints the injected virtual files without running.
-Injected paths must be gitignored — agedum refuses to overlay a git-tracked file (the
-namespace shares your real `.git`).
+Injected paths must be untracked — agedum refuses to overlay a git-tracked file (the
+namespace shares your real `.git`). Keep targets gitignored as an operator prerequisite;
+agedum does not enforce gitignore.
 
 ## Documentation
 
@@ -163,7 +173,7 @@ pipx install agedum        # standalone CLI (once published)
 make dev-install   # uv sync --all-groups
 make test          # pytest
 make lint          # ruff check + format --check
-make run -- --version
+make run ARGS="--version"
 make docs          # build the docs site (strict); docs-serve for live preview
 ```
 

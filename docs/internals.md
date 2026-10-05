@@ -22,7 +22,7 @@ flowchart TD
   e --> f["sweep stub mountpoints bwrap left behind"]
 ```
 
-Internally this is three modules:
+The main modules are:
 
 - **`sources.py`** — locates the project root and the project/global source files into
   a `Source` (`root`, `agents_md`, `skills_dir`).
@@ -30,15 +30,16 @@ Internally this is three modules:
   `compile_reasonix` / `compile_aider` / `compile_pi` / `compile_codex` render a `Source` pair into a
   `Plan`: a list of absolute `(compiled-file → mount-target)` binds, **plus**
   `extra_args` to append to the command, plus `safe_overrides` — targets to shadow with
-  an empty tmpfs instead of binding content (pi uses one to hide the raw
-  `.agents/skills/` so it does not collide with the compiled `.pi/skills/` copies).
+   an empty tmpfs instead of binding content. **Pi does not shadow source skills**:
+   it uses exact native exclusions in an untracked project `.pi/settings.json`, leaving
+   source files and the shared Git index visible (see [Pi](harnesses/pi.md#wrapper-resolution)).
 - **`launcher.py`** — `assert_safe`, `build_bwrap_argv`, and `run_virtualfs` validate,
   compose the `bwrap` argv, run the command, and clean up.
-- **`proxy.py`** — two per-session localhost reverse proxies the CLI interposes for a launch
-  (the child reaches them at `127.0.0.1`, shared into the bwrap namespace): `FoldProxy` folds
-  `system`-role messages into the top-level `system` for strict Anthropic endpoints (claude
-  `foldSystemMessages`), and `ResponsesToChatProxy` translates the codex Responses API ↔ Chat
-  Completions for chat-only providers like DeepSeek (codex `chatCompletions`).
+- **`proxy.py`** — launch-bound localhost reverse proxies (the child reaches them at
+  `127.0.0.1`, shared into the bwrap namespace): `FoldProxy` folds Anthropic system messages,
+  `TranslateProxy` translates Anthropic ↔ Chat Completions, `ResponsesToChatProxy` translates
+  Responses ↔ Chat Completions, and `FailoverProxy` routes OpenCode model chains. Every local
+  proxy requires its own runtime-only launch capability; loopback alone is not authorization.
 
 Provider mode adds one more injection channel on top of the same pipeline:
 `Launch.config_files` — agedum-*generated* config files a harness needs on disk
@@ -126,16 +127,18 @@ the `.claude` dir created to hold `.claude/skills`), the per-child overlay targe
 (e.g. `.claude/skills/<name>` — the empty stub left when agedum ships a skill the target
 dir did not already have), and the `safe_overrides` tmpfs shadows (bwrap creates their
 mountpoints the same way). Anything that pre-existed — including a user's
-`~/.config/opencode/skills/` that already held skills — is left alone. The net effect: a
-clean working tree after the command, with the real repo untouched.
+`~/.config/opencode/skills/` that already held skills — is left alone. Directories prepared
+before this snapshot (exact injection parents and harness state dirs under a sandbox) can
+remain, as can writable provider seeds and files the harness creates. Stub sweeping is not
+a guarantee of a clean or untouched working tree.
 
 ## Adding a harness
 
 A new harness is a single compiler function `compile_<harness>(project, global_, dest)
 -> Plan`. It renders the source however that harness expects and returns binds and/or
 `extra_args`. Register it in the CLI's `_COMPILERS` table under its `--wrapper <harness>`
-name. The harness need not fit the pure path-discovery shape: the **aider** harness (the
-most recent example) injects instructions as `--read` flags rather than binds, and skips
+name. The harness need not fit the pure path-discovery shape: the **aider** harness
+injects instructions at read-only bound cache paths named by `--read` flags, and skips
 skills entirely — both expressed through the same `Plan(binds, extra_args)` return. The
 launcher and safety rules are shared, so a new harness inherits the namespace, git-safety,
 and cleanup for free.

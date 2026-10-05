@@ -16,7 +16,7 @@ A **harness** is an agent CLI agedum drives. Each has its own page documenting t
 | Harness | Reads project `AGENTS.md` | Global instructions land at | `extra_args` | Provider token |
 |---|---|---|---|---|
 | [Claude](claude.md) | injected → `CLAUDE.md` | `~/.claude/CLAUDE.md` | none | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` env |
-| [kimi](kimi.md) | read in place | a generated `--agent-file` | `--agent-file` | env (`requiredEnv` export) |
+| [kimi](kimi.md) | read in place | `~/.kimi-code/AGENTS.md` (`KIMI_CODE_HOME`-aware) | none | env (`requiredEnv` export); custom-endpoint config seeds the resolved key |
 | [opencode](opencode.md) | read in place | `~/.config/opencode/AGENTS.md` | none | `OPENCODE_CONFIG_CONTENT` doc (or own auth) |
 | [Cline](cline.md) | read in place | `~/.agents/AGENTS.md` | none | `--key` argv flag |
 | [reasonix](reasonix.md) | read in place | `~/.config/reasonix/AGENTS.md` | none | env via `api_key_env` (`requiredEnv` export) |

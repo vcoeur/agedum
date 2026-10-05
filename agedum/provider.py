@@ -15,9 +15,9 @@ sourced the ``.env`` itself, so agedum never saw a token — this path reads the
 file (``${AGENTS_ENV_FILE:-~/.config/agents/.env}``) into the agedum process and sets
 the resolved values in the child environment.
 
-Resolution: ``agedum <value>`` where ``value`` is a **path** (it contains ``/`` or a
-recognised config extension; absolute as-is, else relative to CWD) or a **provider
-name** (resolved under ``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}``). A ref
+Resolution: ``agedum <value>`` resolves every relative config reference under
+``${AGENTS_PROVIDERS_DIR:-~/.config/agents/providers}``, including ``./`` and nested
+paths; absolute paths are used as-is. There is no CWD fallback. A ref
 with no recognised extension tries ``.json``, then ``.yaml``, then ``.yml``; an explicit
 ``.json`` that does not exist falls back to its ``.yaml`` sibling, so converted YAML
 bases keep their old JSON referrers working. The same rule resolves the ``agedum

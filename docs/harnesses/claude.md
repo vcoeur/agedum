@@ -52,18 +52,19 @@ Claude-specific config, not agent-neutral source, so they live in a `claude/` co
 global source root — `~/.config/agents/claude/settings.json` and
 `~/.config/agents/claude/scripts/`. At **global scope** agedum binds each **read-only** into
 the user config dir (`$CLAUDE_CONFIG_DIR/settings.json` + `/scripts/`), gated on the source
-existing: a host with no `claude/` overlay gets no binds and nothing changes.
+existing: a host with no `claude/` overlay gets no global settings/scripts binds.
 
-Two consequences of the read-only bind, both by design:
+The overlay content is **not copied into the real target files**: change it at the source
+and re-inject. The bound files are read-only even though a [sandbox](../provider.md#sandbox)
+grants the surrounding Claude state directory write access. Mountpoint preparation and
+Claude's sessions/auth can still write host paths; this is not a no-writes guarantee.
 
-- **agedum never writes into `~/.claude/`** — it bind-mounts, exactly as for `CLAUDE.md` and
-  skills. That is why the overlay is sourced from the writable `~/.config/agents/` root rather
-  than being copied straight into `~/.claude/`: under a [sandbox](../provider.md) launch (and
-  some managed environments) `~/.claude/` is mounted read-only, and a writer that targets it
-  fails with `EROFS`.
-- **Claude never rewrites user-scope `settings.json` in place** — change it at the source and
-  re-inject. Session-level permission grants still land in the project
-  `.claude/settings.local.json` (a separate, untracked layer), so this does not get in the way.
+**Do not rely on permission saves to `.claude/settings.local.json`.** When project source
+exists, automatic transcript hooks merge that untracked local file into another **read-only
+bind**. Its existing settings remain visible, but the overlaid file cannot be rewritten in
+place during the launch. If it is tracked, agedum skips this hook injection. Edit the real
+local settings outside the launched namespace; this page makes no promise about Claude's
+session-only permission behavior.
 
 The overlay files are typically shipped by [agentsconf](https://github.com/vcoeur/agentsconf);
 agedum only consumes whatever has landed under `~/.config/agents/claude/`.

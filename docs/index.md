@@ -1,6 +1,6 @@
 ---
 title: agedum — drive any agent CLI from one agent-neutral source
-description: agedum keeps a single AGENTS.md + .agents/skills/ source and renders it for whichever agent CLI you run, injecting the compiled files via a private mount namespace at launch — nothing is written into your real tree or $HOME.
+description: agedum keeps a single AGENTS.md + .agents/skills/ source and renders it for whichever agent CLI you run, injecting temporary context via a private mount namespace while keeping harness state and writable provider seeds on the host.
 ---
 
 # agedum
@@ -10,8 +10,8 @@ description: agedum keeps a single AGENTS.md + .agents/skills/ source and render
 > Latin *agedum* — "go on! / get going!"
 
 Agent CLIs each want their instructions and skills in their own place and format:
-Claude reads `CLAUDE.md` and `.claude/skills/`, kimi reads a project `AGENTS.md` but
-needs an `--agent-file` for user-scope instructions plus a `~/.kimi/skills/` tree, and
+Claude reads `CLAUDE.md` and `.claude/skills/`, Kimi Code reads a project `AGENTS.md` plus
+user-scope `~/.kimi-code/AGENTS.md` and `.kimi-code/skills/` trees, and
 the next one will be different again. `agedum` lets you keep **one** agent-neutral
 source and renders it for whichever harness you launch.
 
@@ -22,8 +22,9 @@ source and renders it for whichever harness you launch.
 At launch agedum compiles that source to the harness's native layout in a throwaway
 directory, then runs your command inside a **private mount namespace**
 ([bubblewrap](https://github.com/containers/bubblewrap)) where the compiled files
-appear at their expected paths — visible only to that process and its children, never
-written into your real tree or `$HOME`.
+appear at their expected paths — visible only to that process and its children. The
+read-only injected content is temporary; directory preparation, mountpoint stubs,
+writable provider seeds, and harness state can write host paths.
 
 ```bash
 # The normal way to launch: name a provider; agedum sets its model/auth env and
@@ -52,9 +53,12 @@ copy-pasting into each one's bespoke layout. `agedum` is the translation layer:
   travels with you; a [project](source-shape.md#scopes) source lives in the repo. agedum lands each
   at its own native location so the harness still sees them as user-scope vs
   project-scope — they are never silently merged.
-- **No footprint.** The compiled `CLAUDE.md` / skills exist only inside the launched
-  process's [mount namespace](internals.md). Your working tree and `$HOME` are
-  untouched; agedum refuses to overlay a git-tracked path.
+- **Temporary context, persistent state.** Compiled `CLAUDE.md` / skills are staged
+  temporarily and exposed at their target paths only inside the launched process's
+  [mount namespace](internals.md). Empty mountpoint stubs are swept when possible;
+  prepared directories, writable Kimi/Cline seeds and harness state can remain.
+  agedum refuses to overlay a git-tracked path; it is not a no-writes or confidentiality
+  boundary. [Write-confinement](wrapper.md#sandbox) is opt-in.
 
 ## How it fits together
 
@@ -62,7 +66,7 @@ copy-pasting into each one's bespoke layout. `agedum` is the translation layer:
 flowchart LR
   src["AGENTS.md + .agents/skills/<br/>(project + global)"] --> agedum
   agedum -->|"--wrapper claude"| cl["CLAUDE.md + .claude/skills/"]
-  agedum -->|"--wrapper kimi"| ki["AGENTS.md (native) + --agent-file + .kimi/skills/"]
+  agedum -->|"--wrapper kimi"| ki["AGENTS.md (native) + .kimi-code/skills/"]
   agedum -->|"--wrapper opencode"| oc["AGENTS.md (native) + .opencode/skills/"]
   agedum -->|"--wrapper cline"| cln["AGENTS.md (native) + .cline/skills/"]
   agedum -->|"--wrapper reasonix"| rx["AGENTS.md (native) + .reasonix/skills/"]
@@ -96,9 +100,10 @@ flowchart LR
 | reasonix | `--wrapper reasonix` | Implemented — project + global scope; provider mode |
 | aider  | `--wrapper aider`  | Implemented — instructions via `--read` (no skills); provider mode |
 | pi     | `--wrapper pi`     | Implemented — project + global scope; provider mode (custom endpoint + subagent routing) |
+| codex  | `--wrapper codex`  | Implemented — project + global scope; provider mode (custom endpoint + MCP) |
 
 [Provider mode](provider.md) (`agedum <provider-name>`) is the normal entry point; it
-launches a harness from a provider config JSON, resolving its env from a `.env`. Wrapper
+launches a harness from a provider config (JSON or versioned YAML), resolving its env from a `.env`. Wrapper
 mode (`agedum --wrapper <harness> -- <command>`) is the lower-level path it builds on.
 
 agedum is Linux-only and requires `bwrap`
@@ -110,7 +115,7 @@ launch.
 - [Install](install.md) — install, prerequisites, dev mode
 - [Source & scopes](source-shape.md) — the `AGENTS.md` + `.agents/skills/` layout, and the project vs global scopes
 - [Wrapper mode](wrapper.md) — run a command in the injected context; how each harness resolves
-- [Provider mode](provider.md) — launch a harness from a provider config JSON
+- [Provider mode](provider.md) — launch a harness from a provider config (JSON or YAML)
 - [Harnesses](harnesses/index.md) — one page per harness: wrapper resolution + provider config
 - [CLI reference](cli.md) — flags and invocation contract
 - [Internals](internals.md) — the mount-namespace launch and its safety rules

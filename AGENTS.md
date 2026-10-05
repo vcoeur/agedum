@@ -16,15 +16,18 @@ match); top-level skills keep their declared name.
   Global scope also injects agentsconf's **Claude overlay** — `~/.config/agents/claude/settings.json`
   + `~/.config/agents/claude/scripts/` → `~/.claude/settings.json` + `~/.claude/scripts/`, each
   read-only and gated on the source existing (`_inject_claude_overlay`). agentsconf ships those to
-  the writable config-agents root, never straight into `~/.claude` (read-only under a sandbox), so
-  agedum injects them the same way as `CLAUDE.md`/skills. `~/.claude.json` auth untouched.
+  the writable config-agents root, never into the read-only injected target files. The
+  surrounding Claude state directory is writable under a sandbox; individual overlays
+  are not. agedum injects them the same way as `CLAUDE.md`/skills. `~/.claude.json` auth untouched.
 - **kimi** — project `AGENTS.md` is read natively (kimi merges `AGENTS.md` from the
   project root down to the work dir into `KIMI_AGENTS_MD`), so agedum leaves it in
-  place. kimi has no user-scope `AGENTS.md`, so the global `AGENTS.md` is injected via a
-  transient `--agent-file` YAML (`extend: default`, `system_prompt_args.ROLE_ADDITIONAL`)
-  — appended only when a global scope exists; the two coexist. Skills are binds: global
-  → `~/.kimi/skills/`, project → `./.kimi/skills/` (both auto-read). Matches condash's
-  prior kimi layout; uniform with the Claude harness.
+  place. Kimi Code reads global instructions at `~/.kimi-code/AGENTS.md`, so agedum
+  binds the global source there, with no instruction flags. Skills are binds: global
+  → `~/.kimi-code/skills/`, project → `./.kimi-code/skills/` (both auto-read).
+  Global targets follow `KIMI_CODE_HOME`, including the isolated endpoint/model cache
+  home used for custom providers. `--run` maps to `kimi --prompt "<text>"` (no
+  `--print`) and drops interactive `--yolo`/`--auto`/`--plan`; agedum's interactive
+  `--prompt` is unsupported and fails loudly.
 - **opencode** — pure path-discovery (no flags). Project `AGENTS.md` is read natively at
   `./AGENTS.md`, so agedum leaves it in place. Global `AGENTS.md` → `<config>/AGENTS.md`;
   skills → `./.opencode/skills/` (project) + `<config>/skills/` (global), where
@@ -171,9 +174,9 @@ match); top-level skills keep their declared name.
   file** under `~/.pi/agent` (e.g. pi-subagents' `parallel`/`async` in
   `extensions/subagent/config.json`) — each entry deep-merged onto that file; paths must stay
   under `~/.pi/agent` (no `..`/absolute) and the agedum-managed `settings.json`/`models.json` are
-  rejected. **`requireExtensions`** (+ implicit `pi-subagents` when `subagentModel`/
+   rejected. **`config.requireExtensions`** (+ implicit `pi-subagents` when `subagentModel`/
   `piSettings.subagents` is set) warns at launch — via `Launch.warnings` — when a needed extension
-  is absent from the host (`settings.json packages` / `~/.pi/agent/npm/node_modules`); `strict:
+   is absent from the host (`settings.json packages` / `~/.pi/agent/npm/node_modules`); `config.strict:
   true` makes it fail-loud. agedum never installs (a host action). `agedum --prompt` seeds
   `pi "<text>"` (interactive); `--run` maps to `pi --print "<text>"`.
 
@@ -250,7 +253,7 @@ make dev-install   # uv sync --all-groups
 make test          # uv run pytest
 make lint          # ruff check + ruff format --check
 make format        # ruff --fix + format
-make run -- --version
+make run ARGS="--version"
 make docs           # build docs site (strict); docs-serve for live preview
 ```
 
@@ -392,9 +395,8 @@ Two modes, dispatched in `cli/main.py` on the first argument:
 - **wrapper** — `agedum --wrapper <harness> [--sandbox] [--rw-dir DIR]... [--dry-run] -- <command...>`.
   The low-level entry provider mode builds on. The flag before `--` chooses the virtual-file
   context (`claude` / `kimi` / `opencode` / `cline` / `reasonix` / `aider` / `pi` / `codex`);
-  everything after `--` is the child argv (some harnesses get extra flags appended — kimi's
-  `--agent-file`, aider's `--read` per scope; Claude, opencode, cline, reasonix, pi, and codex
-  are pure binds).
+   everything after `--` is the child argv (aider appends `--read` per scope, pointing at
+   read-only bound cache paths; the other harnesses use native discovery and binds).
   `--sandbox` switches to **write-confinement** (read-only host; `--rw-dir DIR`, repeatable,
   adds a writable dir and implies `--sandbox`). `--dry-run` prints the injected virtual files
   (and, under `--sandbox`, the writable set) without running. Context and command are decoupled.
@@ -499,7 +501,8 @@ override).
 
 - The namespace shares the **real `.git`**, so an in-namespace `git add`/`commit`
   writes to the real repo. `assert_safe` **refuses to inject over a git-tracked
-  path**; injected targets must be untracked + gitignored. The check runs over the
+   path**; injected targets must be untracked, with gitignore an operator prerequisite
+   rather than an enforced gate. The check runs over the
   **effective per-child binds** (the paths actually mounted), so a tracked but
   unrelated sibling in a skills dir never blocks a launch it could not endanger.
 - bwrap creates mountpoints on the real FS, leaving empty stubs after exit;
@@ -507,6 +510,12 @@ override).
   first, only if it didn't pre-exist) — including `safe_overrides` tmpfs shadows,
   whose mountpoints bwrap stubs the same way. Plain `--ro-bind`s mask any
   pre-existing dir; injected content never leaks (leftovers are 0-byte / empty).
+- This is not a no-writes contract: sandbox preparation creates exact injection parents
+  and harness state dirs that remain, writable Kimi/Cline provider seeds persist, and
+  harness state/transcript capture can write host files. Read-only injected content is
+  temporary; individual settings/config overlays stay read-only even in writable dirs.
+  Claude's automatic project transcript settings overlay also binds
+  `.claude/settings.local.json` read-only, so do not promise permission saves to that file.
 - **Write-confinement** (`--sandbox` / a provider `sandbox` block) replaces the default
   `--dev-bind / /` (full read-write host) with `--ro-bind / /` + `--dev /dev` + `--proc /proc`
   + `--tmpfs /tmp`, then `--bind`s only `writable_roots` (launch directory + the prepared exact
@@ -514,8 +523,8 @@ override).
   e.g. `~/.cline`, `~/.claude` — `run_virtualfs` `mkdir`s any that are missing so the bind lands)
   + the declared `read_write` paths, each glob-expanded — `*`/`?`/`[` resolves to every existing
   match, so `~/src/*` binds each child of `~/src`). Each harness declares its state dir in its
-  `compile_*` so persistence (sessions/settings/auth) works **by design**, not by an injection
-  happening to land under it. Two facts the recipe depends on, both validated empirically: bwrap
+  `compile_*` so writable state can persist, not by an injection happening to land under it;
+  individual settings/config binds stay read-only. Two facts the recipe depends on, both validated empirically: bwrap
   **cannot create a mount point on a read-only parent** (so every injection target's parent must
   be writable), and a `--ro-bind`/`--bind` **source resolves from the host** even when its
   path is tmpfs-shadowed in the namespace (so agedum's compiled files under `/tmp` still bind

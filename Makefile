@@ -9,8 +9,8 @@ install: ## Install dependencies into a uv-managed venv
 dev-install: ## Install dev dependencies too
 	uv sync --all-groups
 
-run: ## Run the agedum CLI (pass args after --, e.g. make run -- --version)
-	uv run agedum
+run: ## Run the agedum CLI (e.g. make run ARGS="--version")
+	uv run agedum $(ARGS)
 
 test: ## Run pytest
 	uv run pytest; RET=$$?; if [ $$RET -eq 5 ]; then exit 0; else exit $$RET; fi
