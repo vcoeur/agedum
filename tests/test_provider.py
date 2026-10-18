@@ -1171,6 +1171,59 @@ def test_opencode_agent_options():
     assert launch.command == ["opencode"]
 
 
+def test_opencode_standalone_private_server_flag():
+    launch = build_launch(
+        {"harness": "opencode", "config": {"standalone": True}},
+        base_env={},
+    )
+    assert launch.command == ["opencode", "--standalone"]
+
+
+def test_opencode_standalone_false_and_absent_keep_default_command():
+    explicit_off = build_launch(
+        {"harness": "opencode", "config": {"standalone": False}},
+        base_env={},
+    )
+    absent = build_launch({"harness": "opencode", "config": {}}, base_env={})
+    assert explicit_off.command == ["opencode"]
+    assert absent.command == ["opencode"]
+
+
+def test_opencode_standalone_rejects_non_boolean():
+    for bad_value in ("true", "yes", 1, 0, 1.5):
+        with pytest.raises(ProviderError, match="standalone"):
+            build_launch(
+                {"harness": "opencode", "config": {"standalone": bad_value}},
+                base_env={},
+            )
+
+
+def test_opencode_standalone_never_reaches_config_content():
+    launch = build_launch(
+        {"harness": "opencode", "config": {"standalone": True}},
+        base_env={},
+    )
+    payload = json.loads(launch.env["OPENCODE_CONFIG_CONTENT"])
+    assert "standalone" not in payload
+
+
+def test_opencode_standalone_extends_child_false_overrides_base_true(tmp_path):
+    # `standalone` rides the generic extends deep-merge like any scalar config key:
+    # an inheriting child keeps the base's `true`, and a child's explicit `false` wins.
+    _write_config(
+        tmp_path,
+        "base/oc.json",
+        {"abstract": True, "harness": "opencode", "config": {"standalone": True}},
+    )
+    inheriting = {"extends": "base/oc.json", "config": {}}
+    merged = load_merged_config(_write_config(tmp_path, "oc/inherits.json", inheriting), tmp_path)
+    assert build_launch(merged, base_env={}).command == ["opencode", "--standalone"]
+
+    opting_out = {"extends": "base/oc.json", "config": {"standalone": False}}
+    merged = load_merged_config(_write_config(tmp_path, "oc/off.json", opting_out), tmp_path)
+    assert build_launch(merged, base_env={}).command == ["opencode"]
+
+
 def test_opencode_flat_effort_alias():
     launch = build_launch(
         {

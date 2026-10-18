@@ -160,9 +160,9 @@ yaml boolean trap at config.extraEnv.FOO: unquoted on/off/yes/no parsed as boole
 ```
 
 Quote the value (`secretEnv: "on"`) and it passes through verbatim. Booleans that *are*
-booleans — `abstract: true`, `foldSystemMessages: true`, kimi's `thinking`, codex's
-`codexConfig` flags — are untouched. `${VAR}` placeholders are never interpolated by the YAML
-reader; they survive verbatim exactly as in JSON.
+booleans — `abstract: true`, `foldSystemMessages: true`, kimi's `thinking`, opencode's
+`standalone`, codex's `codexConfig` flags — are untouched. `${VAR}` placeholders are never
+interpolated by the YAML reader; they survive verbatim exactly as in JSON.
 
 ## Config features by engine version { #engine-versions }
 
