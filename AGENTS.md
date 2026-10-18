@@ -35,6 +35,9 @@ match); top-level skills keep their declared name.
   searches those skills dirs before the project's raw `.agents/skills/`, so the
   overlaid (`SKILL.opencode.md`) copy wins. Matches condash's
   opencode layout; uniform with the Claude harness, no `extra_args`.
+  **`standalone`** (config key, boolean) launches `opencode --standalone` — a private
+  per-launch server instead of the shared background service (agentsconf's OC pool
+  sets it fleet-wide); absent or `false` keeps the default command.
   **`failover`** (top-level config key, sibling of `requiredEnv`) starts a launch-bound
   `FailoverProxy` (`proxy.py`) and rewrites the routed providers' `options.baseURL` to
   `<proxy>/oc/<id>` in `OPENCODE_CONFIG_CONTENT`: on an admission wall (429/402/limit

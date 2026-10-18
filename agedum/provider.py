@@ -946,7 +946,7 @@ def _load_yaml_document(raw: str, path: Path) -> tuple[dict, str]:
 # endpoint URLs, auth styles, enum values (cline's ``compaction: off``, reasonix's
 # ``autoPlan: on``). Deliberately absent: the keys a harness consumes as a boolean
 # (``abstract``, claude's ``foldSystemMessages``, kimi's ``thinking``/``plan``/``yolo``,
-# opencode's ``disableExternalSkills``) and the verbatim passthroughs (claude
+# opencode's ``disableExternalSkills``/``standalone``) and the verbatim passthroughs (claude
 # ``settings``, opencode ``opencodeConfig``, pi ``piSettings``/``piExtensionConfig``,
 # codex ``codexConfig``) where a boolean is a legitimate value.
 _STRING_CONFIG_KEYS = frozenset(
@@ -3251,6 +3251,13 @@ def _opencode_env(
     env: dict[str, str] = {}
     if block.get("disableExternalSkills") is True:
         env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    # `standalone` launches a private per-launch server instead of the shared background
+    # service; boolean-consumed like `disableExternalSkills`, so it stays out of the
+    # OPENCODE_CONFIG_CONTENT document.
+    standalone = block.get("standalone")
+    if standalone is not None and not isinstance(standalone, bool):
+        raise ProviderError(f"opencode config `standalone` must be a boolean, got {standalone!r}")
+    command = ["opencode", "--standalone"] if standalone else ["opencode"]
     document = _opencode_config_doc(block)
     for provider_def in _provider_defs(block.get("providerDef")):
         document = _apply_provider_def(document, provider_def, base_env)
@@ -3264,7 +3271,7 @@ def _opencode_env(
         # every `*…` guard ahead of the alphabetic allows and silently inverted that —
         # `git log … | sh` matched the allow last and was permitted. Emit authored order.
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(document)
-    return env, [], ["opencode"], ()
+    return env, [], command, ()
 
 
 # The provider id agedum stores for a generated custom-endpoint cline launcher. cline ships

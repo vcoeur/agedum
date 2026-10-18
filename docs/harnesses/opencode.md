@@ -67,6 +67,7 @@ env var; no file written):
 |---|---|
 | `model` | `model` field of `OPENCODE_CONFIG_CONTENT` |
 | `disableExternalSkills` | `OPENCODE_DISABLE_EXTERNAL_SKILLS=1` |
+| `standalone` | run `opencode --standalone` — a private per-launch server instead of the shared background service; absent or `false` keeps the default command |
 | `defaultOptions.{reasoningEffort,textVerbosity,reasoningSummary}` | the default model's `provider.<id>.models.<model>.options` |
 | `effortLevel` (flat alias) | the default model's `reasoningEffort` (explicit `defaultOptions.reasoningEffort` wins) |
 | `agentOptions[]` | per-agent `agent.<name>` model + options; `primary: true` sets `mode: "primary"` for custom (non-built-in) agents |
