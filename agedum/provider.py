@@ -499,6 +499,7 @@ class FailoverPlan(NamedTuple):
     base_url: str
     routes: tuple[str, ...]
     capability_env: str | None = None
+    wait_enabled: bool = False
 
 
 def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
@@ -3263,6 +3264,20 @@ def _opencode_env(
         document = _apply_provider_def(document, provider_def, base_env)
     if failover is not None:
         document = _apply_failover_routes(document, failover)
+        if failover.wait_enabled:
+            plugins = list(document.get("plugins") or [])
+            plugin_path = str(Path(__file__).resolve().parent / "assets" / "opencode")
+            plugin_targets = []
+            for entry in [*(document.get("plugin") or []), *plugins]:
+                if isinstance(entry, dict):
+                    plugin_targets.append(entry.get("package"))
+                elif isinstance(entry, list) and entry:
+                    plugin_targets.append(entry[0])
+                else:
+                    plugin_targets.append(entry)
+            if plugin_path not in plugin_targets:
+                plugins.append(plugin_path)
+            document["plugins"] = plugins
     if document:
         # Key order is semantic, never cosmetic: opencode evaluates a permission map in
         # config key insertion order and keeps the *last* matching rule, so the shipped

@@ -247,10 +247,9 @@ The optional `wait` sub-block opts a launch into **wait-for-the-limit-reset**. W
 chain exhaustion returns the last upstream error verbatim (native retry/death behaviour).
 With it, a *waitable wall* at **true exhaustion** — the walk reached the end of its
 attempts, never a `maxWalk` cap break, and never the proxy's own unreachable-upstream 502 —
-is answered with a **retryable `429 + Retry-After`** instead: opencode's own session-level
-retry sleeps exactly that long and re-issues the same request through the proxy, which
-re-walks from scratch. One assistant step bridges ≈5× the emitted `Retry-After` (opencode
-retries 5 times per step; the budget resets each step).
+is answered with **`429 + Retry-After`** instead. For retryable failures, opencode's own
+session-level retry sleeps and re-issues the same request through the proxy, which re-walks
+from scratch. The harness still owns error classification and the finite attempt budget.
 
 ```json
 "failover": {
@@ -275,14 +274,14 @@ retries 5 times per step; the budget resets each step).
   Any other waitable wall is forged: status line `429`, the captured headers replayed with
   exactly one `Retry-After` (the computed reset) replacing any captured one, `Content-Length`
   recomputed, and the **original upstream body verbatim** (the user's error display
-  survives). A 402 balance wall becomes a retryable 429; a headerless 429 stops dying
-  after ~65 s. Everything else — no `wait` key, a non-wall, a cap break, a reset beyond
+  survives). A 402 wall becomes HTTP 429; retryable headerless walls gain an explicit
+  retry delay. Everything else — no `wait` key, a non-wall, a cap break, a reset beyond
   the cap — is the silent verbatim passthrough, byte-identical to the pre-`wait` proxy.
 
 **The wait-only shape.** With `wait` present, `chains` becomes optional. A chainless
 launcher (`chains` absent or empty) walks its primary alone: the wall reaches true
-exhaustion and the forge fires, so the session waits for the model it was launched with
-instead of dying. The engagement is uniform — a chains-bearing launcher's *unmapped* model
+exhaustion and the forge fires, allowing the harness to wait for the original model on a
+retryable failure. The engagement is uniform — a chains-bearing launcher's *unmapped* model
 also walks its primary alone under `wait` (a model with no fallback has exactly one rung
 worth waiting for); without `wait`, an unmapped model still transparent-forwards verbatim.
 A chainless walk is never pinned, and after a wait-retry succeeds on the primary nothing
@@ -298,6 +297,37 @@ on the first primary 200 after a forge, `wait cleared — primary answered after
 authored `failoverIntent.wait` key (unknown intent keys are ignored, no error) — the
 launcher runs without wait. Configs start rolling out only once the fleet is past that
 floor.
+
+#### Conditional continuation reminder (OpenCode V2)
+
+Wait-enabled launches also inject the separate `agedum.recovery-continuation` plugin.
+It adds this constant instruction to the outgoing system context **before every agent-loop
+model call**, for both main and worker agents:
+
+> If this task resumes after a temporary provider-limit wait, continue the original task
+> from its recorded state. Do not treat an earlier usage-limit error as a permanent block
+> or as a review result. Reconcile unfinished worker work before retrying it; do not repeat
+> completed side effects. This instruction does not authorize changing provider/model or
+> bypassing permissions/review.
+
+The instruction is conditional, not a claim that recovery was observed. It does not inspect
+the proxy's shared wait state, create prompts or synthetic messages, replay tools, change
+retry/failover policy, or mark reviews complete. Title, compaction and transient generation
+requests do not run the context hook. Persisted conversation messages and tool definitions
+are unchanged; HTTP/SSE bytes are not modified by the plugin.
+
+The plugin requires the **V2 plugin API**, validated with **OpenCode 2.0.32**; V1 cannot run
+it. No additional npm dependency is installed: the bundled plain-JavaScript definition
+loads from a directory with an `index.js` entrypoint. Existing compatible `plugin` entries
+and native `plugins` entries are both retained, and the reminder is independent of
+`emitTranscript`. Launches without effective `wait` do not receive this plugin.
+
+Automatic recovery remains limited by the harness. In the localhost V2 2.0.32 check, transient
+rate-limit bodies recovered after both headered 429 and forged 402 responses, but an error
+body saying `usage limit` was classified as terminal `provider.quota` despite HTTP 429 and
+`Retry-After`. An old worker failure is not current evidence of a permanent pool failure;
+the parent must reconcile partial work before retrying the unfinished task when execution
+resumes. A successful main request does not establish worker availability or completion.
 
 ### `emitTranscript` — in-band transcript capture (default on) { #emittranscript }
 

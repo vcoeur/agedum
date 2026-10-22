@@ -1055,4 +1055,5 @@ def _maybe_failover_proxy(config: dict, base_env: dict[str, str]) -> Iterator[Fa
                 base_url=proxy.base_url,
                 routes=tuple(spec["routes"]),
                 capability_env=CAPABILITY_ENV,
+                wait_enabled=spec.get("wait") is not None,
             )

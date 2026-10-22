@@ -1,0 +1,8 @@
+{
+  "name": "agedum-recovery-continuation",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./recovery-continuation.js"
+  }
+}
