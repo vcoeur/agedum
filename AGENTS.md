@@ -57,7 +57,17 @@ match); top-level skills keep their declared name.
    bridges the window; with `wait` present `chains` becomes optional (the wait-only
    shape — an unmapped model walks its primary alone instead of transparent-forwarding,
    so a wall is waitable there too), and the first primary 200 after a wait logs
-   `wait cleared`. Absent key → no proxy, byte-identical
+    `wait cleared`. Wait-enabled launches also inject a separate, dependency-free
+    **OpenCode V2 context plugin** (validated with 2.0.32): before every main/worker
+    agent-loop call, it appends one constant conditional instruction to continue the
+    original task after a temporary limit wait. It does not observe recovery, change
+    persisted messages/tools, retry workers, or touch title/compaction/generate calls.
+    The bundled directory has an `index.js` entrypoint for V2's local plugin loader;
+    keep the existing V1 transcript plugin separate and unchanged. Native `plugins`
+    and compatible `plugin` entries are both preserved. The reminder does not make
+    terminal quota failures retryable: V2 2.0.32 can stop on `provider.quota` despite
+    a 429/Retry-After; the parent must reconcile unfinished work before a later retry.
+    Absent key → no proxy, byte-identical
     config (the rollback switch); without `wait` every failover behaviour is
    byte-identical too. Engines older than the release introducing `wait` silently drop
    an authored `failoverIntent.wait` key (unknown intent keys are ignored) — the
