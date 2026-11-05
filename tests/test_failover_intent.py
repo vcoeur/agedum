@@ -333,11 +333,14 @@ def test_zero_surviving_chains_with_wait_emits_the_block(tmp_path):
     assert failover["vision"] == {"openai/sol": True}
 
 
-def test_wait_is_copied_verbatim_into_the_derived_block(tmp_path):
+@pytest.mark.parametrize("retry_messages", [None, ["usage limit", "rate limit"]])
+def test_wait_is_copied_verbatim_into_the_derived_block(tmp_path, retry_messages):
     # `wait` joins `detect`/`maxWalk` as authored data copied verbatim — never
     # interpreted at expansion; launch-time `failover_spec` polices it.
     _write_catalogue(tmp_path)
     wait = {"maxWaitHours": 6, "probeSeconds": 1800}
+    if retry_messages is not None:
+        wait["retryMessages"] = retry_messages
     config = _config(
         {"m": {"mode": "primary", "model": "sol@high"}},
         failover_intent={
@@ -348,7 +351,7 @@ def test_wait_is_copied_verbatim_into_the_derived_block(tmp_path):
         },
     )
     failover = _expand(config, tmp_path)["failover"]
-    assert failover["wait"] == {"maxWaitHours": 6, "probeSeconds": 1800}
+    assert failover["wait"] == wait
     assert failover["chains"] == {"openai/sol@high": ["glm-p/glm-x@high"]}
 
 

@@ -4,6 +4,10 @@ import os
 import shutil
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -11,6 +15,7 @@ import pytest
 
 from agedum.cli.main import _maybe_failover_proxy
 from agedum.provider import FailoverPlan, build_launch, with_prompt
+from agedum.proxy import _retry_after_seconds
 
 PLUGIN_DIRECTORY = Path(__file__).resolve().parents[1] / "agedum/assets/opencode"
 PLUGIN = PLUGIN_DIRECTORY / "recovery-continuation.js"
@@ -99,6 +104,243 @@ def test_chained_failover_without_wait_does_not_enable_reminder():
             build_launch(config, {"FAKE_KEY": "fake"}, failover=plan).env["OPENCODE_CONFIG_CONTENT"]
         )
     assert "plugins" not in document
+
+
+def test_retry_plugin_options_are_proxy_scoped_and_replace_only_owned_entries():
+    config = launcher_config("http://127.0.0.1:1")
+    config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+    config["config"]["opencodeConfig"].update(
+        plugin=[str(PLUGIN_DIRECTORY), "user-legacy"],
+        plugins=[{"package": str(PLUGIN_DIRECTORY), "options": {}}, "user-native"],
+    )
+    original = copy.deepcopy(config)
+    with _maybe_failover_proxy(config, {"FAKE_KEY": "fake"}) as plan:
+        document = json.loads(
+            build_launch(config, {"FAKE_KEY": "fake"}, failover=plan).env["OPENCODE_CONFIG_CONTENT"]
+        )
+        assert document["plugin"] == ["user-legacy"]
+        assert document["plugins"] == [
+            "user-native",
+            {
+                "package": str(PLUGIN_DIRECTORY),
+                "options": {
+                    "baseURL": plan.base_url,
+                    "routes": list(plan.routes),
+                    "retryMessages": ["usage limit", "rate limit"],
+                    "maxWaitHours": 8,
+                },
+            },
+        ]
+        assert plan.capability_env not in json.dumps(document["plugins"])
+    assert config == original
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node exercises the JS plugin")
+def test_retry_hooks_scope_consume_expire_and_fail_closed_on_overlap():
+    script = r"""
+      import assert from 'node:assert/strict';
+      const plugin = (await import(process.argv[1])).default;
+      const hooks = new Map();
+      await plugin.setup({options:{baseURL:'http://127.0.0.1:1234', routes:['fake'],
+        maxWaitHours:1/3600, retryMessages:['usage limit', 'rate limit']},
+        session:{hook:async(name, callback)=>hooks.set(name, callback)}});
+      assert.deepEqual([...hooks.keys()], ['context','http.request','http.response','retry']);
+      const base = {sessionID:'main',agent:'worker',model:{providerID:'fake',id:'m'},
+        kind:'primary',request:new Request('http://127.0.0.1:1234/oc/fake/chat/completions')};
+      const response = (overrides={}) => ({...base,
+        response:new Response('usage limit',{status:429,headers:{'retry-after':'1',
+          'x-agedum-retry-eligible':'1'}}), ...overrides});
+      const retry = (overrides={}) => ({...base,error:{status:429,type:'provider.quota',
+        message:'usage limit'},attempt:2,decision:{retry:false},...overrides});
+      async function observed(overrides={}) {
+        const event=response(overrides);
+        await hooks.get('http.request')(event); await hooks.get('http.response')(event);
+      }
+      async function unchanged(event) {
+        const before=structuredClone(event.decision);
+        await hooks.get('retry')(event); assert.deepEqual(event.decision,before);
+      }
+      await observed();
+      for (const overrides of [{sessionID:'other'}, {agent:'other'},
+        {model:{providerID:'fake',id:'other'}}, {model:{providerID:'other',id:'m'}},
+        {model:{providerID:'fake',id:'m',variant:'high'}}]) await unchanged(retry(overrides));
+      const accepted=retry(); await hooks.get('retry')(accepted);
+      assert.deepEqual(accepted.decision,{retry:true,delay:1000});
+      await unchanged(retry());
+      // Native generic rate-limit retries must also use the accepted one-second hint.
+      await observed(); const generic=retry({error:{status:429,type:'provider.rate-limit',
+        message:'rate limit'},decision:{retry:true,delay:9000}});
+      await hooks.get('retry')(generic); assert.equal(generic.decision.delay,1000);
+      const realNow=Date.now; Date.now=()=>Date.UTC(2026,10,5,0,0,0);
+      await observed({response:new Response('usage limit',{status:429,headers:{
+        'x-agedum-retry-eligible':'1','retry-after':'Thu, 05 Nov 2026 00:00:01 GMT'}})});
+      const dated=retry(); await hooks.get('retry')(dated);
+      assert.deepEqual(dated.decision,{retry:true,delay:1000}); Date.now=realNow;
+      for (const kind of ['title','generate','compaction']) {
+        await observed({kind}); await unchanged(retry());
+      }
+      for (const headers of [{}, {'x-agedum-retry-eligible':'spoof','retry-after':'1'},
+        {'x-agedum-retry-eligible':'1','retry-after':'2'},
+        {'x-agedum-retry-eligible':'1','retry-after':'NaN'},
+        {'x-agedum-retry-eligible':'1','retry-after':'-1'},
+        {'x-agedum-retry-eligible':'1','retry-after':'1, 1'}]) {
+        await observed({response:new Response('usage limit',{status:429,headers})});
+        await unchanged(retry());
+      }
+      await observed({response:new Response('usage limit',{status:402,headers:{
+        'retry-after':'1','x-agedum-retry-eligible':'1'}})}); await unchanged(retry());
+      for (const url of ['http://localhost:1234/oc/fake/chat/completions',
+        'http://127.0.0.1:1235/oc/fake/chat/completions',
+        'http://127.0.0.1:1234/oc/other/chat/completions']) {
+        await observed({request:new Request(url)}); await unchanged(retry());
+      }
+      for (const message of ['usage limit: balance', 'rate limit: auth',
+        'usage limit: billing', 'usage limit: configuration', 'quota']) {
+        await observed(); await unchanged(retry({error:{status:429,message}}));
+        await unchanged(retry());
+      }
+      await observed(); await unchanged(retry({error:{status:402,message:'usage limit'}}));
+      await unchanged(retry());
+      await observed(); await unchanged(retry({error:{status:429,message:'usage limit',
+        type:'provider.authentication'}})); await unchanged(retry());
+      await observed(); const now=Date.now; Date.now=()=>now()+31_000;
+      await unchanged(retry()); Date.now=now;
+      // A new response without a tracked request cannot leave or manufacture a marker.
+      await observed(); await hooks.get('http.response')(response()); await unchanged(retry());
+      const overlap={...base,sessionID:'overlap'};
+      await hooks.get('http.request')(overlap); await hooks.get('http.request')(overlap);
+      await hooks.get('http.response')(response(overlap));
+      await hooks.get('http.response')(response(overlap));
+      await unchanged(retry(overlap));
+      await observed(overlap); await unchanged(retry(overlap));
+      // Overlap with an auxiliary flow is equally ambiguous because retry omits kind.
+      const mixed={...base,sessionID:'mixed'};
+      await hooks.get('http.request')(mixed);
+      await hooks.get('http.request')({...mixed,kind:'generate'});
+      await hooks.get('http.response')(response(mixed)); await unchanged(retry(mixed));
+      // A response followed by another request before consumption is also unsafe.
+      const stale={...base,sessionID:'stale'};
+      await observed(stale); await hooks.get('http.request')(stale);
+      await hooks.get('http.response')(response(stale)); await unchanged(retry(stale));
+      // A transport failure without response never picks up an older marker.
+      const transport={...base,sessionID:'transport'};
+      await hooks.get('http.request')(transport); await unchanged(retry(transport));
+      await observed(transport); await unchanged(retry(transport));
+      // Fail-closed keys do not poison independent sessions.
+      await observed({sessionID:'independent'}); const independent=retry({sessionID:'independent'});
+      await hooks.get('retry')(independent); assert.equal(independent.decision.retry,true);
+    """
+    subprocess.run(["node", "--input-type=module", "-e", script, PLUGIN.as_uri()], check=True)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node exercises the JS plugin")
+@pytest.mark.parametrize(
+    "style,timezone,year",
+    [
+        ("imf", "UTC", 2026),
+        ("rfc850", "UTC", 2026),
+        ("asctime", "UTC", 2026),
+        ("asctime", "Etc/GMT+7", 2026),
+        ("rfc850", "UTC", 2068),
+        ("rfc850", "UTC", 1969),
+    ],
+)
+def test_proxy_accepted_http_date_reaches_retry_hook_in_utc(monkeypatch, style, timezone, year):
+    now = datetime(year, 11, 5, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("agedum.proxy.datetime", FrozenDatetime)
+    hint = {
+        "imf": now.strftime("%a, %d %b %Y 00:00:01 GMT"),
+        "rfc850": now.strftime("%A, %d-%b-%y 00:00:01 GMT"),
+        "asctime": now.strftime("%a %b ") + f"{now.day:2d}" + now.strftime(" 00:00:01 %Y"),
+    }[style]
+    with RecoveryUpstream(429, wall_message="usage limit", retry_after=hint) as upstream:
+        config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
+        config["failover"]["wait"].update(maxWaitHours=2 / 3600, retryMessages=["usage limit"])
+        with _maybe_failover_proxy(config, {"FAKE_KEY": "fake"}) as plan:
+            request_url = f"{plan.base_url}/oc/fake/chat/completions"
+            request = urllib.request.Request(
+                request_url,
+                data=json.dumps(
+                    {
+                        "model": "main",
+                        "messages": [{"role": "system", "content": "MAIN-ONLY"}],
+                    }
+                ).encode(),
+                headers={"X-Agedum-Proxy-Capability": os.environ[plan.capability_env]},
+            )
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request, timeout=5)
+            response = caught.value
+            assert response.code == 429
+            assert response.read() == b'{"error": {"message": "usage limit"}}'
+            assert response.headers["Retry-After"] == hint
+            assert response.headers["X-Agedum-Retry-Eligible"] == "1"
+            assert _retry_after_seconds(list(response.headers.items())) == 1
+            fixture = {
+                "options": {
+                    "baseURL": plan.base_url,
+                    "routes": ["fake"],
+                    "retryMessages": ["usage limit"],
+                    "maxWaitHours": 2 / 3600,
+                },
+                "url": request_url,
+                "headers": dict(response.headers),
+                "now": now.timestamp() * 1000,
+                "timezone": timezone,
+            }
+    script = r"""
+      import assert from 'node:assert/strict';
+      const fixture=JSON.parse(process.argv[2]);
+      Date.now=()=>fixture.now;
+      if(fixture.timezone==='Etc/GMT+7')
+        assert.equal(new Date(fixture.now).getTimezoneOffset(),420);
+      const hooks=new Map();
+      const plugin=(await import(process.argv[1])).default;
+      await plugin.setup({options:fixture.options,
+        session:{hook:async(name,callback)=>hooks.set(name,callback)}});
+      const base={sessionID:'date-session',agent:'main',model:{providerID:'fake',id:'main'},
+        kind:'primary',request:new Request(fixture.url)};
+      const retry=()=>({...base,error:{status:429,type:'provider.quota',message:'usage limit'},
+        attempt:2,decision:{retry:false}});
+      const observe=async headers=>{
+        await hooks.get('http.request')(base);
+        await hooks.get('http.response')({...base,response:new Response('usage limit',
+          {status:429,headers})});
+      };
+      await observe(fixture.headers);
+      const accepted=retry(); await hooks.get('retry')(accepted);
+      assert.deepEqual(accepted.decision,{retry:true,delay:1000});
+      const consumed=retry(); await hooks.get('retry')(consumed);
+      assert.deepEqual(consumed.decision,{retry:false});
+      const immediateHeaders=new Headers(fixture.headers);
+      immediateHeaders.set('retry-after',immediateHeaders.get('retry-after').replace(':01',':00'));
+      await observe(immediateHeaders); const immediate=retry(); await hooks.get('retry')(immediate);
+      assert.deepEqual(immediate.decision,{retry:true,delay:0});
+      await observe(fixture.headers); Date.now=()=>fixture.now+31_000;
+      const stale=retry(); await hooks.get('retry')(stale);
+      assert.deepEqual(stale.decision,{retry:false}); Date.now=()=>fixture.now;
+      for(const hint of ['Thu, 31 Feb 2026 00:00:01 GMT',
+        'Thursday, 31-Feb-26 00:00:01 GMT','Thu Feb 31 00:00:01 2026',
+        'Thu Nov  5 00:00:01 2026 GMT', 'November 5, 2026 00:00:01',
+        'Thursday, 05-Nov-26 00:00:99 GMT','Thu Nov  5 25:00:01 2026',
+        'Fri, 05 Nov 9999 00:00:01 GMT', 'Friday, 05-Nov-99 00:00:01 GMT']) {
+        if(hint.startsWith('Friday,') && fixture.now>Date.UTC(2000,0,1)) continue;
+        const headers=new Headers(fixture.headers); headers.set('retry-after',hint);
+        await observe(headers); const ignored=retry(); await hooks.get('retry')(ignored);
+        assert.deepEqual(ignored.decision,{retry:false},hint);
+      }
+    """
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script, PLUGIN.as_uri(), json.dumps(fixture)],
+        env={"PATH": os.environ["PATH"], "TZ": timezone},
+        check=True,
+    )
 
 
 @pytest.mark.skipif(
@@ -219,10 +461,17 @@ def sse_frames(delta, finish):
 
 class RecoveryUpstream:
     def __init__(
-        self, status, *, wall_message="temporary rate limit", persistent=False, worker_error=False
+        self,
+        status,
+        *,
+        wall_message="temporary rate limit",
+        persistent=False,
+        worker_error=False,
+        retry_after="1",
     ):
         self.status = status
         self.requests = []
+        self.times = []
         self.admitted = set()
         self.frames = []
         fixture = self
@@ -231,6 +480,7 @@ class RecoveryUpstream:
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fixture.requests.append(body)
+                fixture.times.append(time.monotonic())
                 system = "\n".join(
                     message["content"]
                     for message in body["messages"]
@@ -249,7 +499,9 @@ class RecoveryUpstream:
                     self.send_response(fixture.status)
                     self.send_header("Content-Type", "application/json")
                     if fixture.status == 429:
-                        self.send_header("Retry-After", "1")
+                        self.send_header(
+                            "Retry-After", retry_after() if callable(retry_after) else retry_after
+                        )
                 else:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -319,10 +571,14 @@ def isolated_environment(root):
     }
 
 
-def run_installed(config, root):
+def run_installed(config, root, *, trailing_plugin=None):
     with _maybe_failover_proxy(config, {"FAKE_KEY": "fake"}) as plan:
         launch = build_launch(config, {"FAKE_KEY": "fake"}, failover=plan)
         environment = {**isolated_environment(root), **launch.env}
+        if trailing_plugin is not None:
+            document = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
+            document.setdefault("plugins", []).append(str(trailing_plugin))
+            environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(document)
         # The parent owns the ephemeral capability; only this isolated child inherits it.
         environment[plan.capability_env] = os.environ[plan.capability_env]
         return subprocess.run(
@@ -344,10 +600,25 @@ def run_installed(config, root):
     os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
     reason="Set AGEDUM_TEST_OPENCODE=1 for the installed V2 localhost integration test",
 )
-@pytest.mark.parametrize("wall_status", [429, 402])
-def test_installed_v2_loader_main_worker_recovery_and_auxiliary_exclusion(tmp_path, wall_status):
-    with RecoveryUpstream(wall_status) as upstream:
+@pytest.mark.parametrize(
+    "wall_status,wall_message,explicit",
+    [
+        (429, "temporary rate limit", False),
+        (402, "temporary rate limit", False),
+        (429, "usage limit", True),
+        (429, "temporary rate limit", True),
+    ],
+)
+def test_installed_v2_loader_main_worker_recovery_and_auxiliary_exclusion(
+    tmp_path,
+    wall_status,
+    wall_message,
+    explicit,
+):
+    with RecoveryUpstream(wall_status, wall_message=wall_message) as upstream:
         config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
+        if explicit:
+            config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
         # These test plugins prove V2 unions both config spellings without moving user entries.
         plugin_paths = []
         for name in ("legacy", "native"):
@@ -369,7 +640,8 @@ def test_installed_v2_loader_main_worker_recovery_and_auxiliary_exclusion(tmp_pa
         config["config"]["opencodeConfig"].update(
             plugin=[plugin_paths[0]], plugins=[plugin_paths[1]]
         )
-        result = run_installed(config, tmp_path)
+        telemetry = policy_plugin(tmp_path)
+        result = run_installed(config, tmp_path, trailing_plugin=telemetry)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "LOCAL-MAIN-OK" in result.stdout, result.stdout + result.stderr
         assert "LOCAL-WORKER-OK" in result.stdout, result.stdout + result.stderr
@@ -402,6 +674,22 @@ def test_installed_v2_loader_main_worker_recovery_and_auxiliary_exclusion(tmp_pa
             == 1
         )
         assert auxiliary_requests  # the real title flow must not receive the reminder
+        assert (
+            sum(message["role"] == "tool" for body in main_requests for message in body["messages"])
+            == 1
+        )
+        if explicit:
+            decisions = read_policy_events(tmp_path)
+            assert len(decisions) == 2
+            assert all(event["decision"] == {"retry": True, "delay": 1000} for event in decisions)
+            for model in ("main", "worker"):
+                timestamps = [
+                    stamp
+                    for body, stamp in zip(upstream.requests, upstream.times, strict=True)
+                    if body["model"] == model
+                    and any("-ONLY" in message["content"] for message in body["messages"])
+                ]
+                assert 0.9 <= timestamps[1] - timestamps[0] < 3, timestamps
         print(
             f"V2 localhost {wall_status}: main={len(main_requests)} worker={len(worker_requests)} "
             f"auxiliary={len(auxiliary_requests)}; "
@@ -413,11 +701,30 @@ def test_installed_v2_loader_main_worker_recovery_and_auxiliary_exclusion(tmp_pa
     os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
     reason="Set AGEDUM_TEST_OPENCODE=1 for the installed V2 localhost integration test",
 )
-@pytest.mark.parametrize("wall_message", ["usage limit", "temporary rate limit"])
-def test_installed_v2_terminal_or_exhausted_wall_is_not_hidden(tmp_path, wall_message):
-    with RecoveryUpstream(429, wall_message=wall_message, persistent=True) as upstream:
+@pytest.mark.parametrize(
+    "wall_status,wall_message,explicit",
+    [
+        (429, "usage limit", False),
+        (429, "temporary rate limit", False),
+        (429, "usage limit", True),
+        (429, "temporary rate limit", True),
+        (429, "usage limit: insufficient balance", True),
+        (429, "usage limit: authentication failed", True),
+        (402, "usage limit", True),
+        (401, "usage limit", True),
+        (403, "usage limit", True),
+    ],
+)
+def test_installed_v2_terminal_or_exhausted_wall_is_not_hidden(
+    tmp_path, wall_status, wall_message, explicit
+):
+    with RecoveryUpstream(wall_status, wall_message=wall_message, persistent=True) as upstream:
         config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
-        result = run_installed(config, tmp_path)
+        if explicit:
+            config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+        # An explicit test-only veto replaces the brittle native-cap/90s-timeout assertion.
+        # This measures hook ordering and finite fixture policy, not OpenCode's native cap.
+        result = run_installed(config, tmp_path, trailing_plugin=policy_plugin(tmp_path, veto=3))
     assert result.returncode == 1, result.stdout + result.stderr
     assert "LOCAL-MAIN-OK" not in result.stdout
     assert "LOCAL-WORKER-OK" not in result.stdout
@@ -433,12 +740,183 @@ def test_installed_v2_terminal_or_exhausted_wall_is_not_hidden(tmp_path, wall_me
     assert requests
     assert all(body == requests[0] for body in requests)
     assert REMINDER in requests[0]["messages"][0]["content"]
-    if wall_message == "usage limit":
-        assert errors[0]["type"] == "provider.quota"
+    events = read_policy_events(tmp_path)
+    if wall_status != 429 or (wall_message == "usage limit" and not explicit):
         assert len(requests) == 1
+        assert events[0]["decision"] == {"retry": False}
+    elif wall_message in ("usage limit", "temporary rate limit") and explicit:
+        assert len(requests) == 2
+        assert all(event["decision"] == {"retry": True, "delay": 1000} for event in events)
+        assert events[-1]["attempt"] == 3
+    elif "balance" in wall_message or "authentication" in wall_message:
+        assert len(requests) == 1
+        assert events[0]["decision"] == {"retry": False}
     else:
-        assert len(requests) > 1  # subprocess timeout bounds the unchanged native retry policy
+        assert len(requests) == 2
+        assert events[-1]["attempt"] == 3
     print(f"V2 localhost {wall_message!r}: {len(requests)} main attempts, exit 1")
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for the installed V2 localhost integration test",
+)
+@pytest.mark.parametrize("style", ["rfc850", "asctime"])
+def test_installed_v2_obsolete_http_date_main_and_worker_recovery(tmp_path, style):
+    def next_reset():
+        when = datetime.now(UTC) + timedelta(seconds=2)
+        if style == "rfc850":
+            return when.strftime("%A, %d-%b-%y %H:%M:%S GMT")
+        return when.strftime("%a %b ") + f"{when.day:2d}" + when.strftime(" %H:%M:%S %Y")
+
+    with RecoveryUpstream(429, wall_message="usage limit", retry_after=next_reset) as upstream:
+        config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
+        config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+        result = run_installed(config, tmp_path, trailing_plugin=policy_plugin(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LOCAL-MAIN-OK" in result.stdout
+    assert "LOCAL-WORKER-OK" in result.stdout
+    decisions = read_policy_events(tmp_path)
+    assert len(decisions) == 2
+    assert all(
+        event["decision"]["retry"] is True and 0 < event["decision"]["delay"] <= 2000
+        for event in decisions
+    )
+    main = [
+        body
+        for body in upstream.requests
+        if any(
+            "MAIN-ONLY" in message["content"]
+            for message in body["messages"]
+            if message["role"] == "system"
+        )
+    ]
+    worker = [
+        body
+        for body in upstream.requests
+        if any(
+            "WORKER-ONLY" in message["content"]
+            for message in body["messages"]
+            if message["role"] == "system"
+        )
+    ]
+    assert len(main) == 3 and main[0] == main[1]
+    assert len(worker) == 2 and worker[0] == worker[1]
+    assert sum(message["role"] == "tool" for body in main for message in body["messages"]) == 1
+
+
+def policy_plugin(root, *, veto=None, cancel=False):
+    package = root / "retry-policy-probe"
+    package.mkdir()
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "local-retry-policy-probe",
+                "type": "module",
+                "exports": {".": "./index.js"},
+            }
+        )
+    )
+    log = root / "retry-events.jsonl"
+    (package / "index.js").write_text(
+        "import {appendFile} from 'node:fs/promises';"
+        "export default {id:'local.retry-policy',async setup(ctx){"
+        "await ctx.session.hook('retry',async event=>{"
+        f"await appendFile({json.dumps(str(log))},JSON.stringify(event)+'\\n');"
+        + (f"if(event.attempt >= {veto}) event.decision={{retry:false}};" if veto else "")
+        + (
+            "setTimeout(()=>ctx.session.interrupt({sessionID:event.sessionID,resume:false}),100);"
+            if cancel
+            else ""
+        )
+        + "});}};"
+    )
+    return package
+
+
+def read_policy_events(root):
+    return [json.loads(line) for line in (root / "retry-events.jsonl").read_text().splitlines()]
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for the installed V2 localhost integration test",
+)
+def test_installed_v2_same_key_auxiliary_overlap_disables_retry_override(tmp_path):
+    plugin = policy_plugin(tmp_path)
+    log_path = json.dumps(str(tmp_path / "retry-events.jsonl"))
+    (plugin / "index.js").write_text(
+        "import {appendFile} from 'node:fs/promises';"
+        "export default {id:'local.overlap',async setup(ctx){let generated=false;"
+        f"const log=event=>appendFile({log_path},JSON.stringify(event)+'\\n');"
+        "const identity=event=>({sessionID:event.sessionID,agent:event.agent,model:event.model});"
+        "await ctx.session.hook('http.request',async event=>{"
+        "await log({hook:'request',...identity(event),kind:event.kind});"
+        "if(event.kind==='primary'&&!generated){generated=true;"
+        "try{await ctx.session.generate({sessionID:event.sessionID,prompt:'AUXILIARY-PROMPT'});}"
+        "catch(error){await log({hook:'generate-error',message:String(error)});}}});"
+        "await ctx.session.hook('http.response',event=>log({hook:'response',...identity(event),"
+        "kind:event.kind,status:event.response.status,"
+        "marker:event.response.headers.get('x-agedum-retry-eligible')}));"
+        "await ctx.session.hook('retry',event=>log({hook:'retry',...event}));}};"
+    )
+    with RecoveryUpstream(429, wall_message="usage limit", persistent=True) as upstream:
+        config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
+        config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+        result = run_installed(config, tmp_path, trailing_plugin=plugin)
+    assert result.returncode == 1, result.stdout + result.stderr
+    events = read_policy_events(tmp_path)
+    requests = [
+        event
+        for event in events
+        if event["hook"] == "request" and event["kind"] in ("primary", "generate")
+    ]
+    assert [event["kind"] for event in requests] == ["primary", "generate"]
+    assert requests[0]["sessionID"] == requests[1]["sessionID"]
+    assert requests[0]["agent"] == requests[1]["agent"]
+    assert requests[0]["model"] == requests[1]["model"]
+    responses = [
+        event
+        for event in events
+        if event["hook"] == "response" and event["kind"] in ("primary", "generate")
+    ]
+    assert [event["kind"] for event in responses] == ["generate", "primary"]
+    assert all(event["status"] == 429 and event["marker"] == "1" for event in responses)
+    retries = [event for event in events if event["hook"] == "retry"]
+    assert len(retries) == 1
+    assert retries[0]["decision"] == {"retry": False}
+    assert "usage limit" in result.stdout
+    assert "LOCAL-MAIN-OK" not in result.stdout
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for the installed V2 localhost integration test",
+)
+def test_installed_v2_cancellation_during_accepted_backoff_stops_requests(tmp_path):
+    with RecoveryUpstream(
+        429, wall_message="usage limit", persistent=True, retry_after="5"
+    ) as upstream:
+        config = launcher_config(f"http://127.0.0.1:{upstream.server.server_port}/v1")
+        config["failover"]["wait"]["retryMessages"] = ["usage limit"]
+        started = time.monotonic()
+        result = run_installed(
+            config, tmp_path, trailing_plugin=policy_plugin(tmp_path, cancel=True)
+        )
+        assert time.monotonic() - started < 5
+        assert "LOCAL-MAIN-OK" not in result.stdout
+        assert read_policy_events(tmp_path)[0]["decision"] == {"retry": True, "delay": 5000}
+        time.sleep(5.1)
+        assert (
+            len(
+                [
+                    body
+                    for body in upstream.requests
+                    if any("MAIN-ONLY" in message["content"] for message in body["messages"])
+                ]
+            )
+            == 1
+        )
 
 
 @pytest.mark.skipif(

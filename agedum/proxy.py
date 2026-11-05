@@ -65,6 +65,7 @@ _HOP_BY_HOP = frozenset(
 
 CAPABILITY_HEADER = "X-Agedum-Proxy-Capability"
 CAPABILITY_ENV = "AGEDUM_PROXY_CAPABILITY"
+RETRY_ELIGIBLE_HEADER = "X-Agedum-Retry-Eligible"
 _AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key"})
 
 
@@ -933,7 +934,7 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
         return {
             name: value
             for name, value in self.headers.items()
-            if name.lower() != CAPABILITY_HEADER.lower()
+            if name.lower() not in (CAPABILITY_HEADER.lower(), RETRY_ELIGIBLE_HEADER.lower())
         }
 
     def _read_body(self) -> bytes:
@@ -969,7 +970,10 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         for key, value in response.getheaders():
             lowered = key.lower()
-            if lowered in _HOP_BY_HOP or lowered == "content-length":
+            if lowered in _HOP_BY_HOP or lowered in (
+                "content-length",
+                RETRY_ELIGIBLE_HEADER.lower(),
+            ):
                 continue
             self.send_header(key, value)
         self.send_header("Connection", "close")
@@ -2183,10 +2187,10 @@ class _FailoverHandler(_BaseProxyHandler):
     # chat-completions rung, carrying the rung's upstream model id.
     _translated_model: str = ""
     _pins: dict = {}
-    # Wait-window state (design Decision 4): `{chain_key#vision_class: first_forged_ts}`
-    # — the first forge per key opens the window; the first primary 200 closes it and
-    # logs the cleared line. Fresh per proxy instance, guarded by the pin lock.
-    _wait_forges: dict = {}
+    # Wait-window state (design Decision 4): `{chain_key#vision_class: first_wait_response_ts}`
+    # Shared by model + modality, not worker/session health. The first primary 200
+    # ends this diagnostic window only. Fresh per proxy instance, guarded by the pin lock.
+    _wait_started: dict = {}
     _pins_lock: threading.Lock = threading.Lock()
 
     def do_POST(self) -> None:  # noqa: N802 (http.server naming)
@@ -2323,7 +2327,7 @@ class _FailoverHandler(_BaseProxyHandler):
                 # A primary 200 ends a wait window (design Decision 6, line 3): logged
                 # once — the first one after a forge — then the key is dropped. With no
                 # forge in flight the dict is empty and this is a no-op.
-                self._log_wait_cleared(chain_key, vision_class)
+                self._log_primary_http_200(chain_key, vision_class)
             if rung is not None and 200 <= response.status < 300:
                 self._pin_rung(chain_key, vision_class, index)
             try:
@@ -2540,7 +2544,8 @@ class _FailoverHandler(_BaseProxyHandler):
         headers = [
             (key, value)
             for key, value in response.getheaders()
-            if key.lower() not in _HOP_BY_HOP and key.lower() != "content-length"
+            if key.lower() not in _HOP_BY_HOP
+            and key.lower() not in ("content-length", RETRY_ELIGIBLE_HEADER.lower())
         ]
         return response.status, headers, head + rest, True
 
@@ -2554,13 +2559,12 @@ class _FailoverHandler(_BaseProxyHandler):
         wall_rung: str | None = None,
         exhausted: bool = True,
     ) -> None:
-        """Chain exhausted: the last upstream error verbatim (``Retry-After`` survives —
-        it is not hop-by-hop), so opencode's hardcoded retry runs exactly as today.
+        """Chain exhausted: preserve the error unless wait opts into a retry hint.
 
         Under the ``wait`` opt-in, a *classified wall* at true exhaustion is instead
         made waitable (design Decision 2): a 429 already carrying a usable
-        ``Retry-After`` within the cap passes verbatim — the forge would be a no-op,
-        the client bridges it today (probe A); any other waitable wall is forged into
+        ``Retry-After`` within the cap passes verbatim — the forge would be a no-op;
+        any other waitable wall is forged into
         ``429 + Retry-After`` (the wall's own header when it has one, else
         ``probeSeconds``) with the body byte-verbatim; a wall whose reset exceeds
         ``maxWaitHours`` passes verbatim with the not-waitable line. Everything else
@@ -2574,6 +2578,15 @@ class _FailoverHandler(_BaseProxyHandler):
         wait = self.wait if (is_wall and exhausted) else None
         header_seconds = _retry_after_seconds(headers) if wait else None
         reset = _waitable_reset(wait, headers) if wait else None
+        eligible = (
+            wait is not None
+            and reset is not None
+            and status == 429
+            and _temporary_retry_body(body, wait.get("retryMessages", ()))
+        )
+        if wait is not None and reset is not None:
+            with self._pins_lock:
+                self._wait_started.setdefault(f"{chain_key}#{vision_class}", time.monotonic())
         where = "primary" if wall_rung is None else wall_rung
         if wait is not None and reset is None:
             # A classified wall whose reset is beyond the cap: not waitable — the
@@ -2585,12 +2598,11 @@ class _FailoverHandler(_BaseProxyHandler):
                 flush=True,
             )
         elif wait is not None and status == 429 and header_seconds is not None:
-            # Already a retryable wall carrying its own usable header within the cap:
-            # today's passthrough IS the wait (probe A) — name it and pass through
-            # untouched. A headerless 429 takes the forge instead (probe B).
+            # Preserve an already-usable hint; a headerless 429 takes the forge instead.
             print(
                 f"agedum failover: {chain_key} wait: walled at rung {wall_index} ({where})"
-                f" — retryable wall sent, opencode retries in {math.ceil(reset)}s",
+                f" — Retry-After hint sent: {math.ceil(reset)}s;"
+                " opencode owns retry scheduling, classification and budget",
                 file=sys.stderr,
                 flush=True,
             )
@@ -2602,15 +2614,16 @@ class _FailoverHandler(_BaseProxyHandler):
             # capture already strips hop-by-hop headers + Content-Length, and the
             # hop's Accept-Encoding: identity guarantees an uncompressed body.
             seconds = math.ceil(reset)
-            with self._pins_lock:
-                self._wait_forges.setdefault(f"{chain_key}#{vision_class}", time.monotonic())
             print(
                 f"agedum failover: {chain_key} wait: walled at rung {wall_index} ({where})"
-                f" — retryable wall sent, opencode retries in {seconds}s",
+                f" — Retry-After hint sent: {seconds}s;"
+                " opencode owns retry scheduling, classification and budget",
                 file=sys.stderr,
                 flush=True,
             )
             self.send_response(429)
+            if eligible:
+                self.send_header(RETRY_ELIGIBLE_HEADER, "1")
             replaced = False
             for key, value in headers:
                 if key.lower() == "retry-after":
@@ -2627,6 +2640,8 @@ class _FailoverHandler(_BaseProxyHandler):
             self.wfile.write(body)
             return
         self.send_response(status)
+        if eligible:
+            self.send_header(RETRY_ELIGIBLE_HEADER, "1")
         for key, value in headers:
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
@@ -2634,16 +2649,16 @@ class _FailoverHandler(_BaseProxyHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _log_wait_cleared(self, chain_key: str, vision_class: str) -> None:
-        """The wait-window completion line (design Decision 6, line 3): the first
-        primary 200 after a forge logs it once and closes the window."""
+    def _log_primary_http_200(self, chain_key: str, vision_class: str) -> None:
+        """Log HTTP admission once per diagnostic window, without inspecting the body."""
         with self._pins_lock:
-            forged_at = self._wait_forges.pop(f"{chain_key}#{vision_class}", None)
-        if forged_at is None:
+            started_at = self._wait_started.pop(f"{chain_key}#{vision_class}", None)
+        if started_at is None:
             return
-        waited = time.monotonic() - forged_at
+        waited = time.monotonic() - started_at
         print(
-            f"agedum failover: {chain_key} wait cleared — primary answered after {waited:.0f}s",
+            f"agedum failover: {chain_key} primary HTTP 200 after {waited:.0f}s"
+            f" since first wait response ({vision_class}); generation completion not verified",
             file=sys.stderr,
             flush=True,
         )
@@ -2653,7 +2668,10 @@ class _FailoverHandler(_BaseProxyHandler):
         self.send_response(response.status)
         for key, value in response.getheaders():
             lowered = key.lower()
-            if lowered in _HOP_BY_HOP or lowered == "content-length":
+            if lowered in _HOP_BY_HOP or lowered in (
+                "content-length",
+                RETRY_ELIGIBLE_HEADER.lower(),
+            ):
                 continue
             self.send_header(key, value)
         self.send_header("Connection", "close")
@@ -2701,6 +2719,38 @@ class _FailoverHandler(_BaseProxyHandler):
 def _join(upstream: SplitResult, rest: str) -> str:
     """The upstream URL path for a request whose proxy-local rest is ``rest``."""
     return upstream.path.rstrip("/") + "/" + rest
+
+
+def _temporary_retry_body(body: bytes, messages: list[str] | tuple[str, ...]) -> bool:
+    """Explicit temporary phrases never override billing, authentication or config errors."""
+    lowered = body.decode("utf-8", "replace").lower()
+    permanent = (
+        "billing",
+        "balance",
+        "arrears",
+        "payment",
+        "credit",
+        "insufficient_quota",
+        "insufficient quota",
+        "insufficient funds",
+        "auth",
+        "api key",
+        "api_key",
+        "invalid key",
+        "invalid",
+        "credential",
+        "expired",
+        "access denied",
+        "not found",
+        "unsupported",
+        "config",
+        "permission",
+        "forbidden",
+        "account suspended",
+    )
+    return not any(word in lowered for word in permanent) and any(
+        message.lower() in lowered for message in messages
+    )
 
 
 def _retry_after_seconds(headers: list[tuple[str, str]]) -> float | None:
@@ -2775,7 +2825,7 @@ class FailoverProxy(_LocalProxy):
                     # Fresh per proxy instance: two proxies in one process (tests) must
                     # not share a pin table or a wait-window state.
                     "_pins": {},
-                    "_wait_forges": {},
+                    "_wait_started": {},
                     "_pins_lock": threading.Lock(),
                 },
             )
