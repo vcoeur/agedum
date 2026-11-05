@@ -500,6 +500,8 @@ class FailoverPlan(NamedTuple):
     routes: tuple[str, ...]
     capability_env: str | None = None
     wait_enabled: bool = False
+    retry_messages: tuple[str, ...] = ()
+    max_wait_hours: float | None = None
 
 
 def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
@@ -521,7 +523,8 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
       fallback target in v1 — the OAuth bearer only arrives on openai primaries; a pruned
       rung is a warning) and duplicate runtime rungs deduped (first occurrence wins).
     - ``wait`` — the authored wait-for-reset block (``maxWaitHours`` required number > 0,
-      ``probeSeconds`` optional integer > 0 defaulting 3600), or ``None``: today's
+      ``probeSeconds`` optional integer > 0 defaulting 3600, optional non-empty
+      ``retryMessages`` list of non-blank strings), or ``None``: today's
       behaviour byte-for-byte. Present, ``chains`` becomes optional (the wait-only
       shape — the walk runs the primary alone); every other chains rule is unchanged.
     """
@@ -665,7 +668,7 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
     if wait_raw is not None:
         if not isinstance(wait_raw, dict):
             raise ProviderError("`failover.wait` must be a JSON object")
-        unknown = sorted(set(wait_raw) - {"maxWaitHours", "probeSeconds"})
+        unknown = sorted(set(wait_raw) - {"maxWaitHours", "probeSeconds", "retryMessages"})
         if unknown:
             raise ProviderError(
                 "`failover.wait` has unknown key(s): " + ", ".join(repr(key) for key in unknown)
@@ -686,6 +689,17 @@ def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, 
         ):
             raise ProviderError("`failover.wait.probeSeconds` must be a positive integer")
         wait = {"maxWaitHours": max_wait_hours, "probeSeconds": probe_seconds}
+        if "retryMessages" in wait_raw:
+            retry_messages = wait_raw["retryMessages"]
+            if (
+                not isinstance(retry_messages, list)
+                or not retry_messages
+                or not all(isinstance(entry, str) and entry.strip() for entry in retry_messages)
+            ):
+                raise ProviderError(
+                    "`failover.wait.retryMessages` must be a non-empty list of non-empty strings"
+                )
+            wait["retryMessages"] = list(retry_messages)
 
     chains_raw = block.get("chains")
     if chains_raw is None or chains_raw == {}:
@@ -3277,6 +3291,29 @@ def _opencode_env(
                     plugin_targets.append(entry)
             if plugin_path not in plugin_targets:
                 plugins.append(plugin_path)
+            if failover.retry_messages:
+                # Replace only our own entry so authored duplicates cannot discard retry options.
+                def owned(entry):
+                    if isinstance(entry, dict):
+                        return entry.get("package") == plugin_path
+                    if isinstance(entry, list) and entry:
+                        return entry[0] == plugin_path
+                    return entry == plugin_path
+
+                if "plugin" in document:
+                    document["plugin"] = [entry for entry in document["plugin"] if not owned(entry)]
+                plugins = [entry for entry in plugins if not owned(entry)]
+                plugins.append(
+                    {
+                        "package": plugin_path,
+                        "options": {
+                            "baseURL": failover.base_url,
+                            "routes": list(failover.routes),
+                            "retryMessages": list(failover.retry_messages),
+                            "maxWaitHours": failover.max_wait_hours,
+                        },
+                    }
+                )
             document["plugins"] = plugins
     if document:
         # Key order is semantic, never cosmetic: opencode evaluates a permission map in

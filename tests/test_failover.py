@@ -8,6 +8,7 @@ and exhaustion. The config level exercises :func:`agedum.provider.failover_spec`
 no-failover-key regression that is the rollback guarantee.
 """
 
+import copy
 import email.utils
 import json
 import threading
@@ -1648,6 +1649,130 @@ def _wait(max_wait_hours=8, probe_seconds=3600):
     return wait
 
 
+@pytest.mark.parametrize("value", [None, [], "usage limit", [""], [" "], [1], [False]])
+def test_retry_messages_requires_explicit_nonempty_strings(value):
+    config = _mix_like_config()
+    config["failover"]["wait"] = {**_wait(), "retryMessages": value}
+    with pytest.raises(ProviderError, match="retryMessages"):
+        failover_spec(config, _env())
+
+
+def test_retry_messages_survives_validation_without_mutating_authoring():
+    config = _mix_like_config()
+    config["failover"]["wait"] = {**_wait(), "retryMessages": ["Usage Limit", "rate limit"]}
+    before = copy.deepcopy(config)
+    spec, _ = failover_spec(config, _env())
+    assert spec["wait"]["retryMessages"] == ["Usage Limit", "rate limit"]
+    assert config == before
+
+
+@pytest.mark.parametrize("retry_after", [None, "1"])
+@pytest.mark.parametrize(
+    "status,message,eligible",
+    [
+        (429, "temporary Usage Limit reached", True),
+        (429, "rate limit reached", True),
+        (429, "quota exceeded", False),
+        (402, "usage limit reached", False),
+        (401, "usage limit reached", False),
+        (403, "usage limit reached", False),
+        (400, "usage limit reached", False),
+        (429, "usage limit: insufficient balance", False),
+        (429, "rate limit: billing required", False),
+        (429, "usage limit: arrears", False),
+        (429, "usage limit: insufficient_quota", False),
+        (429, "usage limit: authentication failed", False),
+        (429, "rate limit: invalid api_key", False),
+        (429, "usage limit: invalid configuration", False),
+        (429, "usage limit: credential expired", False),
+        (429, "usage limit: model not found", False),
+        (429, '{"error":{"message":"usage limit", "type":"billing_error"}}', False),
+    ],
+)
+def test_retry_marker_requires_original_temporary_429(retry_after, status, message, eligible):
+    upstream_headers = {"x-AGEDUM-retry-ELIGIBLE": "spoof", "X-Unrelated": "retained"}
+    if retry_after is not None:
+        upstream_headers["Retry-After"] = retry_after
+    with _StubUpstream("p", [(status, message, upstream_headers)]) as upstream:
+        spec = _spec(
+            {"p": _route(upstream.base_url, models={"m1": {"id": "m1"}})},
+            {},
+            wait={**_wait(probe_seconds=1), "retryMessages": ["usage limit", "rate limit"]},
+        )
+        with FailoverProxy(spec) as proxy:
+            _, headers, body = _post(
+                proxy,
+                "/oc/p/chat/completions",
+                _chat_body(),
+                headers={"X-Agedum-Retry-Eligible": "client-spoof"},
+            )
+    lowered = {key.lower(): value for key, value in headers.items()}
+    assert lowered.get("x-agedum-retry-eligible") == ("1" if eligible else None)
+    assert body == message.encode()
+    assert lowered["x-unrelated"] == "retained"
+    assert "x-agedum-retry-eligible" not in {key.lower() for key in upstream.requests[0][2]}
+
+
+@pytest.mark.parametrize("mode", ["no-wait", "no-phrases", "beyond-cap", "cap-break"])
+def test_retry_marker_is_absent_outside_eligible_exhaustion(mode):
+    with _StubUpstream(
+        "p",
+        [
+            (
+                429,
+                "usage limit",
+                {
+                    "Retry-After": "2",
+                    "X-Agedum-Retry-Eligible": "1",
+                },
+            )
+        ],
+    ) as upstream:
+        route = _route(upstream.base_url, models={"m1": {"id": "m1"}})
+        wait = {**_wait(probe_seconds=1), "retryMessages": ["usage limit"]}
+        chains = {}
+        if mode == "no-wait":
+            wait = None
+        elif mode == "no-phrases":
+            wait.pop("retryMessages")
+        elif mode == "beyond-cap":
+            wait["maxWaitHours"] = 1 / 3600
+        elif mode == "cap-break":
+            chains = {"p/m1": ["p/m1@low", "p/m1@high"]}
+            upstream.script.append((429, "usage limit", {"Retry-After": "2"}))
+        spec = _spec({"p": route}, chains, wait=wait, max_walk=1)
+        with FailoverProxy(spec) as proxy:
+            _, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
+    assert body == b"usage limit"
+    assert "x-agedum-retry-eligible" not in {key.lower() for key in headers}
+
+
+@pytest.mark.parametrize("status", [200, 302, 400, 401, 500])
+@pytest.mark.parametrize("transparent", [True, False])
+def test_spoofed_retry_marker_is_removed_from_all_passthrough_paths(status, transparent):
+    with _StubUpstream(
+        "p",
+        [
+            (
+                status,
+                "unchanged",
+                {
+                    "X-Agedum-Retry-Eligible": "1",
+                },
+            )
+        ],
+    ) as upstream:
+        spec = _spec(
+            {"p": _route(upstream.base_url, models={"m1": {"id": "m1"}})},
+            {},
+            wait=None if transparent else {**_wait(), "retryMessages": ["usage limit"]},
+        )
+        with FailoverProxy(spec) as proxy:
+            _, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
+    assert body == b"unchanged"
+    assert "x-agedum-retry-eligible" not in {key.lower() for key in headers}
+
+
 def _post_retry_after_all(proxy, path, body):
     """Like ``_post`` but returning every Retry-After header (duplicates visible)."""
     data = json.dumps(body).encode() if isinstance(body, dict) else body
@@ -1683,7 +1808,7 @@ def test_engagement_wait_only_shape_forges_on_primary_wall(capsys):
     stderr = capsys.readouterr().err
     assert (
         "agedum failover: p/mX wait: walled at rung 0 (primary)"
-        " — retryable wall sent, opencode retries in 90s" in stderr
+        " — Retry-After hint sent: 90s" in stderr
     )
 
 
@@ -1708,7 +1833,7 @@ def test_engagement_unmapped_model_with_wait_walks_primary_alone_and_forges(caps
     stderr = capsys.readouterr().err
     assert (
         "agedum failover: p/other wait: walled at rung 0 (primary)"
-        " — retryable wall sent, opencode retries in 3600s" in stderr
+        " — Retry-After hint sent: 3600s" in stderr
     )
 
 
@@ -1766,11 +1891,11 @@ def test_wait_headerless_exhaustion_forges_probe_retry_after(capsys):
     stderr = capsys.readouterr().err
     assert (
         "agedum failover: p/m1 wait: walled at rung 2 (f2/r2)"
-        " — retryable wall sent, opencode retries in 3600s" in stderr
+        " — Retry-After hint sent: 3600s" in stderr
     )
 
 
-def test_wait_forges_402_wall_into_retryable_429():
+def test_wait_started_402_wall_into_retryable_429():
     # 402 is not in opencode's retryable status list — the forge rewrites the status,
     # preserving the captured headers and body.
     with (
@@ -1820,12 +1945,11 @@ def test_wait_beyond_cap_wall_passes_verbatim(capsys):
         "agedum failover: p/m1 exhausted (f1/r1)"
         " — wall not waitable (reset beyond maxWaitHours), passing through" in stderr
     )
-    assert "retryable wall sent" not in stderr
+    assert "Retry-After hint sent" not in stderr
 
 
 def test_wait_429_with_usable_header_passes_verbatim(capsys):
-    # An already-retryable wall within the cap: the forge would be a no-op — today's
-    # passthrough IS the wait. No double-handling, no forge state.
+    # A usable header passes untouched and opens the same diagnostic window as a forge.
     with (
         _StubUpstream("p", [(429, "primary limit", {})]) as a,
         _StubUpstream("f1", [(429, "f1 limit", {"Retry-After": "300"})]) as b,
@@ -1845,11 +1969,11 @@ def test_wait_429_with_usable_header_passes_verbatim(capsys):
     assert status == 429
     assert body == b"f1 limit"
     assert headers["Retry-After"] == "300"
-    assert handler._wait_forges == {}
+    assert list(handler._wait_started) == ["p/m1#text"]
     stderr = capsys.readouterr().err
     assert (
         "agedum failover: p/m1 wait: walled at rung 1 (f1/r1)"
-        " — retryable wall sent, opencode retries in 300s" in stderr
+        " — Retry-After hint sent: 300s" in stderr
     )
 
 
@@ -1893,7 +2017,7 @@ def test_wait_cap_break_passes_verbatim_silently(capsys):
     assert "Retry-After" not in headers
     assert c.requests == []
     stderr = capsys.readouterr().err
-    assert "retryable wall sent" not in stderr
+    assert "Retry-After hint sent" not in stderr
     assert "not waitable" not in stderr
 
 
@@ -1914,13 +2038,66 @@ def test_wait_synthesized_502_passes_verbatim_silently(capsys):
     # Silently = no wait lines; the walk line for the unreachable rung is today's
     # behaviour and stays.
     stderr = capsys.readouterr().err
-    assert "retryable wall sent" not in stderr
+    assert "Retry-After hint sent" not in stderr
     assert "not waitable" not in stderr
 
 
-def test_wait_cleared_after_forged_wall_pins_nothing(capsys):
-    # The re-issue after a forge starts at the primary; a 200 there logs the cleared
-    # line once and pins nothing — the next request starts at the primary again.
+@pytest.mark.parametrize("wall_headers", [{}, {"Retry-After": "300"}])
+def test_wait_http_200_is_only_admission_and_timing_restarts(wall_headers, capsys, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("agedum.proxy.time.monotonic", lambda: clock[0])
+    failed_stream = b'event: response.failed\ndata: {"type":"response.failed"}\n\n'
+    with _StubUpstream(
+        "p",
+        [
+            (429, b"usage limit exceeded", wall_headers),
+            (429, b"usage limit exceeded", wall_headers),
+            (200, failed_stream, {"Content-Type": "text/event-stream"}),
+            (200, b"uninspected", {}),
+            (429, b"usage limit exceeded", wall_headers),
+        ],
+    ) as upstream:
+        spec = _spec(
+            {"p": _route(upstream.base_url, models={"m1": {"id": "m1"}})}, {}, wait=_wait()
+        )
+        with FailoverProxy(spec) as proxy:
+            handler = proxy._server.RequestHandlerClass
+            first = _post(proxy, "/oc/p/responses", _chat_body())
+            assert first[0] == 429
+            assert first[2] == b"usage limit exceeded"
+            assert first[1]["Retry-After"] == wall_headers.get("Retry-After", "3600")
+            assert handler._wait_started == {"p/m1#text": 100.0}
+            clock[0] = 120.0
+            assert _post(proxy, "/oc/p/responses", _chat_body())[0] == 429
+            assert handler._wait_started == {"p/m1#text": 100.0}
+            clock[0] = 140.0
+            response = _post(proxy, "/oc/p/responses", _chat_body())
+            assert response[0] == 200
+            assert response[2] == failed_stream
+            assert handler._wait_started == {}
+            assert _post(proxy, "/oc/p/responses", _chat_body())[2] == b"uninspected"
+            clock[0] = 160.0
+            assert _post(proxy, "/oc/p/responses", _chat_body())[0] == 429
+            assert handler._wait_started == {"p/m1#text": 160.0}
+    lines = capsys.readouterr().err.splitlines()
+    admission_lines = [line for line in lines if "primary HTTP 200" in line]
+    assert admission_lines == [
+        "agedum failover: p/m1 primary HTTP 200 after 40s since first wait response (text);"
+        " generation completion not verified"
+    ]
+    hint_lines = [line for line in lines if "Retry-After hint sent:" in line]
+    assert len(hint_lines) == 3
+    assert all(
+        "opencode owns retry scheduling, classification and budget" in line for line in hint_lines
+    )
+    assert not any(
+        "wait cleared" in line or "recovered" in line or "opencode retries in" in line
+        for line in lines
+    )
+
+
+def test_wait_primary_http_200_after_forged_wall_pins_nothing(capsys):
+    # HTTP admission pins nothing; the next request starts at the primary again.
     with (
         _StubUpstream("p", [(429, "usage limit exceeded", {})]) as a,
         _StubUpstream("f1", [(429, "f1 limit", {})]) as b,
@@ -1937,16 +2114,16 @@ def test_wait_cleared_after_forged_wall_pins_nothing(capsys):
         with FailoverProxy(spec) as proxy:
             handler = proxy._server.RequestHandlerClass
             first = _post(proxy, "/oc/p/chat/completions", _chat_body())
-            assert list(handler._wait_forges) == ["p/m1#text"]
+            assert list(handler._wait_started) == ["p/m1#text"]
             second = _post(proxy, "/oc/p/chat/completions", _chat_body())
     assert first[0] == 429
     assert second[0] == 200
     assert json.loads(second[2]) == {"ok": "p"}
-    assert handler._wait_forges == {}
+    assert handler._wait_started == {}
     assert handler._pins == {}
     assert len(b.requests) == 1  # the rung was tried only in the first walk
     stderr = capsys.readouterr().err
-    assert "agedum failover: p/m1 wait cleared — primary answered after" in stderr
+    assert "agedum failover: p/m1 primary HTTP 200 after" in stderr
 
 
 def test_wait_chainless_engagement_ignores_a_same_named_chain_pin(capsys):
@@ -1985,11 +2162,11 @@ def test_wait_chainless_engagement_ignores_a_same_named_chain_pin(capsys):
     assert second[2] == b"usage limit exceeded"
     assert len(a.requests) == 2  # the chainless walk reached the primary
     assert len(b.requests) == 1  # ...and only the primary (no rung, no 502)
-    assert list(handler._wait_forges) == ["p/m1#text"]
+    assert list(handler._wait_started) == ["p/m1#text"]
     stderr = capsys.readouterr().err
     assert (
         "agedum failover: p/m1 wait: walled at rung 0 (primary)"
-        " — retryable wall sent, opencode retries in 3600s" in stderr
+        " — Retry-After hint sent: 3600s" in stderr
     )
 
 
@@ -2021,14 +2198,14 @@ def test_wait_vision_filtered_exhaustion_waits_on_the_primary_wall(capsys):
         with FailoverProxy(spec) as proxy:
             handler = proxy._server.RequestHandlerClass
             first = _post(proxy, "/oc/p/chat/completions", image_body)
-            assert list(handler._wait_forges) == ["p/m1#vision"]
+            assert list(handler._wait_started) == ["p/m1#vision"]
             second = _post(proxy, "/oc/p/chat/completions", image_body)
     assert first[0] == 429
     assert first[1]["Retry-After"] == "3600"
     assert b.requests == []  # the non-vision rung was filtered, not tried
     assert second[0] == 200
     stderr = capsys.readouterr().err
-    assert "agedum failover: p/m1 wait cleared — primary answered after" in stderr
+    assert "agedum failover: p/m1 primary HTTP 200 after" in stderr
 
 
 def test_retry_after_parsing_delta_date_and_garbage():

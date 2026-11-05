@@ -256,18 +256,24 @@ from scratch. The harness still owns error classification and the finite attempt
   "detect": { "status": [429, 402], "messages": ["usage limit", "quota"] },
   "chains": { "kimi-coding/k3": ["kimi-coding/k3-low"] },
   "vision": { "kimi-coding/k3": true, "kimi-coding/k3-low": true },
-  "wait": { "maxWaitHours": 8, "probeSeconds": 3600 }
+   "wait": {
+     "maxWaitHours": 8, "probeSeconds": 3600,
+     "retryMessages": ["usage limit", "rate limit"]
+   }
 }
 ```
 
 - `maxWaitHours` (required, finite number > 0; NaN/infinity rejected) bounds what the proxy itself emits: a forged
   `Retry-After` never exceeds it, and a wall whose own `Retry-After` exceeds it is not
   waitable (it passes verbatim). It does not cap a header-carrying wall the client
-  already received — the verbatim passthrough hands the header to opencode, which honours
-  it (hours-scale included).
+  already received — the verbatim passthrough hands the header to opencode's native policy,
+  without the explicit retry override below.
 - `probeSeconds` (optional integer > 0, default 3600) is the `Retry-After` forged when the
   wall carries no usable header: a bounded probe — the client re-issues, the proxy
   re-classifies, and a still-walled wall gets a fresh forge.
+- `retryMessages` (optional, non-empty list of non-blank strings) separately opts into the
+  OpenCode V2 retry hook described below. Matching is case-insensitive. Omit it to keep
+  existing native retry decisions and delays. It is not inferred from `detect.messages`.
 - The reset source is the wall's own `Retry-After` (delta-seconds or HTTP-date) when it
   parses and fits the cap, else `probeSeconds`. A wall that is already `429` with a usable
   `Retry-After` within the cap passes through **verbatim** — the forge would be a no-op.
@@ -276,7 +282,8 @@ from scratch. The harness still owns error classification and the finite attempt
   recomputed, and the **original upstream body verbatim** (the user's error display
   survives). A 402 wall becomes HTTP 429; retryable headerless walls gain an explicit
   retry delay. Everything else — no `wait` key, a non-wall, a cap break, a reset beyond
-  the cap — is the silent verbatim passthrough, byte-identical to the pre-`wait` proxy.
+  the cap — keeps the pre-`wait` passthrough, except reserved eligibility headers are
+  always sanitized.
 
 **The wait-only shape.** With `wait` present, `chains` becomes optional. A chainless
 launcher (`chains` absent or empty) walks its primary alone: the wall reaches true
@@ -289,14 +296,63 @@ is pinned — the next request starts at the primary again.
 
 **stderr lines** (same `agedum failover:` prefix as the walk lines): at the forge (and at
 an already-headered 429 passing verbatim), `wait: walled at rung <index> (<rung>) —
-retryable wall sent, opencode retries in <N>s`; at a non-waitable exhaustion under `wait`,
+Retry-After hint sent: <N>s; opencode owns retry scheduling, classification and budget`;
+at a non-waitable exhaustion under `wait`,
 `exhausted (<rung>) — wall not waitable (reset beyond maxWaitHours), passing through`; and
-on the first primary 200 after a forge, `wait cleared — primary answered after <T>s`.
+on the first primary 200 after either wait response, `primary HTTP 200 after <T>s since
+first wait response (<modality>); generation completion not verified`. Successful bodies
+are streamed without inspection: HTTP 200 does not establish generation completion or
+quota recovery. The timestamp is shared by model + modality, not worker/session health;
+repeated walls retain the first timestamp until that HTTP 200, and a later wall opens a
+new diagnostic window. The cap limits individual delay hints, not total elapsed time.
 
 **Engine floor.** Engines older than the release introducing `wait` silently drop an
 authored `failoverIntent.wait` key (unknown intent keys are ignored, no error) — the
 launcher runs without wait. Configs start rolling out only once the fleet is past that
 floor.
+
+**`retryMessages` rollout gate.** agedum 0.71 rejects this new wait field as unknown.
+Publish and install an engine supporting it before synchronizing launcher sources that
+author it. No provider schema change is needed; `failoverIntent.wait` carries the same
+validated block into effective `failover.wait`.
+
+#### Explicit temporary-error retries (OpenCode V2)
+
+With `retryMessages`, only a **genuine upstream HTTP 429**, at true chain exhaustion,
+whose body matches an authored temporary phrase and whose accepted reset fits
+`maxWaitHours`, receives the proxy-owned `X-Agedum-Retry-Eligible: 1` response header.
+Original HTTP 402, auth/configuration statuses, billing, balance, arrears, payment,
+insufficient-quota and authentication/configuration error text remain unmarked even if
+they also contain an allow phrase. This does not change routing or the older wait forge:
+for example, a forged 402-to-429 response is still **not** newly eligible.
+Unmatched errors, cap breaks and beyond-cap resets keep native retry semantics.
+
+The header is removed from inbound requests and all upstream response paths, including
+successes and transparent forwards, before agedum may add its own. It carries no
+credentials or admission capability, and is never forwarded upstream. The plugin accepts
+it only on the launch proxy's routed provider URL, status 429 and `kind: primary`.
+It does not read successful HTTP/SSE bodies.
+
+The V2 `http.request`/`http.response`/`retry` hooks correlate an immediate response with
+its retry by exact session, agent, provider, model and variant. A marker is consumed once;
+it expires after 30 seconds and any intervening response clears it. Overlapping same-key
+requests, a new request before consumption, or a transport failure without a response
+disable overrides for that key for the rest of the launch: without a retry request ID,
+ambiguous correlation must fail closed. Auxiliary title/compaction/generate flows never
+create markers. Independent sessions/models are unaffected.
+
+For a matching temporary failure, the hook sets `retry: true` and the delay from the
+observed, accepted `Retry-After`, bounded by `maxWaitHours`. The plugin accepts delta
+seconds and all three standard HTTP-date forms: IMF-fixdate, obsolete RFC 850 and
+asctime. Dates use UTC even without an explicit zone in asctime; RFC 850's two-digit
+years use the proxy's 00–68 → 2000–2068 / 69–99 → 1969–1999 mapping. Invalid calendar
+dates are rejected instead of normalized or parsed as arbitrary locale strings.
+This both enables otherwise
+terminal `provider.quota` retries and replaces the native delay for an already-retryable
+temporary rate limit. No whole status/error class is made retryable. The hook adds no
+timer, supervisor, new attempt budget, session prompt or tool replay. OpenCode still
+owns cancellation and its documented hard attempt cap; the localhost tests prove
+explicit test-hook veto and cancellation, not a numerical native retry maximum.
 
 #### Conditional continuation reminder (OpenCode V2)
 
@@ -310,9 +366,9 @@ model call**, for both main and worker agents:
 > completed side effects. This instruction does not authorize changing provider/model or
 > bypassing permissions/review.
 
-The instruction is conditional, not a claim that recovery was observed. It does not inspect
-the proxy's shared wait state, create prompts or synthetic messages, replay tools, change
-retry/failover policy, or mark reviews complete. Title, compaction and transient generation
+The instruction is conditional, not a claim that recovery was observed. The context hook
+does not inspect the proxy's shared wait state, create prompts or synthetic messages,
+replay tools, change retry/failover policy, or mark reviews complete. Title, compaction and transient generation
 requests do not run the context hook. Persisted conversation messages and tool definitions
 are unchanged; HTTP/SSE bytes are not modified by the plugin.
 
@@ -322,10 +378,10 @@ loads from a directory with an `index.js` entrypoint. Existing compatible `plugi
 and native `plugins` entries are both retained, and the reminder is independent of
 `emitTranscript`. Launches without effective `wait` do not receive this plugin.
 
-Automatic recovery remains limited by the harness. In the localhost V2 2.0.32 check, transient
-rate-limit bodies recovered after both headered 429 and forged 402 responses, but an error
-body saying `usage limit` was classified as terminal `provider.quota` despite HTTP 429 and
-`Retry-After`. An old worker failure is not current evidence of a permanent pool failure;
+Without `retryMessages`, a `usage limit` body still terminates as `provider.quota` despite
+HTTP 429 and `Retry-After` in OpenCode 2.0.32. With explicit eligibility, localhost tests
+exercise main/worker quota and rate-limit recovery, accepted one-second delays, unchanged
+requests and a single subagent tool execution. An old worker failure is not current evidence of a permanent pool failure;
 the parent must reconcile partial work before retrying the unfinished task when execution
 resumes. A successful main request does not establish worker availability or completion.
 

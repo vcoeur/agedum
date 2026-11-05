@@ -1056,4 +1056,6 @@ def _maybe_failover_proxy(config: dict, base_env: dict[str, str]) -> Iterator[Fa
                 routes=tuple(spec["routes"]),
                 capability_env=CAPABILITY_ENV,
                 wait_enabled=spec.get("wait") is not None,
+                retry_messages=tuple((spec.get("wait") or {}).get("retryMessages", ())),
+                max_wait_hours=(spec.get("wait") or {}).get("maxWaitHours"),
             )

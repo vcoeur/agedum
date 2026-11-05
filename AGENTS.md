@@ -50,26 +50,38 @@ match); top-level skills keep their declared name.
    effort knob; workers inherit their base model's chain) — so the session lands on a
    fallback instead of dying, and
    opencode never enters its same-model retry loop. A **`wait`** sub-block
-   (`{maxWaitHours, probeSeconds?}`) opts into wait-for-the-limit-reset: at true chain
+    (`{maxWaitHours, probeSeconds?, retryMessages?}`) opts into wait-for-the-limit-reset: at true chain
    exhaustion on a classified wall the proxy emits a retryable `429 + Retry-After`
    (the wall's own header when it parses and fits `maxWaitHours`, else `probeSeconds`,
    body verbatim) instead of the verbatim error, and opencode's own session retry
    bridges the window; with `wait` present `chains` becomes optional (the wait-only
    shape — an unmapped model walks its primary alone instead of transparent-forwarding,
-   so a wall is waitable there too), and the first primary 200 after a wait logs
-    `wait cleared`. Wait-enabled launches also inject a separate, dependency-free
+    so a wall is waitable there too). Diagnostics report the Retry-After hint sent;
+     opencode owns actual retry scheduling, classification and budget. The first primary
+     HTTP 200 reports elapsed time since the first wait response, not generation completion
+     or quota recovery. This diagnostic window is shared by model + modality, not worker
+     or session health. Wait-enabled launches also inject a separate, dependency-free
     **OpenCode V2 context plugin** (validated with 2.0.32): before every main/worker
     agent-loop call, it appends one constant conditional instruction to continue the
     original task after a temporary limit wait. It does not observe recovery, change
     persisted messages/tools, retry workers, or touch title/compaction/generate calls.
     The bundled directory has an `index.js` entrypoint for V2's local plugin loader;
     keep the existing V1 transcript plugin separate and unchanged. Native `plugins`
-    and compatible `plugin` entries are both preserved. The reminder does not make
-    terminal quota failures retryable: V2 2.0.32 can stop on `provider.quota` despite
-    a 429/Retry-After; the parent must reconcile unfinished work before a later retry.
+     and compatible `plugin` entries are both preserved. The reminder itself never retries.
+     Optional `wait.retryMessages` (non-empty list of non-blank temporary phrases) enables
+     V2 request/response/retry hooks only for proxy-marked original HTTP 429s at true
+     exhaustion within the reset cap. Billing/balance/arrears/auth/config errors and original
+     402s remain unmarked even when an allow phrase also matches. The hook uses observed
+     Retry-After (delta seconds or IMF-fixdate/RFC 850/asctime HTTP dates, always UTC)
+     for both quota and already-retryable rate limits, preserving native cap and
+     cancellation. Markers are one-use, exact session/agent/provider/model/variant scoped,
+     expire after 30 seconds, and same-key overlap disables overrides for that launch key.
+     No supervisors, timers, successful SSE inspection or tool replay. Without the list,
+     native decisions/delays remain unchanged; V2 can stop on `provider.quota` despite 429.
+     agedum 0.71 rejects the field: publish/install a compatible engine before live source sync.
     Absent key → no proxy, byte-identical
-    config (the rollback switch); without `wait` every failover behaviour is
-   byte-identical too. Engines older than the release introducing `wait` silently drop
+     config (the rollback switch); without `wait` native failover behaviour is unchanged,
+     except the reserved retry marker is always sanitized. Engines older than the release introducing `wait` silently drop
    an authored `failoverIntent.wait` key (unknown intent keys are ignored) — the
    launcher runs without wait, no error; same documented-minimum pattern as the 0.61
    window. Detail: `docs/harnesses/opencode.md#failover`.
