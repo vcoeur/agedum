@@ -3256,6 +3256,15 @@ def _kimi_env(block: dict, secret_env: str, base_env: dict[str, str]) -> Builder
     return env, [], command, tuple(config_files)
 
 
+def _opencode_plugin_target(entry):
+    """Read a plugin target from either supported configuration spelling."""
+    if isinstance(entry, dict):
+        return entry.get("package")
+    if isinstance(entry, list) and entry:
+        return entry[0]
+    return entry
+
+
 def _opencode_env(
     block: dict,
     secret_env: str,
@@ -3281,24 +3290,16 @@ def _opencode_env(
         if failover.wait_enabled:
             plugins = list(document.get("plugins") or [])
             plugin_path = str(Path(__file__).resolve().parent / "assets" / "opencode")
-            plugin_targets = []
-            for entry in [*(document.get("plugin") or []), *plugins]:
-                if isinstance(entry, dict):
-                    plugin_targets.append(entry.get("package"))
-                elif isinstance(entry, list) and entry:
-                    plugin_targets.append(entry[0])
-                else:
-                    plugin_targets.append(entry)
+            plugin_targets = [
+                _opencode_plugin_target(entry)
+                for entry in [*(document.get("plugin") or []), *plugins]
+            ]
             if plugin_path not in plugin_targets:
                 plugins.append(plugin_path)
             if failover.retry_messages:
                 # Replace only our own entry so authored duplicates cannot discard retry options.
                 def owned(entry):
-                    if isinstance(entry, dict):
-                        return entry.get("package") == plugin_path
-                    if isinstance(entry, list) and entry:
-                        return entry[0] == plugin_path
-                    return entry == plugin_path
+                    return _opencode_plugin_target(entry) == plugin_path
 
                 if "plugin" in document:
                     document["plugin"] = [entry for entry in document["plugin"] if not owned(entry)]
@@ -3314,6 +3315,20 @@ def _opencode_env(
                         },
                     }
                 )
+            document["plugins"] = plugins
+        if "openai" in failover.routes:
+            plugin_path = str(
+                Path(__file__).resolve().parent / "assets" / "opencode" / "openai-routing"
+            )
+            for key in ("plugin", "plugins"):
+                if key in document:
+                    document[key] = [
+                        entry
+                        for entry in document[key]
+                        if _opencode_plugin_target(entry) != plugin_path
+                    ]
+            plugins = list(document.get("plugins") or [])
+            plugins.append({"package": plugin_path, "options": {"baseURL": failover.base_url}})
             document["plugins"] = plugins
     if document:
         # Key order is semantic, never cosmetic: opencode evaluates a permission map in

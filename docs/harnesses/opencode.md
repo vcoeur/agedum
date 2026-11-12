@@ -154,7 +154,17 @@ agent model selections, so a default-only OpenAI primary needs no redundant agen
 The valid block starts a local
 **failover proxy** for the launch and point the routed providers' `options.baseURL` at it
 (`<proxy>/oc/<id>`; the built-in `openai` provider is overlaid the same way, OAuth
-untouched). The proxy forwards the primary attempt verbatim and — when it hits an
+untouched). An injected OpenCode V2 routing plugin reads the active connection's
+authentication method for each proxied OpenAI HTTP request. ChatGPT token-sharing
+(`chatgpt-token-sharing`) and API keys use `https://api.openai.com/v1`; legacy
+ChatGPT/Codex OAuth uses `https://chatgpt.com/backend-api/codex`. The plugin neither
+stores credentials nor parses tokens. Its private `X-Agedum-OpenAI-Upstream` selector
+accepts only `api` or `codex`, is stripped before every upstream hop, and cannot
+name an arbitrary URL. Missing selectors preserve the legacy Codex destination for
+older clients; duplicate or invalid selectors are rejected before upstream contact.
+This routing is independent of `wait` and applies to auxiliary model calls too.
+
+The proxy forwards the primary attempt verbatim and — when it hits an
 **admission wall** before any byte reached opencode (a `detect.status` code, or a 4xx whose
 first 2 KB carries a `detect.messages` substring) — re-issues the request down the model's
 `chains` with per-rung auth, model id, and effort options, so the session lands on a

@@ -1,0 +1,8 @@
+{
+  "name": "agedum-openai-routing",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}
