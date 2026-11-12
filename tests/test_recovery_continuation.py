@@ -49,6 +49,10 @@ def test_wait_plan_injects_v2_plugin_without_mutating_config(emit_transcript, ch
     assert document["plugins"] == [
         {"package": "native-plugin", "options": {"strict": False}},
         str(PLUGIN_DIRECTORY),
+        {
+            "package": str(PLUGIN_DIRECTORY / "openai-routing"),
+            "options": {"baseURL": plan.base_url},
+        },
     ]
     assert document["plugin"][:2] == original["config"]["opencodeConfig"]["plugin"]
     assert any("transcript-osc.js" in str(entry) for entry in document["plugin"]) is emit_transcript
@@ -103,7 +107,12 @@ def test_chained_failover_without_wait_does_not_enable_reminder():
         document = json.loads(
             build_launch(config, {"FAKE_KEY": "fake"}, failover=plan).env["OPENCODE_CONFIG_CONTENT"]
         )
-    assert "plugins" not in document
+    assert document["plugins"] == [
+        {
+            "package": str(PLUGIN_DIRECTORY / "openai-routing"),
+            "options": {"baseURL": plan.base_url},
+        }
+    ]
 
 
 def test_retry_plugin_options_are_proxy_scoped_and_replace_only_owned_entries():
@@ -129,6 +138,10 @@ def test_retry_plugin_options_are_proxy_scoped_and_replace_only_owned_entries():
                     "retryMessages": ["usage limit", "rate limit"],
                     "maxWaitHours": 8,
                 },
+            },
+            {
+                "package": str(PLUGIN_DIRECTORY / "openai-routing"),
+                "options": {"baseURL": plan.base_url},
             },
         ]
         assert plan.capability_env not in json.dumps(document["plugins"])

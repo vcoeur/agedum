@@ -934,7 +934,12 @@ class _BaseProxyHandler(BaseHTTPRequestHandler):
         return {
             name: value
             for name, value in self.headers.items()
-            if name.lower() not in (CAPABILITY_HEADER.lower(), RETRY_ELIGIBLE_HEADER.lower())
+            if name.lower()
+            not in (
+                CAPABILITY_HEADER.lower(),
+                RETRY_ELIGIBLE_HEADER.lower(),
+                OPENAI_UPSTREAM_HEADER.lower(),
+            )
         }
 
     def _read_body(self) -> bytes:
@@ -2078,6 +2083,8 @@ class ResponsesToChatProxy(_LocalProxy):
 
 
 OPENAI_CODEX_UPSTREAM = "https://chatgpt.com/backend-api/codex"
+OPENAI_API_UPSTREAM = "https://api.openai.com/v1"
+OPENAI_UPSTREAM_HEADER = "X-Agedum-OpenAI-Upstream"
 
 # The path prefix every failover route lives under. CONSTRAINT (M0 source probe,
 # notes/05-m0-refresh-probe.md): opencode's codex OAuth fetch wrapper rewrites any
@@ -2239,6 +2246,13 @@ class _FailoverHandler(_BaseProxyHandler):
                 {"error": {"message": f"agedum failover proxy: no route for {provider_id!r}"}},
             )
             return
+        if route["openai"]:
+            destinations = self.headers.get_all(OPENAI_UPSTREAM_HEADER, [])
+            if destinations and (len(destinations) != 1 or destinations[0] not in ("api", "codex")):
+                self._send_error(400, "agedum proxy: invalid OpenAI upstream selector")
+                return
+            if destinations == ["api"]:
+                route = {**route, "upstream": OPENAI_API_UPSTREAM}
         raw = self._read_body()
         parsed = _parse_json_dict(raw) if walk else None
         if parsed is None:
