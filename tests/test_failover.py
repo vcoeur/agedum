@@ -34,6 +34,7 @@ from agedum.proxy import (
     _FailoverHandler,
     _retry_after_seconds,
     _sniff_variant,
+    _temporary_retry_body,
     _waitable_reset,
     failover_route_base,
 )
@@ -1713,14 +1714,128 @@ def test_retry_marker_requires_original_temporary_429(retry_after, status, messa
     assert "x-agedum-retry-eligible" not in {key.lower() for key in upstream.requests[0][2]}
 
 
+def subscription_error():
+    return {
+        "error": {
+            "code": "subscription_sharing_usage_limit_exceeded",
+            "type": "invalid_request_error",
+            "message": "Subscription Sharing usage limit reached or use an API key instead.",
+        }
+    }
+
+
+@pytest.mark.parametrize("status", [200, 400, 401, 402, 403, 404, 422, 429, 500])
+@pytest.mark.parametrize("wrapped", [True, False])
+def test_subscription_marker_only_on_selected_http_400_or_429(status, wrapped):
+    document = subscription_error()
+    body = json.dumps(document if wrapped else document["error"])
+    with _StubUpstream("p", [(status, body, {})]) as upstream:
+        spec = _spec(
+            {"p": _route(upstream.base_url, models={"m1": {"id": "m1"}})},
+            {},
+            wait={**_wait(probe_seconds=1), "retryMessages": ["usage limit"]},
+        )
+        with FailoverProxy(spec) as proxy:
+            actual, headers, received = _post(proxy, "/oc/p/responses", _chat_body())
+    assert headers.get("X-Agedum-Retry-Eligible") == ("1" if status in (400, 429) else None)
+    assert received == body.encode()
+    if status in (400, 429):
+        assert actual == 429
+        assert headers["Retry-After"] == "1"
+
+
+@pytest.mark.parametrize(
+    "mode", ["no-wait", "no-phrases", "unselected-phrase", "undetected", "beyond-cap"]
+)
+@pytest.mark.parametrize("status", [400, 429])
+def test_subscription_marker_preserves_all_admission_gates(mode, status):
+    body = json.dumps(subscription_error())
+    with _StubUpstream("p", [(status, body, {"Retry-After": "2"})]) as upstream:
+        wait = {**_wait(probe_seconds=1), "retryMessages": ["usage limit"]}
+        if mode == "no-wait":
+            wait = None
+        elif mode == "no-phrases":
+            wait.pop("retryMessages")
+        elif mode == "unselected-phrase":
+            wait["retryMessages"] = ["temporary unavailable"]
+        elif mode == "beyond-cap":
+            wait["maxWaitHours"] = 1 / 3600
+        spec = _spec({"p": _route(upstream.base_url)}, {}, wait=wait)
+        if mode == "undetected":
+            spec.update(status=[], messages=["unmatched"])
+        with FailoverProxy(spec) as proxy:
+            _, headers, received = _post(proxy, "/oc/p/responses", _chat_body())
+    assert "X-Agedum-Retry-Eligible" not in headers
+    assert received == body.encode()
+
+
+@pytest.mark.parametrize("error_type", [None, "invalid_request_error"])
+@pytest.mark.parametrize("escaped", [False, True])
+def test_subscription_exception_uses_decoded_structured_code(error_type, escaped):
+    document = subscription_error()
+    document["error"]["type"] = error_type
+    body = json.dumps(document)
+    if escaped:
+        body = body.replace("subscription_sharing", r"\u0073ubscription_sharing")
+    assert _temporary_retry_body(body.encode(), ["usage limit"], subscription_only=True)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("type", "authentication_error"),
+        ("type", "billing_error"),
+        ("type", "other_error"),
+        ("code", "other_usage_limit_exceeded"),
+        ("code", "subscription_sharing_usage_limit_exceeded_extra"),
+        ("message", "usage limit: invalid credentials or use an API key instead."),
+        ("message", "usage limit: billing required or use an API key instead."),
+        ("message", "usage limit: insufficient_quota or use an API key instead."),
+        ("message", "usage limit: invalid configuration or use an API key instead."),
+        ("message", None),
+    ],
+)
+def test_subscription_exception_never_clears_other_errors(field, value):
+    body = subscription_error()
+    body["error"][field] = value
+    assert not _temporary_retry_body(json.dumps(body).encode(), ["usage limit"])
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"billing": "required"}, {"message": "invalid credentials"}, {"code": "unknown"}],
+)
+def test_subscription_exception_retains_permanent_or_competing_fields(extra):
+    body = {**subscription_error(), "additional_error": extra}
+    assert not _temporary_retry_body(json.dumps(body).encode(), ["usage limit"])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"usage limit",',
+        '{"code":"unknown","code":"subscription_sharing_usage_limit_exceeded",'
+        '"message":"usage limit"}',
+        '{"code":"subscription_sharing_usage_limit_exceeded","message":"usage limit","x":NaN}',
+        '{"code":"subscription_sharing_usage_limit_exceeded","message":"usage limit",'
+        '"message":"usage limit"}',
+        '"subscription_sharing_usage_limit_exceeded usage limit"',
+    ],
+)
+def test_subscription_exception_rejects_malformed_or_ambiguous_bodies(body):
+    assert not _temporary_retry_body(body.encode(), ["usage limit"])
+
+
 @pytest.mark.parametrize("mode", ["no-wait", "no-phrases", "beyond-cap", "cap-break"])
-def test_retry_marker_is_absent_outside_eligible_exhaustion(mode):
+@pytest.mark.parametrize("body", ["usage limit", json.dumps(subscription_error())])
+def test_retry_marker_is_absent_outside_eligible_exhaustion(mode, body):
+    expected_body = body.encode()
     with _StubUpstream(
         "p",
         [
             (
                 429,
-                "usage limit",
+                body,
                 {
                     "Retry-After": "2",
                     "X-Agedum-Retry-Eligible": "1",
@@ -1739,11 +1854,11 @@ def test_retry_marker_is_absent_outside_eligible_exhaustion(mode):
             wait["maxWaitHours"] = 1 / 3600
         elif mode == "cap-break":
             chains = {"p/m1": ["p/m1@low", "p/m1@high"]}
-            upstream.script.append((429, "usage limit", {"Retry-After": "2"}))
+            upstream.script.append((429, body, {"Retry-After": "2"}))
         spec = _spec({"p": route}, chains, wait=wait, max_walk=1)
         with FailoverProxy(spec) as proxy:
             _, headers, body = _post(proxy, "/oc/p/chat/completions", _chat_body())
-    assert body == b"usage limit"
+    assert body == expected_body
     assert "x-agedum-retry-eligible" not in {key.lower() for key in headers}
 
 

@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import os
 import shutil
@@ -12,10 +13,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from test_proxy_trust import Upstream
 
 from agedum.cli.main import _maybe_failover_proxy
 from agedum.provider import FailoverPlan, build_launch, with_prompt
-from agedum.proxy import _retry_after_seconds
+from agedum.proxy import _retry_after_seconds, responses_to_chat_request, translate_chat_stream
 
 PLUGIN_DIRECTORY = Path(__file__).resolve().parents[1] / "agedum/assets/opencode"
 PLUGIN = PLUGIN_DIRECTORY / "recovery-continuation.js"
@@ -25,6 +27,11 @@ REMINDER = (
     "or as a review result. Reconcile unfinished worker work before retrying it; do not repeat "
     "completed side effects. This instruction does not authorize changing provider/model or "
     "bypassing permissions/review."
+)
+SUBSCRIPTION_CODE = "subscription_sharing_usage_limit_exceeded"
+SUBSCRIPTION_MESSAGE = (
+    "The ChatGPT user has reached their Subscription Sharing usage limit. "
+    "Ask the user to try again after their usage limit resets or use an API key instead."
 )
 
 
@@ -462,6 +469,20 @@ def sse_text(text):
     return sse_frames({"content": text}, "stop")
 
 
+def native_launcher_config():
+    config = launcher_config("http://127.0.0.1:1")
+    settings = config["config"]
+    settings.pop("providerDef")
+    settings["model"] = "openai/gpt-6.1-sol"
+    native = settings["opencodeConfig"]
+    native["provider"] = {"openai": {"options": {"apiKey": "FAKE", "transport": "http"}}}
+    native["policies"][-1]["resource"] = "openai"
+    for agent in native["agents"].values():
+        agent["model"] = "openai/gpt-6.1-sol"
+    config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+    return config
+
+
 def sse_frames(delta, finish):
     frames = [
         {"id": "local", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
@@ -481,10 +502,13 @@ class RecoveryUpstream:
         persistent=False,
         worker_error=False,
         retry_after="1",
+        wall_error=None,
+        continuation_error=False,
     ):
         self.status = status
         self.requests = []
         self.times = []
+        self.agents = []
         self.admitted = set()
         self.frames = []
         fixture = self
@@ -494,9 +518,10 @@ class RecoveryUpstream:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fixture.requests.append(body)
                 fixture.times.append(time.monotonic())
+                chat = responses_to_chat_request(body) if "input" in body else body
                 system = "\n".join(
                     message["content"]
-                    for message in body["messages"]
+                    for message in chat["messages"]
                     if message["role"] == "system"
                 )
                 if "MAIN-ONLY" in system:
@@ -505,25 +530,30 @@ class RecoveryUpstream:
                     agent = "worker"
                 else:
                     agent = "auxiliary"
-                if agent != "auxiliary" and (persistent or agent not in fixture.admitted):
-                    fixture.admitted.add(agent)
+                fixture.agents.append(agent)
+                has_tool_result = any(message["role"] == "tool" for message in chat["messages"])
+                wall_key = (
+                    "main-continuation"
+                    if agent == "main" and has_tool_result and continuation_error
+                    else agent
+                )
+                if agent != "auxiliary" and (persistent or wall_key not in fixture.admitted):
+                    fixture.admitted.add(wall_key)
                     message = "usage limit" if worker_error and agent == "worker" else wall_message
-                    payload = json.dumps({"error": {"message": message}}).encode()
+                    payload = json.dumps({"error": wall_error or {"message": message}}).encode()
                     self.send_response(fixture.status)
                     self.send_header("Content-Type", "application/json")
-                    if fixture.status == 429:
+                    if fixture.status in (400, 429) and retry_after is not None:
                         self.send_header(
                             "Retry-After", retry_after() if callable(retry_after) else retry_after
                         )
                 else:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
-                    if agent == "main" and not any(
-                        message["role"] == "tool" for message in body["messages"]
-                    ):
+                    if agent == "main" and not has_tool_result:
                         tool = next(
                             entry["function"]["name"]
-                            for entry in body.get("tools", [])
+                            for entry in chat.get("tools", [])
                             if entry["function"]["name"] == "subagent"
                         )
                         payload = sse_frames(
@@ -551,6 +581,10 @@ class RecoveryUpstream:
                         )
                     else:
                         payload = sse_text(f"LOCAL-{agent.upper()}-OK")
+                    if "input" in body:
+                        payload = b"".join(
+                            translate_chat_stream(io.BytesIO(payload).read, model=body["model"])
+                        )
                     fixture.frames.append(payload)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -593,7 +627,8 @@ def run_installed(config, root, *, trailing_plugin=None):
             document.setdefault("plugins", []).append(str(trailing_plugin))
             environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(document)
         # The parent owns the ephemeral capability; only this isolated child inherits it.
-        environment[plan.capability_env] = os.environ[plan.capability_env]
+        if plan is not None:
+            environment[plan.capability_env] = os.environ[plan.capability_env]
         return subprocess.run(
             with_prompt(
                 launch,
@@ -849,6 +884,252 @@ def policy_plugin(root, *, veto=None, cancel=False):
 
 def read_policy_events(root):
     return [json.loads(line) for line in (root / "retry-events.jsonl").read_text().splitlines()]
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for installed V2 localhost integration",
+)
+@pytest.mark.parametrize("status", [400, 429])
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("retry_after", [None, "1"])
+def test_installed_v2_subscription_http_main_worker_recovery(
+    tmp_path, monkeypatch, status, native, retry_after
+):
+    error = {
+        "code": SUBSCRIPTION_CODE,
+        "type": "invalid_request_error",
+        "message": SUBSCRIPTION_MESSAGE,
+    }
+    with RecoveryUpstream(
+        status, wall_error=error, retry_after=retry_after, continuation_error=True
+    ) as upstream:
+        url = f"http://127.0.0.1:{upstream.server.server_port}/v1"
+        config = native_launcher_config() if native else launcher_config(url)
+        monkeypatch.setattr("agedum.proxy.OPENAI_API_UPSTREAM", url)
+        monkeypatch.setattr("agedum.provider.OPENAI_CODEX_UPSTREAM", url)
+        config["failover"]["wait"]["retryMessages"] = ["usage limit", "rate limit"]
+        result = run_installed(config, tmp_path, trailing_plugin=policy_plugin(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LOCAL-MAIN-OK" in result.stdout
+    assert "LOCAL-WORKER-OK" in result.stdout
+    for agent, expected in (("main", 4), ("worker", 2)):
+        calls = [
+            (body, stamp)
+            for body, stamp, owner in zip(
+                upstream.requests, upstream.times, upstream.agents, strict=True
+            )
+            if owner == agent
+        ]
+        assert len(calls) == expected
+        assert calls[0][0] == calls[1][0]
+        assert 0.9 <= calls[1][1] - calls[0][1] < 3
+        if agent == "main":
+            assert calls[2][0] == calls[3][0]
+            assert 0.9 <= calls[3][1] - calls[2][1] < 3
+    main = [
+        responses_to_chat_request(body) if "input" in body else body
+        for body, owner in zip(upstream.requests, upstream.agents, strict=True)
+        if owner == "main"
+    ]
+    assert [sum(message["role"] == "tool" for message in body["messages"]) for body in main] == [
+        0,
+        0,
+        1,
+        1,
+    ]
+    assert sum(b'"name": "subagent"' in frame for frame in upstream.frames) == 1
+    events = read_policy_events(tmp_path)
+    assert len(events) == 3
+    assert all(event["error"]["type"] == "provider.chatgpt-limit" for event in events)
+    assert all(event["error"]["status"] == 429 for event in events)
+    assert all(event["decision"] == {"retry": True, "delay": 1000} for event in events)
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for installed V2 localhost integration",
+)
+@pytest.mark.parametrize(
+    "status,mode",
+    [
+        (status, mode)
+        for status in (400, 429)
+        for mode in (
+            "opt-out",
+            "no-phrases",
+            "unselected-phrase",
+            "undetected",
+            "beyond-cap",
+            "billing",
+            "authentication",
+            "other-invalid",
+            "unknown-code",
+            "competing-code",
+        )
+    ]
+    + [(status, "other-status") for status in (401, 402, 403, 422)],
+)
+def test_installed_v2_subscription_http_exclusions(tmp_path, monkeypatch, status, mode):
+    error = {
+        "code": SUBSCRIPTION_CODE,
+        "type": "invalid_request_error",
+        "message": SUBSCRIPTION_MESSAGE,
+    }
+    if mode in ("billing", "authentication", "other-invalid"):
+        error["detail"] = {
+            "billing": "billing required",
+            "authentication": "invalid credentials",
+            "other-invalid": "invalid configuration",
+        }[mode]
+    elif mode == "unknown-code":
+        error["code"] = "other_usage_limit_exceeded"
+    elif mode == "competing-code":
+        error["additional_error"] = {"code": "unknown"}
+    with RecoveryUpstream(status, wall_error=error, persistent=True, retry_after="2") as upstream:
+        url = f"http://127.0.0.1:{upstream.server.server_port}/v1"
+        monkeypatch.setattr("agedum.proxy.OPENAI_API_UPSTREAM", url)
+        monkeypatch.setattr("agedum.provider.OPENAI_CODEX_UPSTREAM", url)
+        config = native_launcher_config()
+        if mode == "opt-out":
+            config.pop("failover")
+            config["config"]["opencodeConfig"]["provider"]["openai"]["options"]["baseURL"] = url
+        elif mode == "no-phrases":
+            config["failover"]["wait"].pop("retryMessages")
+        elif mode == "unselected-phrase":
+            config["failover"]["wait"]["retryMessages"] = ["temporary unavailable"]
+        elif mode == "undetected":
+            config["failover"]["detect"] = {"status": [418], "messages": ["unmatched"]}
+        elif mode == "beyond-cap":
+            config["failover"]["wait"]["maxWaitHours"] = 1 / 3600
+        result = run_installed(config, tmp_path, trailing_plugin=policy_plugin(tmp_path, veto=3))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "LOCAL-MAIN-OK" not in result.stdout
+    assert "LOCAL-WORKER-OK" not in result.stdout
+    assert upstream.agents.count("main") == 1
+    assert "worker" not in upstream.agents
+    events = read_policy_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["decision"] == {"retry": False}
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for installed V2 localhost integration",
+)
+@pytest.mark.parametrize("status", [400, 429])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_installed_v2_subscription_http_veto_and_cancellation(
+    tmp_path, monkeypatch, status, cancel
+):
+    error = {
+        "code": SUBSCRIPTION_CODE,
+        "type": "invalid_request_error",
+        "message": SUBSCRIPTION_MESSAGE,
+    }
+    with RecoveryUpstream(
+        status, wall_error=error, persistent=True, retry_after="5" if cancel else "1"
+    ) as upstream:
+        url = f"http://127.0.0.1:{upstream.server.server_port}/v1"
+        monkeypatch.setattr("agedum.proxy.OPENAI_API_UPSTREAM", url)
+        monkeypatch.setattr("agedum.provider.OPENAI_CODEX_UPSTREAM", url)
+        started = time.monotonic()
+        result = run_installed(
+            native_launcher_config(),
+            tmp_path,
+            trailing_plugin=policy_plugin(tmp_path, veto=None if cancel else 3, cancel=cancel),
+        )
+        events = read_policy_events(tmp_path)
+        if cancel:
+            assert time.monotonic() - started < 5
+            assert len(events) == 1
+            assert events[0]["decision"] == {"retry": True, "delay": 5000}
+            time.sleep(5.1)
+            assert upstream.agents.count("main") == 1
+        else:
+            assert result.returncode == 1
+            assert len(events) == 2
+            assert events[-1]["attempt"] == 3
+            assert all(event["decision"] == {"retry": True, "delay": 1000} for event in events)
+            assert upstream.agents.count("main") == 2
+        assert "worker" not in upstream.agents
+        assert "LOCAL-MAIN-OK" not in result.stdout
+
+
+@pytest.mark.skipif(
+    os.environ.get("AGEDUM_TEST_OPENCODE") != "1" or shutil.which("opencode") is None,
+    reason="Set AGEDUM_TEST_OPENCODE=1 for installed V2 localhost integration",
+)
+@pytest.mark.parametrize("kind", ["response.failed", "error", "http400"])
+def test_installed_v2_subscription_native_transport_current_boundary(tmp_path, monkeypatch, kind):
+    frame = {
+        "type": "response.failed",
+        "response": {
+            "id": "local-failed",
+            "status": "failed",
+            "error": {"code": SUBSCRIPTION_CODE, "message": SUBSCRIPTION_MESSAGE},
+        },
+    }
+    if kind == "error":
+        frame = {"type": "error", "code": SUBSCRIPTION_CODE, "message": SUBSCRIPTION_MESSAGE}
+    payload = f"event: {kind}\ndata: ".encode() + json.dumps(frame).encode() + b"\n\n"
+    status, content_type = 200, "text/event-stream"
+    if kind == "http400":
+        frame = {
+            "error": {
+                "code": SUBSCRIPTION_CODE,
+                "message": SUBSCRIPTION_MESSAGE,
+                "type": "invalid_request_error",
+            }
+        }
+        payload = json.dumps(frame).encode()
+        status, content_type = 400, "application/json"
+    config = {
+        "harness": "opencode",
+        "config": {
+            "model": "openai/gpt-6.1-sol",
+            "standalone": True,
+            "emitTranscript": False,
+            "opencodeConfig": {
+                "snapshots": False,
+                "provider": {"openai": {"options": {"apiKey": "FAKE", "transport": "http"}}},
+                "agents": {"local-main": {"mode": "primary", "model": "openai/gpt-6.1-sol"}},
+                "policies": [
+                    {"action": "provider.use", "resource": "*", "effect": "deny"},
+                    {"action": "provider.use", "resource": "openai", "effect": "allow"},
+                ],
+            },
+        },
+        "failover": {
+            "detect": {"status": [429], "messages": ["quota"]},
+            "vision": {},
+            "wait": {
+                "maxWaitHours": 8,
+                "probeSeconds": 1,
+                "retryMessages": ["usage limit", "rate limit"],
+            },
+        },
+    }
+    with Upstream(status=status, body=payload, content_type=content_type) as upstream:
+        monkeypatch.setattr("agedum.proxy.OPENAI_API_UPSTREAM", upstream.url + "/v1")
+        monkeypatch.setattr("agedum.provider.OPENAI_CODEX_UPSTREAM", upstream.url + "/codex")
+        result = run_installed(config, tmp_path, trailing_plugin=policy_plugin(tmp_path, veto=3))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert SUBSCRIPTION_CODE in result.stdout, result.stdout + result.stderr
+    events = read_policy_events(tmp_path)
+    assert all(event["error"]["type"] == "provider.chatgpt-limit" for event in events)
+    assert all(event["error"]["status"] == status for event in events)
+    if kind == "http400":
+        assert len(events) == 1
+        assert events[0]["decision"] == {"retry": False}
+        assert (
+            "AI.Error.InvalidRequest" in (tmp_path / "data/opencode/log/opencode.log").read_text()
+        )
+    else:
+        assert len(events) == 2
+        assert all(event["decision"]["retry"] is True for event in events)
+        assert events[-1]["attempt"] == 3  # Test hook veto, not a measured native maximum.
+    assert json.loads(events[0]["error"]["response"]["body"]) == frame
 
 
 @pytest.mark.skipif(

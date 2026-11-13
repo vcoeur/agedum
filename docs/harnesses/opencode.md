@@ -328,7 +328,7 @@ validated block into effective `failover.wait`.
 
 #### Explicit temporary-error retries (OpenCode V2)
 
-With `retryMessages`, only a **genuine upstream HTTP 429**, at true chain exhaustion,
+With `retryMessages`, a **genuine upstream HTTP 429**, at true chain exhaustion,
 whose body matches an authored temporary phrase and whose accepted reset fits
 `maxWaitHours`, receives the proxy-owned `X-Agedum-Retry-Eligible: 1` response header.
 Original HTTP 402, auth/configuration statuses, billing, balance, arrears, payment,
@@ -337,11 +337,41 @@ they also contain an allow phrase. This does not change routing or the older wai
 for example, a forged 402-to-429 response is still **not** newly eligible.
 Unmatched errors, cap breaks and beyond-cap resets keep native retry semantics.
 
+One narrow HTTP-admission exception temporarily recognizes qualifying original
+**HTTP 400 and 429** errors with the exact structured code
+`subscription_sharing_usage_limit_exceeded`. The code must be the
+`code` of a JSON error object, either at the root or under `error`. The existing
+`detect.status` / `detect.messages`, `wait`, `retryMessages`, true-exhaustion and reset-cap
+gates still apply; the code does not independently select an undetected response.
+For that exact code on **either original status, 400 or 429**, an absent/null type or
+`invalid_request_error` is accepted, and
+the exact trailing message clause ` or use an API key instead.` is ignored for the
+permanent-text check. The body sent to OpenCode remains byte-verbatim. Other types,
+additional permanent text/fields, competing codes, duplicate keys, malformed JSON and
+non-JSON constants fail closed. A code merely mentioned in prose is not enough.
+Other HTTP 429 errors retain the existing permanent-text guards; neither the type nor
+the API-key-advice exemption applies to them.
+No original 401/402/403/404/422 or other status becomes newly eligible.
+
+OpenCode 2.2.7 normalizes the tested subscription error to `provider.chatgpt-limit`,
+including an underlying `AI.Error.InvalidRequest` HTTP-400 variant. The existing
+correlated marked-429 retry hook accepts the normalized temporary failure without
+relaxing its generic invalid-request/authentication/configuration exclusions. Localhost
+tests exercise original 400/429, native OpenAI and compatible-provider main/worker
+recovery, one-second probe/header delays, unchanged retry bodies and exactly one
+subagent tool-result continuation. This is HTTP-admission recovery, not a promise of
+recovery for every transport carrying that code.
+
 The header is removed from inbound requests and all upstream response paths, including
 successes and transparent forwards, before agedum may add its own. It carries no
 credentials or admission capability, and is never forwarded upstream. The plugin accepts
 it only on the launch proxy's routed provider URL, status 429 and `kind: primary`.
 It does not read successful HTTP/SSE bodies.
+
+In particular, HTTP-200 Responses `response.failed` / `error` frames remain untouched.
+The same exact code is natively retryable in the tested OpenCode 2.2.7 stream cases,
+but uses **OpenCode's native delay**, not agedum's `probeSeconds`. No new SSE eligibility
+source, stream rewrite, successful-stream replay or supervisor is introduced.
 
 The V2 `http.request`/`http.response`/`retry` hooks correlate an immediate response with
 its retry by exact session, agent, provider, model and variant. A marker is consumed once;

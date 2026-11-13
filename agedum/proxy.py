@@ -2595,8 +2595,10 @@ class _FailoverHandler(_BaseProxyHandler):
         eligible = (
             wait is not None
             and reset is not None
-            and status == 429
-            and _temporary_retry_body(body, wait.get("retryMessages", ()))
+            and status in (400, 429)
+            and _temporary_retry_body(
+                body, wait.get("retryMessages", ()), subscription_only=status == 400
+            )
         )
         if wait is not None and reset is not None:
             with self._pins_lock:
@@ -2735,9 +2737,51 @@ def _join(upstream: SplitResult, rest: str) -> str:
     return upstream.path.rstrip("/") + "/" + rest
 
 
-def _temporary_retry_body(body: bytes, messages: list[str] | tuple[str, ...]) -> bool:
+def _subscription_retry_text(body: bytes) -> str | None:
+    """Remove only the known subscription error's type and API-key alternative advice."""
+    code = "subscription_sharing_usage_limit_exceeded"
+
+    def unique_fields(pairs):
+        fields = dict(pairs)
+        if len(fields) != len(pairs) or ("code" in fields and fields["code"] != code):
+            raise ValueError("ambiguous error code")
+        return fields
+
+    def invalid_constant(value):
+        raise ValueError("non-JSON constant")
+
+    try:
+        document = json.loads(
+            body, object_pairs_hook=unique_fields, parse_constant=invalid_constant
+        )
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    error = document.get("error", document)
+    if not isinstance(error, dict) or error.get("code") != code:
+        return None
+    if error.get("type") not in (None, "invalid_request_error"):
+        return None
+    message = error.get("message")
+    if not isinstance(message, str):
+        return None
+    error.pop("type", None)
+    advice = " or use an API key instead."
+    error["message"] = message.removesuffix(advice)
+    return json.dumps(document).lower()
+
+
+def _temporary_retry_body(
+    body: bytes, messages: list[str] | tuple[str, ...], *, subscription_only: bool = False
+) -> bool:
     """Explicit temporary phrases never override billing, authentication or config errors."""
     lowered = body.decode("utf-8", "replace").lower()
+    subscription_text = _subscription_retry_text(body)
+    if subscription_text is not None:
+        lowered = subscription_text
+    elif subscription_only or "subscription_sharing_usage_limit_exceeded" in lowered:
+        return False
     permanent = (
         "billing",
         "balance",
