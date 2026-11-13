@@ -69,8 +69,18 @@ match); top-level skills keep their declared name.
     keep the existing V1 transcript plugin separate and unchanged. Native `plugins`
      and compatible `plugin` entries are both preserved. The reminder itself never retries.
      Optional `wait.retryMessages` (non-empty list of non-blank temporary phrases) enables
-     V2 request/response/retry hooks only for proxy-marked original HTTP 429s at true
-     exhaustion within the reset cap. Billing/balance/arrears/auth/config errors and original
+      V2 request/response/retry hooks for proxy-marked original HTTP 429s at true
+      exhaustion within the reset cap. Qualifying exact structured
+      `subscription_sharing_usage_limit_exceeded` errors are temporarily recognized on
+      original HTTP 400 **and 429**, under the same detection/phrase/wait gates. For
+      that exact code on either status only, its known `invalid_request_error` type
+      and exact trailing ` or use an API key instead.` message clause are exempted
+      from text denial; other permanent fields, unknown types/codes and
+      malformed/ambiguous JSON fail closed. Other HTTP 429 errors retain the existing
+      permanent-text guards without those exemptions.
+      OpenCode 2.2.7 normalizes this error to `provider.chatgpt-limit`; the existing
+      hook needs no new eligibility source. HTTP-200/SSE errors retain native retry
+      semantics and delays. Billing/balance/arrears/auth/config errors and original
      402s remain unmarked even when an allow phrase also matches. The hook uses observed
      Retry-After (delta seconds or IMF-fixdate/RFC 850/asctime HTTP dates, always UTC)
      for both quota and already-retryable rate limits, preserving native cap and
