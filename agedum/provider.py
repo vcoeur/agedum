@@ -502,6 +502,7 @@ class FailoverPlan(NamedTuple):
     wait_enabled: bool = False
     retry_messages: tuple[str, ...] = ()
     max_wait_hours: float | None = None
+    probe_seconds: int | None = None
 
 
 def failover_spec(config: dict, base_env: dict[str, str]) -> tuple[dict | None, list[str]]:
@@ -3312,6 +3313,7 @@ def _opencode_env(
                             "routes": list(failover.routes),
                             "retryMessages": list(failover.retry_messages),
                             "maxWaitHours": failover.max_wait_hours,
+                            "probeSeconds": failover.probe_seconds,
                         },
                     }
                 )

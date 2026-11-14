@@ -22,6 +22,28 @@ function httpDateMilliseconds(value) {
     date.getUTCMinutes() === minute && date.getUTCSeconds() === second ? date.getTime() : NaN;
 }
 
+function subscriptionStreamText(error) {
+  if (error.type !== "provider.chatgpt-limit" || typeof error.response?.body !== "string") return;
+  const body = error.response.body;
+  let document;
+  try { document = JSON.parse(body); } catch { return; }
+  const nested = document?.error;
+  if (!document || document.type !== "error" || !nested || Array.isArray(nested) ||
+      Object.keys(document).some(key => !["type", "sequence_number", "error"].includes(key)) ||
+      Object.keys(nested).some(key => !["message", "type", "param", "code"].includes(key)) ||
+      (document.sequence_number !== undefined && !Number.isSafeInteger(document.sequence_number)) ||
+      (nested.param !== undefined && nested.param !== null) ||
+      nested.type !== "invalid_request_error" ||
+      nested.code !== "subscription_sharing_usage_limit_exceeded" ||
+      typeof nested.message !== "string") return;
+  // Only these two flat objects are accepted; count lexical keys to reject duplicates,
+  // including escaped spellings, without parsing or consuming the successful stream.
+  const tokens = [...body.matchAll(/"(?:[^"\\]|\\.)*"/g)];
+  const keys = tokens.filter(token => /^\s*:/.test(body.slice(token.index + token[0].length)));
+  if (keys.length !== Object.keys(document).length + Object.keys(nested).length) return;
+  return nested.message.replace(/ or use an API key instead\.$/, "").toLowerCase();
+}
+
 export default {
   id: "agedum.recovery-continuation",
   async setup(ctx) {
@@ -60,7 +82,14 @@ export default {
       const key = keyOf(event);
       if (!key || blocked.has(key)) return;
       // Retry has no request ID/kind. Ambiguous overlap disables overrides for this key.
-      if (active.has(key) || pending.has(key)) { invalidate(key); return; }
+      if (active.has(key)) { invalidate(key); return; }
+      const prior = pending.get(key);
+      pending.delete(key);
+      // A superseded stream marker is dropped, not poisoned: success is
+      // indistinguishable from an error stream at header time, so every routed
+      // openai primary 200 sets one, and the retry pairing still requires the
+      // exact nested code on status 200.
+      if (prior && prior.status !== 200) { invalidate(key); return; }
       active.set(key, {kind: event.kind, routed: routed(event)});
     });
     await ctx.session.hook("http.response", event => {
@@ -69,15 +98,20 @@ export default {
       active.delete(key);
       if (!key || blocked.has(key) || !request) return;
       if (request.kind !== event.kind) { invalidate(key); return; }
-      if (!request.routed || !routed(event) || event.kind !== "primary" ||
-          event.response.status !== 429 ||
-          event.response.headers.get("x-agedum-retry-eligible") !== "1") return;
+      if (!request.routed || !routed(event) || event.kind !== "primary") return;
+      const status = event.response.status;
+      const stream = status === 200 && event.model.providerID === "openai";
+      if (!stream && (status !== 429 ||
+          event.response.headers.get("x-agedum-retry-eligible") !== "1")) return;
       const hint = event.response.headers.get("retry-after");
       let seconds;
       if (hint !== null && /^\s*\d+(?:\.\d+)?\s*$/.test(hint)) seconds = Number(hint);
       else if (hint !== null) seconds = Math.max(0, (httpDateMilliseconds(hint) - Date.now()) / 1000);
+      if (stream && !Number.isFinite(seconds)) seconds = options.probeSeconds;
+      // A JSON null (absent configured probe) must fail closed, not become delay 0.
+      if (stream && !Number.isFinite(seconds)) return;
       if (!Number.isFinite(seconds * 1000) || seconds < 0 || seconds > cap) return;
-      pending.set(key, {delay: seconds * 1000, observed: Date.now()});
+      pending.set(key, {status, delay: seconds * 1000, observed: Date.now()});
     });
     await ctx.session.hook("retry", event => {
       const key = keyOf(event), marker = pending.get(key);
@@ -85,8 +119,10 @@ export default {
       // A transport failure without a response also makes later correlation unsafe.
       if (active.has(key)) { invalidate(key); return; }
       if (!marker || blocked.has(key) || Date.now() - marker.observed > 30_000 ||
-          event.error.status !== 429) return;
-      const message = event.error.message.toLowerCase();
+          event.error.status !== marker.status) return;
+      const streamText = marker.status === 200 ? subscriptionStreamText(event.error) : undefined;
+      if (marker.status === 200 && streamText === undefined) return;
+      const message = `${event.error.message.toLowerCase()} ${streamText || ""}`;
       if (/auth|billing|config|invalid|permission|forbidden/.test(event.error.type || "")) return;
       if (/billing|balance|arrears|payment|credit|insufficient[_ ]quota|insufficient funds|auth|api[_ ]key|invalid|credential|expired|access denied|not found|unsupported|config|permission|forbidden|account suspended/.test(message) ||
           !phrases.some(phrase => message.includes(phrase))) return;
