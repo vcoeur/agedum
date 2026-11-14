@@ -35,6 +35,172 @@ SUBSCRIPTION_MESSAGE = (
 )
 
 
+def subscription_stream_event():
+    return {
+        "type": "error",
+        "sequence_number": 3,
+        "error": {
+            "message": SUBSCRIPTION_MESSAGE,
+            "type": "invalid_request_error",
+            "param": None,
+            "code": SUBSCRIPTION_CODE,
+        },
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node exercises the JS plugin")
+def test_exact_nested_subscription_stream_error_uses_configured_probe():
+    script = r"""
+      import assert from 'node:assert/strict';
+      const plugin=(await import(process.argv[1])).default, hooks=new Map();
+      await plugin.setup({options:{baseURL:'http://127.0.0.1:1234',routes:['openai'],
+        maxWaitHours:8,probeSeconds:7,retryMessages:['usage limit']},
+        session:{hook:async(name,callback)=>hooks.set(name,callback)}});
+      const base={sessionID:'local',agent:'worker',
+        model:{providerID:'openai',id:'m',variant:'high'},
+        kind:'primary',request:new Request('http://127.0.0.1:1234/oc/openai/responses')};
+      const response=new Response('unread successful stream',{status:200});
+      await hooks.get('http.request')(base);
+      await hooks.get('http.response')({...base,response});
+      const event={...base,error:{type:'provider.chatgpt-limit',status:200,
+        message:'ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.',
+        response:{body:process.argv[2]}},attempt:2,decision:{retry:false}};
+      await hooks.get('retry')(event);
+      assert.deepEqual(event.decision,{retry:true,delay:7000});
+      assert.equal(response.bodyUsed,false);
+    """
+    subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            PLUGIN.as_uri(),
+            json.dumps(subscription_stream_event()),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node exercises the JS plugin")
+def test_stream_marker_from_successful_response_does_not_disable_key():
+    script = r"""
+      import assert from 'node:assert/strict';
+      const plugin=(await import(process.argv[1])).default, hooks=new Map();
+      await plugin.setup({options:{baseURL:'http://127.0.0.1:1234',routes:['openai'],
+        maxWaitHours:8,probeSeconds:7,retryMessages:['usage limit']},
+        session:{hook:async(name,callback)=>hooks.set(name,callback)}});
+      const base={sessionID:'local',agent:'worker',
+        model:{providerID:'openai',id:'m',variant:'high'},
+        kind:'primary',request:new Request('http://127.0.0.1:1234/oc/openai/responses')};
+      const retry=(body,decision={retry:false})=>({...base,
+        error:{type:'provider.chatgpt-limit',status:200,
+          message:'ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.',
+          response:{body}},attempt:2,decision});
+      // A successful 200 sets a stream marker too; the next request must drop it
+      // without disabling the key, so a later wall stays overridable.
+      const success=new Response('unread successful stream',{status:200});
+      await hooks.get('http.request')(base);
+      await hooks.get('http.response')({...base,response:success});
+      await hooks.get('http.request')(base);
+      const errored=new Response('unread error stream',{status:200});
+      await hooks.get('http.response')({...base,response:errored});
+      const event=retry(process.argv[2]);
+      await hooks.get('retry')(event);
+      assert.deepEqual(event.decision,{retry:true,delay:7000});
+      assert.equal(success.bodyUsed,false);
+      assert.equal(errored.bodyUsed,false);
+      // A marker dropped by an intervening request cannot pair with a later retry.
+      await hooks.get('http.request')(base);
+      await hooks.get('http.response')({...base,
+        response:new Response('unread stream',{status:200})});
+      await hooks.get('http.request')(base);
+      const unpaired=retry(process.argv[2]);
+      await hooks.get('retry')(unpaired);
+      assert.deepEqual(unpaired.decision,{retry:false});
+    """
+    subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            PLUGIN.as_uri(),
+            json.dumps(subscription_stream_event()),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node exercises the JS plugin")
+def test_stream_retry_eligibility_is_exact_and_fail_closed():
+    script = r"""
+      import assert from 'node:assert/strict';
+      const plugin=(await import(process.argv[1])).default, hooks=new Map();
+      await plugin.setup({options:{baseURL:'http://127.0.0.1:1234',routes:['openai'],
+        maxWaitHours:8,probeSeconds:7,retryMessages:['usage limit']},
+        session:{hook:async(name,callback)=>hooks.set(name,callback)}});
+      const base={sessionID:'local',agent:'worker',
+        model:{providerID:'openai',id:'m',variant:'high'},
+        kind:'primary',request:new Request('http://127.0.0.1:1234/oc/openai/responses')};
+      const good=process.argv[2];
+      const observe=async(overrides={})=>{
+        await hooks.get('http.request')({...base,...overrides});
+        await hooks.get('http.response')({...base,...overrides,
+          response:new Response('unread stream',{status:200})});
+      };
+      const retry=(body,overrides={},decision={retry:false})=>({...base,...overrides,
+        error:{type:'provider.chatgpt-limit',status:200,
+          message:'ChatGPT usage limit reached. Check ChatGPT Settings → Usage for details.',
+          response:{body}},attempt:2,decision});
+      async function rejected(body,overrides={},decision={retry:false}) {
+        await observe(overrides);
+        const event=retry(body,overrides,decision);
+        const before=structuredClone(event.decision);
+        await hooks.get('retry')(event);
+        assert.deepEqual(event.decision,before,body.slice(0,80));
+      }
+      await observe();
+      const accepted=retry(good);
+      await hooks.get('retry')(accepted);
+      assert.deepEqual(accepted.decision,{retry:true,delay:7000});
+      const duplicate=good.replace('"code":"subscription_sharing_usage_limit_exceeded"',
+        '"code":"subscription_sharing_usage_limit_exceeded","code":"other"');
+      for (const body of [
+        good.replace('subscription_sharing_usage_limit_exceeded','other_usage_limit_exceeded'),
+        good.replace('"code":','"detail":"extra","code":'),
+        good.replace('"param":null','"param":"model"'),
+        good.replace('"sequence_number":3','"sequence_number":"3"'),
+        duplicate,
+        good.replace('Ask the user to try again','Billing required; ask the user to try again'),
+      ]) await rejected(body);
+      // An untracked provider sets no marker, so its stream error stays native.
+      await rejected(good,{model:{providerID:'fake',id:'m'}});
+      // A JSON null probe must fail closed, not degrade to a zero-delay override.
+      const nullHooks=new Map();
+      await plugin.setup({options:{baseURL:'http://127.0.0.1:1234',routes:['openai'],
+        maxWaitHours:8,probeSeconds:null,retryMessages:['usage limit']},
+        session:{hook:async(name,callback)=>nullHooks.set(name,callback)}});
+      await nullHooks.get('http.request')(base);
+      await nullHooks.get('http.response')({...base,
+        response:new Response('unread stream',{status:200})});
+      const nullEvent=retry(good);
+      await nullHooks.get('retry')(nullEvent);
+      assert.deepEqual(nullEvent.decision,{retry:false});
+    """
+    subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            PLUGIN.as_uri(),
+            json.dumps(subscription_stream_event(), separators=(",", ":")),
+        ],
+        check=True,
+    )
+
+
 @pytest.mark.parametrize("emit_transcript", [True, False])
 @pytest.mark.parametrize("chained", [True, False])
 def test_wait_plan_injects_v2_plugin_without_mutating_config(emit_transcript, chained):
@@ -144,6 +310,7 @@ def test_retry_plugin_options_are_proxy_scoped_and_replace_only_owned_entries():
                     "routes": list(plan.routes),
                     "retryMessages": ["usage limit", "rate limit"],
                     "maxWaitHours": 8,
+                    "probeSeconds": 1,
                 },
             },
             {

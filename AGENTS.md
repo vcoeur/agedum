@@ -79,7 +79,17 @@ match); top-level skills keep their declared name.
       malformed/ambiguous JSON fail closed. Other HTTP 429 errors retain the existing
       permanent-text guards without those exemptions.
       OpenCode 2.2.7 normalizes this error to `provider.chatgpt-limit`; the existing
-      hook needs no new eligibility source. HTTP-200/SSE errors retain native retry
+      hook needs no new eligibility source. For that exact code one narrow stream
+      path is also recognized: a routed primary HTTP 200 (openai) whose native-parsed
+      error carries the exact one-event nested shape — flat top-level
+      `{"type":"error","sequence_number"?,"error":{message,type,param,code}}` objects
+      only; lexically counted duplicate keys, unknown keys, other types/codes and
+      malformed JSON fail closed. It correlates like a marked 429 under the same
+      phrase/veto gates, with the wait delay from an observed Retry-After else
+      `probeSeconds` within `maxWaitHours` (a null `probeSeconds` fails closed).
+      Every routed openai primary 200 sets such a marker because success is
+      indistinguishable from an error stream at header time; a superseded marker is
+      dropped without disabling the key. Other HTTP-200/SSE errors retain native retry
       semantics and delays. Billing/balance/arrears/auth/config errors and original
      402s remain unmarked even when an allow phrase also matches. The hook uses observed
      Retry-After (delta seconds or IMF-fixdate/RFC 850/asctime HTTP dates, always UTC)

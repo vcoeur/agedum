@@ -356,7 +356,9 @@ No original 401/402/403/404/422 or other status becomes newly eligible.
 OpenCode 2.2.7 normalizes the tested subscription error to `provider.chatgpt-limit`,
 including an underlying `AI.Error.InvalidRequest` HTTP-400 variant. The existing
 correlated marked-429 retry hook accepts the normalized temporary failure without
-relaxing its generic invalid-request/authentication/configuration exclusions. Localhost
+relaxing its generic invalid-request/authentication/configuration exclusions; the same
+hook also recognizes the exact code on a routed primary HTTP 200 stream, as detailed
+below. Localhost
 tests exercise original 400/429, native OpenAI and compatible-provider main/worker
 recovery, one-second probe/header delays, unchanged retry bodies and exactly one
 subagent tool-result continuation. This is HTTP-admission recovery, not a promise of
@@ -368,18 +370,36 @@ credentials or admission capability, and is never forwarded upstream. The plugin
 it only on the launch proxy's routed provider URL, status 429 and `kind: primary`.
 It does not read successful HTTP/SSE bodies.
 
-In particular, HTTP-200 Responses `response.failed` / `error` frames remain untouched.
-The same exact code is natively retryable in the tested OpenCode 2.2.7 stream cases,
-but uses **OpenCode's native delay**, not agedum's `probeSeconds`. No new SSE eligibility
-source, stream rewrite, successful-stream replay or supervisor is introduced.
+In particular, other HTTP-200 Responses `response.failed` / `error` frames remain
+untouched and use **OpenCode's native delay**. One narrow stream exception covers the
+recorded failure: the exact structured code `subscription_sharing_usage_limit_exceeded`,
+which OpenCode 2.2.7 normalizes to `provider.chatgpt-limit` with `status: 200`, is
+recognized on a routed primary HTTP 200 (openai) whose parsed error body is exactly the
+one-event shape — top-level `type: "error"`, an optional safe-integer
+`sequence_number`, and a flat nested `error` object carrying only `message`,
+`type: invalid_request_error`, `param` (null or absent) and the exact `code`. Lexically
+counted duplicate keys, unknown keys, other types/codes and malformed JSON fail closed.
+Such a stream error correlates like a marked 429 and carries the same `retryMessages`
+phrase and permanent-text/billing/auth veto guards; the veto sees the parsed message
+text, with the exact advisory clause ` or use an API key instead.` ignored as on the
+HTTP path. The wait delay is the response's observed `Retry-After` when it parses and
+fits `maxWaitHours`, else the configured `probeSeconds`; an absent or non-finite
+`probeSeconds` fails closed. No new SSE eligibility source, stream rewrite,
+successful-stream inspection, replay or supervisor is introduced: the plugin reads only
+response metadata and the error object OpenCode already parsed — the stream body is
+never read (`response.bodyUsed` stays false).
 
 The V2 `http.request`/`http.response`/`retry` hooks correlate an immediate response with
 its retry by exact session, agent, provider, model and variant. A marker is consumed once;
 it expires after 30 seconds and any intervening response clears it. Overlapping same-key
-requests, a new request before consumption, or a transport failure without a response
-disable overrides for that key for the rest of the launch: without a retry request ID,
-ambiguous correlation must fail closed. Auxiliary title/compaction/generate flows never
-create markers. Independent sessions/models are unaffected.
+requests, a new request before consuming a marked-429 response, or a transport failure
+without a response disable overrides for that key for the rest of the launch: without a
+retry request ID, ambiguous correlation must fail closed. A superseded HTTP-200 stream
+marker is instead dropped without disabling the key — every routed openai primary 200
+sets one, because success is indistinguishable from an error stream at header time, and
+the retry pairing still requires the exact nested code on status 200. Auxiliary
+title/compaction/generate flows never create markers. Independent sessions/models are
+unaffected.
 
 For a matching temporary failure, the hook sets `retry: true` and the delay from the
 observed, accepted `Retry-After`, bounded by `maxWaitHours`. The plugin accepts delta
